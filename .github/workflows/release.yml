@@ -150,7 +150,12 @@ jobs:
             args: --bundles app,dmg
             target: x86_64-apple-darwin
           - platform: ubuntu-22.04
-            args: --bundles deb,appimage
+            # 只出 deb，不出 appimage。
+            # 原因：AppImage 打包在未配置 TAURI_SIGNING_PRIVATE_KEY 时会因
+            # "Unable to find a bundled project for the updater" 整步失败，
+            # 而 x86_64 的 AppImage 对麒麟目标机无用（架构不对）。
+            # 麒麟要的是同架构的 deb，由下面 ubuntu-24.04-arm 出。
+            args: --bundles deb
           # 麒麟 / 飞腾 / 鲲鹏 aarch64：原生 ARM runner（Cobalt 100 / Armv9-A），
           # 非 QEMU 模拟，因此无需 --target；host triple 即
           # aarch64-unknown-linux-gnu，产物与麒麟机架构一致。
@@ -220,8 +225,15 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 签名私钥为**可选**。仓库未配置 TAURI_SIGNING_PRIVATE_KEY 时，
+          # tauri-action 会因「需要签名但拿不到密钥」而让整步失败
+          #（AppImage 上表现为 "Unable to find a bundled project for the updater"，
+          #   nsis 上表现为缺少签名）。
+          # 未配置时自动降级为不带 updater 产物构建，装机不受影响
+          #（自动更新本来就需要用户在应用内联网检查，离线场景用不上）。
+          # 已配置则正常产出 .sig，自动更新照常工作。
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # 放开 Node 堆上限：tauri build 的 beforeBuildCommand 会跑 `vite build`，
           # 而 macOS runner 上 Node 的默认 old-space 上限只有 ~2GB。自 v1.50.0 引入
           # Excalidraw（白板）后前端涨到 9600+ 模块，terser 压缩阶段堆峰值越过 2GB，
