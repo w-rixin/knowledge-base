@@ -26,6 +26,15 @@ on:
     tags:
       - 'v*.*.*'
       # 桌面三平台。移动端走 `mobile-v*.*.*` tag + android.yml，前缀不同不会撞到这里。
+  # 手动触发：绕过 git push（某些网络环境 git 走代理会被 502/TLS 中断），
+  # 直接从网页或 API 起构建。tag 不存在时用 GITHUB_REF_NAME 兜底不出 tag 也能跑。
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（留空则用时间戳，如 v20261017-manual）'
+        required: false
+        default: ''
+        type: string
 
 jobs:
   # ===========================================================================
@@ -48,11 +57,32 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
+      # 归一化后的 tag，job 2 创建/上传产物时要用（手动触发时不能直接用 ref_name）
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
+      - name: Resolve tag
+        # tag 触发时 ref_name 就是 v1.65.0-kylin；workflow_dispatch 手动触发时
+        # ref_name 是分支名（master），直接当 tag 用会让 gh release create 建出
+        # 一个叫 "master" 的 Release。统一归一成以版本号组成的 tag。
+        id: tag
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [ "$REF_NAME" != "master" ] && [ "$REF_NAME" != "main" ]; then
+            TAG="$REF_NAME"
+          elif [ -n "$VERSION" ]; then
+            TAG="v${VERSION}-kylin"
+          else
+            TAG="v$(date +%Y%m%d%H%M)-manual"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "使用标签：$TAG"
+
       - name: Create draft release if missing
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.tag.outputs.tag }}
           REPO: ${{ github.repository }}
         run: |
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
@@ -203,8 +233,8 @@ jobs:
           # Linux / Windows runner 默认上限更高才侥幸通过。显式设 8GB 覆盖全平台。
           NODE_OPTIONS: '--max-old-space-size=8192'
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: '知识库 ${{ github.ref_name }}'
+          tagName: ${{ needs.prepare-release.outputs.tag }}
+          releaseName: '知识库 ${{ needs.prepare-release.outputs.tag }}'
           releaseBody: 'See the assets to download and install this version.'
           releaseDraft: true
           prerelease: false
