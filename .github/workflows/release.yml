@@ -99,6 +99,10 @@ jobs:
             INCLUDE="$INCLUDE,$LINUX_ARM"
           fi
 
+          # 调试：把最终矩阵打到日志里。GitHub 解析 fromJSON 失败时，
+          # 只能靠这行确认拼出来的 JSON 到底长什么样，别删。
+          echo "构建矩阵：$INCLUDE"
+
           echo "matrix={\"include\":$INCLUDE}" >> "$GITHUB_OUTPUT"
 
   # ===========================================================================
