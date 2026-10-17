@@ -1,0 +1,199 @@
+# =============================================================================
+# Tauri 跨平台自动构建 & 发布工作流
+# =============================================================================
+#
+# 触发方式：推送 v*.*.* 格式的 Git Tag
+#   git tag v1.0.0
+#   git push <remote> v1.0.0
+#
+# 前提条件（GitHub Secrets）：
+#   - TAURI_SIGNING_PRIVATE_KEY       签名私钥内容
+#   - TAURI_SIGNING_PRIVATE_KEY_PASSWORD  私钥密码（通常为空）
+#
+# 使用前须修改（搜索 TODO 标记）：
+#   1. releaseName: 修改为你的应用名称
+#   2. 构建矩阵: 根据 .claude/release-config.json 的 platforms 配置
+#      裁剪不需要的平台（删除对应 matrix include 条目）
+#
+# CI 只负责构建和上传到 GitHub Release（草稿）。
+# 产物下载和推送到 release 仓库由本地 /release 命令完成。
+# =============================================================================
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+      # 桌面三平台。移动端走 `mobile-v*.*.*` tag + android.yml，前缀不同不会撞到这里。
+
+jobs:
+  # ===========================================================================
+  # Job 0: 预创建 draft release + 计算构建矩阵
+  #
+  # 1) 预创建 draft release：杜绝 4 个 build job 并发 create release 时撞
+  #    GitHub API race（"Server Error" / "Error updating policy"）。让所有
+  #    build job needs 它，启动时 release 已存在，tauri-action 直接复用并上传。
+  #
+  # 2) 动态矩阵：按仓库变量 RELEASE_WINDOWS 决定是否让 CI 构建 Windows。
+  #      未设 / build → 含 Windows（默认＝现状，向后兼容）
+  #      skip         → 不含 Windows（Windows 安装包改由发版机本地构建提供，
+  #                     CI 不起 windows runner，省 ~12 分钟 Actions 额度）
+  #    设置方式：仓库 Settings → Secrets and variables → Actions → Variables，
+  #    或 `gh variable set RELEASE_WINDOWS --repo <owner/repo> -b skip`。
+  # ===========================================================================
+  prepare-release:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Create draft release if missing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, skip"
+          else
+            gh release create "$TAG" \
+              --repo "$REPO" \
+              --draft \
+              --title "知识库 $TAG" \
+              --notes "See the assets to download and install this version."
+            echo "Created draft release $TAG"
+          fi
+
+      - name: Compute build matrix
+        id: set-matrix
+        shell: bash
+        env:
+          RELEASE_WINDOWS: ${{ vars.RELEASE_WINDOWS }}
+          # 国产麒麟 aarch64 产物。默认 build（与其它平台一起构建）；
+          # 设 skip 可省掉 ARM runner 配额（ARM runner 排队通常比 x64 久）。
+          # 麒麟目标机常处内网/离线，故这条产物走 GitHub Release 下载后 U 盘摆渡。
+          RELEASE_KYLIN_ARM: ${{ vars.RELEASE_KYLIN_ARM }}
+        run: |
+          WIN='{"platform":"windows-latest","args":"--bundles nsis"}'
+          MAC_ARM='{"platform":"macos-latest","args":"--bundles app,dmg","target":"aarch64-apple-darwin"}'
+          MAC_X64='{"platform":"macos-latest","args":"--bundles app,dmg","target":"x86_64-apple-darwin"}'
+          LINUX='{"platform":"ubuntu-22.04","args":"--bundles deb,appimage"}'
+          # 麒麟 / 飞腾 / 鲲鹏 aarch64：原生 ARM runner（Cobalt 100），非交叉编译，
+          # 因此无需 --target，产物 triple 即 aarch64-unknown-linux-gnu，与麒麟机一致。
+          LINUX_ARM='{"platform":"ubuntu-24.04-arm","args":"--bundles deb"}'
+
+          INCLUDE="[$WIN,$MAC_ARM,$MAC_X64,$LINUX]"
+          if [ "$RELEASE_WINDOWS" = "skip" ]; then
+            echo "跳过 Windows CI 构建（RELEASE_WINDOWS=skip，Windows 由发版机本地构建提供）"
+            INCLUDE="[$MAC_ARM,$MAC_X64,$LINUX]"
+          else
+            echo "含 Windows CI 构建（RELEASE_WINDOWS='${RELEASE_WINDOWS:-unset}'）"
+          fi
+
+          if [ "$RELEASE_KYLIN_ARM" = "skip" ]; then
+            echo "跳过麒麟 aarch64 构建（RELEASE_KYLIN_ARM=skip）"
+          else
+            echo "含麒麟 aarch64 构建（RELEASE_KYLIN_ARM='${RELEASE_KYLIN_ARM:-unset}'）"
+            INCLUDE="$INCLUDE,$LINUX_ARM"
+          fi
+
+          echo "matrix={\"include\":$INCLUDE}" >> "$GITHUB_OUTPUT"
+
+  # ===========================================================================
+  # Job 1: 跨平台构建
+  # ===========================================================================
+  release:
+    needs: prepare-release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      # 矩阵由 prepare-release 动态生成（受仓库变量 RELEASE_WINDOWS 控制是否含 Windows）
+      matrix: ${{ fromJSON(needs.prepare-release.outputs.matrix) }}
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Linux system dependencies
+        # 匹配 x86_64（ubuntu-22.04）与 aarch64（ubuntu-24.04-arm）两条 Linux 矩阵。
+        # ARM runner 是原生 aarch64（非 QEMU 模拟），包名与 x64 一致，无需区分架构。
+        if: startsWith(matrix.platform, 'ubuntu-')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential \
+            file \
+            patchelf
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      # ─── kb-mcp sidecar：MCP server binary，由 Tauri externalBin 带进安装包 ───
+      # 必须在 tauri build 之前完成，否则 bundle 阶段找不到 binaries/kb-mcp-<triple>(.exe)
+      # macOS 矩阵会传 --target，让 sidecar binary 与 tauri build 同 triple 对齐
+      - name: Build kb-mcp sidecar
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.target }}" ]; then
+            pnpm build:mcp --target ${{ matrix.target }}
+          else
+            pnpm build:mcp
+          fi
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+          # 放开 Node 堆上限：tauri build 的 beforeBuildCommand 会跑 `vite build`，
+          # 而 macOS runner 上 Node 的默认 old-space 上限只有 ~2GB。自 v1.50.0 引入
+          # Excalidraw（白板）后前端涨到 9600+ 模块，terser 压缩阶段堆峰值越过 2GB，
+          # 两个 mac job 齐刷刷 "FATAL ERROR: Reached heap limit"（exit 134）而
+          # Linux / Windows runner 默认上限更高才侥幸通过。显式设 8GB 覆盖全平台。
+          NODE_OPTIONS: '--max-old-space-size=8192'
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: '知识库 ${{ github.ref_name }}'
+          releaseBody: 'See the assets to download and install this version.'
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }} ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+
+  # ===========================================================================
+  # 注意：CI 只负责构建和上传到 GitHub Release（草稿）。
+  # 产物下载、复制到 release 仓库、生成 update.json、推送到 Gitee/GitHub
+  # 均由本地 /release 命令完成（避免 CI 跨国推送 Gitee 超时问题）。
+  # ===========================================================================

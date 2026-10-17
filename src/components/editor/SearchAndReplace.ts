@@ -1,0 +1,417 @@
+/**
+ * 编辑器查找替换 —— 轻量自实现 Tiptap 扩展（Tiptap 3 兼容）
+ *
+ * 设计：
+ * - ProseMirror Plugin 维护 query/options/results/current；DecorationSet 高亮所有命中
+ *   + 当前命中加一层"active"
+ * - 通过 commands API 暴露 setSearchTerm / gotoNext / gotoPrev / replaceCurrent /
+ *   replaceAll / clearSearch；UI 浮条直接 editor.commands.xxx 触发
+ * - 文档变更时重算结果（replace 后下一个匹配位置自然 shift）
+ * - 多关键词：输入框以空格分割多 term，每个 term 独立匹配 + 按文档位置合并 + 不同色高亮
+ *   单 term 时行为与旧版完全一致
+ * - 不支持正则，故意保持简单——99% 写作场景普通文本足够
+ *
+ * CSS 类名（在 global.css 已定义）：
+ *   .kb-search-match：所有命中（背景色低亮）
+ *   .kb-search-match-{0..5}：多词模式下不同 term 的配色
+ *   .kb-search-active：当前命中（更醒目）
+ */
+import { Extension, type CommandProps } from "@tiptap/core";
+import { Plugin, PluginKey, type EditorState } from "@tiptap/pm/state";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+
+export interface SearchOptions {
+  caseSensitive: boolean;
+  wholeWord: boolean;
+}
+
+/** 单个命中：from/to + 它命中的是第几个 term（与 terms[] 对齐） */
+interface Match {
+  from: number;
+  to: number;
+  termIdx: number;
+}
+
+interface SearchPluginState {
+  query: string;
+  options: SearchOptions;
+  /** 拆分后的 term 列表（空格分），单 term 时长度为 1 */
+  terms: string[];
+  /** 所有命中的 [from, to, termIdx)；按文档顺序 */
+  results: Match[];
+  /** 当前命中的索引；-1 表示未选中（搜索为空 / 无命中） */
+  current: number;
+  decorations: DecorationSet;
+}
+
+interface SearchMeta {
+  type: "set" | "next" | "prev" | "clear" | "setCurrent";
+  query?: string;
+  options?: Partial<SearchOptions>;
+  index?: number;
+}
+
+declare module "@tiptap/core" {
+  interface Commands<ReturnType> {
+    searchAndReplace: {
+      /** 设置搜索词（空串清空高亮）；同时可选地更新选项 */
+      setSearchTerm: (
+        query: string,
+        options?: Partial<SearchOptions>,
+      ) => ReturnType;
+      /** 跳到下一个命中（空查询时无效） */
+      searchNext: () => ReturnType;
+      /** 跳到上一个命中 */
+      searchPrev: () => ReturnType;
+      /** 替换当前选中的命中；当前无选中则等价于 next */
+      replaceCurrent: (replacement: string) => ReturnType;
+      /** 全部替换；返回值不重要，但内部会把所有命中替换 */
+      replaceAll: (replacement: string) => ReturnType;
+      /** 清空查询 + 关闭高亮 */
+      clearSearch: () => ReturnType;
+      /** 把当前命中滚到可视区域（外部预填查询词后定位首个命中用，不改文档） */
+      scrollToCurrent: () => ReturnType;
+    };
+  }
+}
+
+const pluginKey = new PluginKey<SearchPluginState>("searchAndReplace");
+
+/** 转义正则元字符 */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** 把输入框文本拆分为多个 term：空格分隔，去重保序、忽略空串 */
+function splitTerms(query: string): string[] {
+  if (!query) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of query.split(/\s+/)) {
+    if (!raw) continue;
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    out.push(raw);
+  }
+  return out;
+}
+
+/** 在整篇文档里找所有命中：每个 term 独立匹配后合并按位置排序 */
+function findMatches(
+  doc: ProseMirrorNode,
+  terms: string[],
+  options: SearchOptions,
+): Match[] {
+  if (terms.length === 0) return [];
+
+  // 为每个 term 编译 regex；编译失败的跳过，不影响其他 term
+  const regexes: Array<{ termIdx: number; re: RegExp }> = [];
+  for (let i = 0; i < terms.length; i++) {
+    let pattern = escapeRegExp(terms[i]);
+    if (options.wholeWord) {
+      // 注：\b 仅对 ASCII 单词字符有意义，中文 term 不会真正"全词"
+      pattern = `\\b${pattern}\\b`;
+    }
+    try {
+      regexes.push({
+        termIdx: i,
+        re: new RegExp(pattern, options.caseSensitive ? "g" : "gi"),
+      });
+    } catch {
+      // ignore invalid term
+    }
+  }
+  if (regexes.length === 0) return [];
+
+  const matches: Match[] = [];
+  // 走每个 textblock，独立匹配（避免跨段落假命中）
+  doc.descendants((node, pos) => {
+    if (!node.isTextblock) return;
+    const text = node.textBetween(0, node.content.size, " ", " ");
+    for (const { termIdx, re } of regexes) {
+      re.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text)) !== null) {
+        const from = pos + 1 + m.index;
+        const to = from + m[0].length;
+        matches.push({ from, to, termIdx });
+        // 防御零宽匹配死循环
+        if (m.index === re.lastIndex) re.lastIndex++;
+      }
+    }
+  });
+
+  // 多 term 合并后按文档位置升序；同位置不同 term 保留所有
+  matches.sort((a, b) => a.from - b.from || a.to - b.to || a.termIdx - b.termIdx);
+  return matches;
+}
+
+/** 从命中列表生成装饰：单词模式时不带颜色后缀，与旧版样式完全等价 */
+function buildDecorations(
+  doc: ProseMirrorNode,
+  results: Match[],
+  current: number,
+  multiTerm: boolean,
+): DecorationSet {
+  if (results.length === 0) return DecorationSet.empty;
+  const decos = results.map((r, i) => {
+    const colorCls = multiTerm ? ` kb-search-match-${r.termIdx % 6}` : "";
+    const activeCls = i === current ? " kb-search-active" : "";
+    return Decoration.inline(r.from, r.to, {
+      class: `kb-search-match${colorCls}${activeCls}`,
+    });
+  });
+  return DecorationSet.create(doc, decos);
+}
+
+/** 给定光标位置，在 results 里找第一个 from >= cursor 的命中索引（环绕） */
+function nextIndexAfterCursor(results: Match[], cursor: number): number {
+  if (results.length === 0) return -1;
+  for (let i = 0; i < results.length; i++) {
+    if (results[i].from >= cursor) return i;
+  }
+  return 0;
+}
+
+export const SearchAndReplace = Extension.create({
+  name: "searchAndReplace",
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin<SearchPluginState>({
+        key: pluginKey,
+        state: {
+          init(): SearchPluginState {
+            return {
+              query: "",
+              options: { caseSensitive: false, wholeWord: false },
+              terms: [],
+              results: [],
+              current: -1,
+              decorations: DecorationSet.empty,
+            };
+          },
+          apply(tr, prev): SearchPluginState {
+            const meta = tr.getMeta(pluginKey) as SearchMeta | undefined;
+
+            // ─── 显式 meta：set / next / prev / clear / setCurrent ───
+            if (meta) {
+              if (meta.type === "clear") {
+                return {
+                  query: "",
+                  options: prev.options,
+                  terms: [],
+                  results: [],
+                  current: -1,
+                  decorations: DecorationSet.empty,
+                };
+              }
+              if (meta.type === "set") {
+                const query = meta.query ?? "";
+                const options = { ...prev.options, ...(meta.options ?? {}) };
+                const terms = splitTerms(query);
+                const results = findMatches(tr.doc, terms, options);
+                // 设新 query 时：以当前光标为基准选中第一个就近命中
+                const cursor = tr.selection.from;
+                const current = nextIndexAfterCursor(results, cursor);
+                return {
+                  query,
+                  options,
+                  terms,
+                  results,
+                  current,
+                  decorations: buildDecorations(tr.doc, results, current, terms.length > 1),
+                };
+              }
+              if (meta.type === "next" || meta.type === "prev") {
+                if (prev.results.length === 0) return prev;
+                const len = prev.results.length;
+                const next =
+                  meta.type === "next"
+                    ? (prev.current + 1) % len
+                    : (prev.current - 1 + len) % len;
+                return {
+                  ...prev,
+                  current: next,
+                  decorations: buildDecorations(tr.doc, prev.results, next, prev.terms.length > 1),
+                };
+              }
+              if (meta.type === "setCurrent" && typeof meta.index === "number") {
+                return {
+                  ...prev,
+                  current: meta.index,
+                  decorations: buildDecorations(tr.doc, prev.results, meta.index, prev.terms.length > 1),
+                };
+              }
+            }
+
+            // ─── 文档变更：重算 results（位置都跟着 mapping 走，但 query 命中数量可能变） ───
+            if (tr.docChanged && prev.terms.length > 0) {
+              const results = findMatches(tr.doc, prev.terms, prev.options);
+              // 当前 current 还有效就保留；否则就近选下一个
+              let current = prev.current;
+              if (current >= results.length) current = results.length - 1;
+              if (current < 0 && results.length > 0) current = 0;
+              return {
+                ...prev,
+                results,
+                current,
+                decorations: buildDecorations(tr.doc, results, current, prev.terms.length > 1),
+              };
+            }
+
+            return prev;
+          },
+        },
+        props: {
+          decorations(state: EditorState) {
+            return pluginKey.getState(state)?.decorations ?? null;
+          },
+        },
+      }),
+    ];
+  },
+
+  addCommands() {
+    return {
+      setSearchTerm:
+        (query: string, options?: Partial<SearchOptions>) =>
+        ({ tr, dispatch }: CommandProps) => {
+          if (dispatch) {
+            const meta: SearchMeta = { type: "set", query, options };
+            dispatch(tr.setMeta(pluginKey, meta));
+          }
+          return true;
+        },
+
+      searchNext:
+        () =>
+        ({ state, tr, dispatch, view }: CommandProps) => {
+          const ps = pluginKey.getState(state);
+          if (!ps || ps.results.length === 0) return false;
+          if (dispatch) {
+            const meta: SearchMeta = { type: "next" };
+            dispatch(tr.setMeta(pluginKey, meta));
+            // 滚动到当前匹配
+            scrollCurrentIntoView(view);
+          }
+          return true;
+        },
+
+      searchPrev:
+        () =>
+        ({ state, tr, dispatch, view }: CommandProps) => {
+          const ps = pluginKey.getState(state);
+          if (!ps || ps.results.length === 0) return false;
+          if (dispatch) {
+            const meta: SearchMeta = { type: "prev" };
+            dispatch(tr.setMeta(pluginKey, meta));
+            scrollCurrentIntoView(view);
+          }
+          return true;
+        },
+
+      replaceCurrent:
+        (replacement: string) =>
+        ({ state, dispatch }: CommandProps) => {
+          const ps = pluginKey.getState(state);
+          if (!ps || ps.results.length === 0 || ps.current < 0) return false;
+          if (dispatch) {
+            const target = ps.results[ps.current];
+            const newTr = state.tr;
+            if (replacement.length > 0) {
+              newTr.insertText(replacement, target.from, target.to);
+            } else {
+              newTr.delete(target.from, target.to);
+            }
+            // docChanged 会触发 plugin 重算并保留 current（若仍在范围内）
+            dispatch(newTr);
+          }
+          return true;
+        },
+
+      replaceAll:
+        (replacement: string) =>
+        ({ state, dispatch }: CommandProps) => {
+          const ps = pluginKey.getState(state);
+          if (!ps || ps.results.length === 0) return false;
+          if (dispatch) {
+            // 从后往前替，避免 from/to 偏移；多词模式下所有 term 的命中都会被替换
+            const newTr = state.tr;
+            const sorted = [...ps.results].sort((a, b) => b.from - a.from);
+            for (const r of sorted) {
+              if (replacement.length > 0) {
+                newTr.insertText(replacement, r.from, r.to);
+              } else {
+                newTr.delete(r.from, r.to);
+              }
+            }
+            dispatch(newTr);
+          }
+          return true;
+        },
+
+      clearSearch:
+        () =>
+        ({ tr, dispatch }: CommandProps) => {
+          if (dispatch) {
+            const meta: SearchMeta = { type: "clear" };
+            dispatch(tr.setMeta(pluginKey, meta));
+          }
+          return true;
+        },
+
+      scrollToCurrent:
+        () =>
+        ({ state, view, dispatch }: CommandProps) => {
+          const ps = pluginKey.getState(state);
+          if (!ps || ps.current < 0 || ps.results.length === 0) return false;
+          // 无 tr 改动，纯副作用滚动；仅在真实执行（dispatch 存在、非 can() 干跑）时滚
+          if (dispatch) scrollCurrentIntoView(view);
+          return true;
+        },
+    };
+  },
+});
+
+/** 把当前命中滚到可视区域 */
+function scrollCurrentIntoView(view: import("@tiptap/pm/view").EditorView): void {
+  // requestAnimationFrame 等装饰应用后 DOM 上能找到 .kb-search-active
+  requestAnimationFrame(() => {
+    const el = view.dom.querySelector(".kb-search-active");
+    if (el) {
+      (el as HTMLElement).scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  });
+}
+
+/** 单个 term 在结果中的统计 */
+export interface TermStat {
+  term: string;
+  /** 该 term 在文档中的命中数 */
+  count: number;
+}
+
+/** 让外部读插件状态（UI 浮条展示 "n/m" + 多词分项统计） */
+export function getSearchState(state: EditorState): {
+  query: string;
+  total: number;
+  current: number;
+  options: SearchOptions;
+  perTerm: TermStat[];
+} | null {
+  const ps = pluginKey.getState(state);
+  if (!ps) return null;
+  const perTerm: TermStat[] = ps.terms.map((term, i) => ({
+    term,
+    count: ps.results.reduce((acc, r) => acc + (r.termIdx === i ? 1 : 0), 0),
+  }));
+  return {
+    query: ps.query,
+    total: ps.results.length,
+    current: ps.current,
+    options: ps.options,
+    perTerm,
+  };
+}

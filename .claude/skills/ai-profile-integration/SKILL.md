@@ -1,0 +1,179 @@
+---
+name: ai-profile-integration
+description: |
+  用于本项目中与 ai-profile crate 相关的开发：模型服务预置、ai.profile 导入导出、「获取」零成本验证、上下文窗口限额。
+
+  触发场景：
+  - 要加新模型、新服务商，或改某个预置的默认 model / 地址
+  - 修改 AI 模型配置表单（桌面设置页 / 手机弹窗）、「获取」「测试连接」
+  - 修改配置分享 / 导入里 ai.profile 相关的逻辑
+  - 改上下文预算、max_tokens 封顶、上下文超长的降档重试
+  - 升级 ai-profile 依赖版本
+
+  触发词：ai-profile、模型服务、预置、provider、服务商、新模型、加模型、ai.profile、获取模型、测试连接、限额、上下文窗口、max_context、升级crate
+---
+
+# ai-profile 接入（knowledge_base）
+
+## 🔴 先判断改哪个仓库
+
+| 要做的事 | 去哪改 |
+|---|---|
+| 加模型 / 加服务商 / 改默认 model / 改地址 / 改静态限额 | **ai-profile 仓库**（`E:/my/桌面软件tauri/ai-profile`，技能 `preset-maintenance`），本项目只升依赖 |
+| ai.profile 解析规则、端点拼接、模型清洗、验证错误、超长识别 | **ai-profile 仓库** |
+| `ai_models` 存储、密钥加密、对话（Ollama 原生 / OpenAI 兼容 / Anthropic `/v1/messages`）、RAG / 附件预算、历史降档阶梯、`kbConfig` 信封、界面 | 本项目 |
+
+**不要在本项目里写预置清单、模型列表、端点拼接规则、ai.profile 解析器。**
+接入时删掉的副本：前端 `aiProviderPresets.ts` 里 24 家 / 5 张平行表、`configShare.ts` 的 TS 版
+ai.profile 解析（只认 `v === 1`）、`services/ai.rs` 的 `build_openai_api_url`（自动补 `/v1`）与
+`list_remote_models`。
+
+## 三种对话协议（2026-09-23 起支持 Anthropic）
+
+协议由配置存的预置 key 决定：`model_service::protocol_of(provider)`（查 crate；不认识的 key 按 OpenAI 兼容）。
+
+| 协议 | 预置 | 实现 |
+|---|---|---|
+| Ollama 原生 `/api/chat` | `ollama` | `stream_ollama*`（5 个非流式功能走它的 OpenAI 兼容层 `…/v1`） |
+| Anthropic `/v1/messages` | `anthropic_official` / `claude_code` | `services/anthropic.rs` 转换 |
+| OpenAI 兼容 `chat/completions` | 其余全部 | `services/ai.rs` |
+
+- 预置暴露 crate **全量**（与 Sigil 同一份）；官方档 crate 不带地址，`presets()` 补 `https://api.anthropic.com/v1`
+- 🔴 **11 处发对话请求的地方都照旧拼 OpenAI 结构的请求体**，统一经 `chat_request` / `model_chat_request`
+  发送（按协议换地址 / 鉴权头 / 请求体），响应经 `completion_text`、流经 `read_sse_stream`
+  （ai-profile 的 `stream` 解码器）解析。**新增对话请求别手拼 `Authorization: Bearer`**，否则 Anthropic 配置直接 401
+- Anthropic 的取舍（照 Sigil，都是实测踩出来的）：只发 `x-api-key` + `anthropic-version`（仿 Claude Code 头
+  会让中转路由到空账号池 503）；历史只回传 text / tool_use，不回传 thinking；`max_tokens` 必填，
+  没设时 8192 且不超过已知输出上限；丢 `temperature` / `top_p` / `seed` / `response_format`
+- ai.profile 导入照来源协议：Anthropic + 官方地址 / 无地址 → `anthropic_official`，其它地址 → `claude_code`；
+  导出按 provider 写协议（`ai_model_to_ai_profile` 的 `provider` 参数）
+- 真实端点联调：`live_anthropic_protocol`（`#[ignore]`，读 dev 库里的一条 `claude_code` 配置；
+  DeepSeek 的 `https://api.deepseek.com/anthropic` 可用来测，它没有 `/models`，「获取」会 404，对话正常）
+
+## 接入点
+
+| 能力 | 文件 |
+|---|---|
+| 依赖声明（crates.io 版本，`chat` + `client`，rustls） | `src-tauri/Cargo.toml` |
+| 与 crate 的接缝（预置 / 验证 / 限额 / ai.profile / 旧配置修正） | `src-tauri/src/services/model_service.rs` |
+| Commands | `commands/ai.rs`：`list_ai_provider_presets` / `verify_ai_model_endpoint` / `parse_ai_profile_text` / `ai_model_to_ai_profile` / `fix_legacy_ai_model` |
+| 端点拼接 | `services/ai.rs` 的 `build_openai_chat_url`（转发 crate）/ `ollama_native_root`；`services/anthropic.rs` 的 `messages_url` |
+| 协议分流 | `services/ai.rs` 的 `chat_request` / `completion_text` / `read_sse_stream`（流）；`services/anthropic.rs`（请求体转换） |
+| 前端适配层 | `src/lib/aiProviderPresets.ts`（`useAiProviderPresets` 等，**只做形状适配**） |
+| 表单 | `src/pages/settings/index.tsx`、`src/components/ai/MobileAiModelModal.tsx` |
+| 分享 / 导入 | `src/lib/configShare.ts`（`kbConfig` 信封归本项目；ai.profile 交给后端） |
+
+## `ai_models.provider` 存的是 crate 预置 key
+
+schema v62 起是 `deepseek` / `moonshot` / `openai_official` / `ollama` / `openai_compatible_custom`……
+不再是本项目自己的旧 id（`kimi` / `doubao` / `openai` / `claude` / `custom`）。
+
+- 按 provider 分支的代码要写新 key（`supports_json_response_format` 的白名单就踩过：
+  还写 `openai` / `kimi` 时这两家的 JSON 模式被静默关掉）
+- 旧 id → 新 key 的映射只在 `services/legacy_api_url.rs::legacy_provider_key`，**只给迁移与旧配置导入用**
+
+## 🔴 存量地址修正（已完成，不要回退）
+
+旧规则「末段不是 `vN` / `vN.M` 就自动补 `/v1`、末尾 `#` 锁定」→ crate「原样使用」。
+`services/legacy_api_url.rs` 冻结了旧规则副本，对照测试断言「旧规则(原值) == crate(修正值)」—— **不要改那份副本**。
+
+| 入口 | 条件 |
+|---|---|
+| schema v62 | 升级时一次；整库恢复（ZIP / WebDAV / `.bak`）后会重跑迁移，旧库同样被修正 |
+| `kbConfig` 模型配置导入 | 信封没有 `api_url_verbatim`（v1.64.0 及以前导出）→ 先 `fix_legacy_ai_model` |
+| ai.profile 导入 | 不修正：跨软件协议，按 crate 语义原样使用 |
+
+- 🔴 只对旧来源修正：新数据再修会把用户刻意不带版本段的地址错补 `/v1`
+- 带 `#` 的地址原样保留（幂等）；crate 拼地址时会剥掉末尾 `#`
+- Ollama 存 `…/v1`（OpenAI 兼容层，5 个非流式功能走它），原生 `/api/*` 由 `ollama_native_root` 去掉 `/v1`
+
+## 限额
+
+| 列 | 含义 |
+|---|---|
+| `max_context` | 已存窗口；**0 = 未设置** |
+| `limits_source` | `user` 手填 / `endpoint`「获取」时端点上报；NULL = 没存。🔴 `preset` 不落库 |
+| `max_output` | 端点上报的模型输出上限，给 `max_tokens` 封顶 |
+| `max_tokens` | 用户要的单次回答长度（与模型上限是两回事）；NULL = 不传，Ollama 可 -1 |
+
+- 生效窗口一律用 `model_service::effective_context_window`（用户 > 端点 > 预置 > 未知），**别直接读 `max_context`**
+- `compute_context_budget` 对 `<= 0` 走保守固定预算 —— 未知就是未知，不猜
+- 「获取」拿到端点上报的限额会自动填入表单（来源 endpoint）；用户手改后来源变 user
+
+## 上下文超长
+
+`format_openai_api_error` 用 crate 的 `history::is_context_overflow` 识别，统一打上
+`CONTEXT_OVERFLOW_TITLE` 标题；`chat_stream` 的历史降档（20 → 10 → 4 → 0）认这个标题。
+
+`chat_stream_with_skills` **不接** crate 的 `trim_history`：本项目的消息是 OpenAI 结构（`tool_calls`），
+crate 裁剪按 Anthropic 结构配对 tool —— 硬接会拆坏配对。
+
+## 流式（ai-profile 0.1.4 起）
+
+OpenAI 兼容 / Anthropic 的 SSE 怎么解**全在 crate 的 `stream` 模块**，本项目不再有自己的 SSE 解析器。
+**不要在本项目里写**：SSE 帧切分、`\r\n` / 心跳行处理、工具调用按 `index` 拼装、补 `call_<流id>_<块号>`、
+`[DONE]` / `finish_reason` 换算、断流判定、「2xx 却回网页」判断 —— 这些是网关怪癖，随服务商变化。
+发现某家网关解不对，**去 ai-profile 仓库修**。已删掉的副本：`stream_text_delta`、`handle_*_stream_line`、
+`anthropic::parse_stream_line` / `StreamEvent`。
+
+| 在 crate | 留在本项目（`services/ai.rs`） |
+|---|---|
+| 字节 → 统一事件、块号约定、收尾判定（`Complete` / `Truncated` / `Failed` / `NotEventStream`） | 请求体构造与鉴权（`chat_request`）、共享 HTTP 客户端 |
+| `looks_like_html`、`StopReason` | 取消接线（`wait_cancelled`，每收一段 `select!`）、事件推给前端（`AiEventEmitter`） |
+| 多字节字符跨包不丢字 | 工具调用累积（保留原始参数字符串）、`StopReason` → OpenAI 词表（`openai_finish_reason`）、落库 |
+
+入口只有一个：`read_sse_stream`。`consume_text_stream`（写作助手 / RAG 对话）和 `consume_tool_stream`
+（智能模式）包在它外面，**新增 SSE 站点调这两个，别再自己写读流循环**。
+
+### 🔴 例外：Ollama 原生接口不走 crate
+
+`/api/chat` 是 **NDJSON，不是 SSE**，不在 crate 范围，`stream_ollama*` 一带原样保留，
+并继续用 `drain_complete_lines` 切行（别因为「SSE 已迁移」就把它删了）。Ollama 的 OpenAI 兼容端点
+`/v1/chat/completions` 在本项目只给 5 个非流式功能用，对话 / 写作的流式一律走原生。
+`stream_ollama_with_tools` 实际是死路径（`chat_stream_with_skills` 对 ollama 早返回走 RAG）。
+
+### 行为约定（改动时别无意改回去）
+
+- **停止**：取消即返回（`SseEnd::Cancelled`，`Ok`），丢掉字节流 = 关 TCP；已收到的文字照常存成「已停止」卡片，
+  没收完的工具调用由解码器丢掉
+- **断流**（没有结束标记就 EOF）/ **流内错误** / **网络读取错误**：`SseEnd::Failed`，**报错**
+  （以前断流当正常结束，半截回复被存成完整回复）。流内错误是终态，不再读完整个流
+- **失败时已流给用户看的半截正文留在错误卡片里**（`StreamFailure.partial` → `fail_turn(partial)`）：
+  卡片不论状态都渲染正文，`end_reason = "error"` 的卡片被 `usable_in_history` 排除出模型上下文，
+  所以半截话既不丢也不污染历史。Ollama 原生路径不带 partial（保持原样）；写作助手结果不入库，用不上
+- **2xx 却不是事件流**（回网页，或网关忽略 `stream: true` 整段回 JSON）：报错而不是空回复。
+  `looks_like_html` 命中提示检查 API 地址路径，否则带响应开头 200 字。本项目没有「回落非流式」的逻辑
+- **`StreamEnd` 是 `non_exhaustive`**：`read_sse_stream` 的兜底分支按出错处理，新增结局别让它静默当成功
+- 🔴 **工具循环：取消 / 断流 / 流内错误时不执行任何工具调用**。`consume_tool_stream` 只有 `Complete` 才交出
+  工具调用；半截 JSON 参数不能当 `{}` 去执行。工具按 `ToolUseStart` / `ToolUseDelta` 逐块累积，
+  **保留模型给的原始参数字符串**（`dispatch_with_mcp` 与回填给模型的 `arguments` 都吃字符串；
+  用 `outcome.content` 会把畸形 JSON 改写成 `{}`）
+- 结束原因：crate 的 `StopReason` 是 Anthropic 词表，经 `anthropic::finish_reason` 换成本项目内部的 OpenAI 词表
+  （`stop` / `tool_calls` / `length`），`length` 追加截断提示、`content_filter` / `refusal` 报错的既有判断不变
+- 测试走本机假服务端的端到端路径（`sse_stream_tests`，客户端要 `.no_proxy()`，否则本机 HTTP 代理会让
+  127.0.0.1 随机 `os error 10053`），不测解码内部 —— 解码细节归 crate 的测试
+
+## 升级 ai-profile
+
+0. **先弄清要不要升、升到哪、会变什么**：
+   - 最新版本：<https://crates.io/crates/ai-profile>，或 ai-profile 仓库 `docs/versioning.md` 的「当前版本」
+   - 读 ai-profile 仓库 `CHANGELOG.md` 里**当前版本到目标版本之间**的每一节
+   - 🔴 0.x 阶段 `0.1 → 0.2` 这种改第二位的是**破坏性升级**：按 CHANGELOG 里的迁移说明改代码，和版本号放**同一个提交**，别留编译不过的中间态；`0.1.x` 补丁位是兼容升级，通常零代码改动
+   - CHANGELOG「修复」里界面能看到的变化（如 0.1.3「官方档不填地址也能获取模型」），写进提交说明的「用户能感知的变化」，并提醒用户实机点一下 —— 行为变更测试证明不了
+1. 改 `src-tauri/Cargo.toml` 的 `version`（🔴 补丁版本也要改：只跑 `cargo update` 的话，锁在旧版本的环境不会自动升级，用到新接口时直接编译失败），再 `cargo update -p ai-profile`，确认 `Cargo.lock` 只动了这一个包；提交时按路径只 add 这几个依赖文件（工作区里可能有别的会话的改动）。完整流程见 ai-profile 仓库技能 `downstream-sync`
+2. 测试（项目根目录，不要 cd）：
+   ```bash
+   cargo test --manifest-path src-tauri/Cargo.toml --workspace
+   npx tsc --noEmit
+   pnpm test
+   ```
+3. 回 ai-profile 仓库更新 `docs/downstream.md` 里 knowledge_base 那一行
+
+没有多语言：crate 新增服务商时直接用它的中文 `label` / `hint`，不用补翻译。
+
+## 本项目特有的坑
+
+- 已知不稳定 / 已知失败的测试（与模型服务无关）：`tags::tag_path_segments_independent_namespace`
+  （tags 唯一约束与测试期望矛盾，见 `docs/tasks/md-editor-mode-tasks.md`）、
+  `dataview::dataview_recent_notes_orders_by_updated_at`（时间戳精确到秒，20ms 内建的两条笔记排序不定）
+- Android 构建：crate 的 `client` 用 rustls，与本项目 reqwest 同一套 TLS，不会带进 OpenSSL

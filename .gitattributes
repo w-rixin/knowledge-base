@@ -1,0 +1,60 @@
+# 强制以 LF 换行提交（仓库规范：UTF-8 无 BOM + LF）
+#
+# 为什么需要：
+# Windows 检出时默认 core.autocrlf=true，会把 LF 转成 CRLF。
+# 本项目有大量 shell 脚本（scripts/*.sh）、YAML（.github/workflows）、
+# Rust 构建脚本与 Tauri 配置，CRLF 会导致 Linux CI 上：
+#   - shell 报 `bad interpreter: /bin/bash^M`
+#   - YAML 解析异常
+#   - .gitattributes 缺失时行为不可控
+# 用 text=auto 统一按 LF 入库，检出时再按平台决定是否转换。
+* text=auto eol=lf
+
+# 二进制文件，禁止任何换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.eot binary
+*.pdf binary
+*.docx binary
+*.xlsx binary
+*.onnx binary
+*.zip binary
+*.gz binary
+
+# shell 脚本强制 LF（CI 在 Linux 上执行）
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Windows 专用脚本保留 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 源码与配置：强制 LF + UTF-8
+*.rs text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.nsi text eol=lf
+
+# 签名密钥永不入库（双保险，.gitignore 之外再加一道）
+src-tauri/keys/** binary
+*.key binary
+*.p12 binary
+*.pfx binary
+*.jks binary

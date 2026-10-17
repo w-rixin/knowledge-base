@@ -1,0 +1,3600 @@
+use rusqlite::Connection;
+
+use crate::error::AppError;
+
+/// 当前 Schema 版本
+pub const SCHEMA_VERSION: i32 = 64;
+
+/// `ai_models.max_context` 的历史默认值。v51 把旧默认 32000 统一抬到它，此后新建也默认填它 ——
+/// 所以存量里的 128000 分不清是用户填的还是默认值，v62 一律当作「未设置」。
+pub const LEGACY_DEFAULT_MAX_CONTEXT: i64 = 128_000;
+
+/// 获取数据库版本
+pub fn get_version(conn: &Connection) -> Result<i32, AppError> {
+    let version: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    Ok(version)
+}
+
+/// 设置数据库版本
+pub fn set_version(conn: &Connection, version: i32) -> Result<(), AppError> {
+    conn.pragma_update(None, "user_version", version)?;
+    Ok(())
+}
+
+/// 执行数据库迁移
+pub fn migrate(conn: &Connection) -> Result<(), AppError> {
+    let mut version = get_version(conn)?;
+
+    // 🔴 必须是独立的错误类型而不是 Custom：调用方要靠它区分「应用比库旧」和「库坏了」。
+    // 前者数据完好，走 db_recovery 的留档 + 空库启动会让用户以为数据全丢了。
+    if version > SCHEMA_VERSION {
+        return Err(AppError::SchemaTooNew {
+            db: version,
+            app: SCHEMA_VERSION,
+        });
+    }
+
+    while version < SCHEMA_VERSION {
+        match version {
+            0 => migrate_v0_to_v1(conn)?,
+            1 => migrate_v1_to_v2(conn)?,
+            2 => migrate_v2_to_v3(conn)?,
+            3 => migrate_v3_to_v4(conn)?,
+            4 => migrate_v4_to_v5(conn)?,
+            5 => migrate_v5_to_v6(conn)?,
+            6 => migrate_v6_to_v7(conn)?,
+            7 => migrate_v7_to_v8(conn)?,
+            8 => migrate_v8_to_v9(conn)?,
+            9 => migrate_v9_to_v10(conn)?,
+            10 => migrate_v10_to_v11(conn)?,
+            11 => migrate_v11_to_v12(conn)?,
+            12 => migrate_v12_to_v13(conn)?,
+            13 => migrate_v13_to_v14(conn)?,
+            14 => migrate_v14_to_v15(conn)?,
+            15 => migrate_v15_to_v16(conn)?,
+            16 => migrate_v16_to_v17(conn)?,
+            17 => migrate_v17_to_v18(conn)?,
+            18 => migrate_v18_to_v19(conn)?,
+            19 => migrate_v19_to_v20(conn)?,
+            20 => migrate_v20_to_v21(conn)?,
+            21 => migrate_v21_to_v22(conn)?,
+            22 => migrate_v22_to_v23(conn)?,
+            23 => migrate_v23_to_v24(conn)?,
+            24 => migrate_v24_to_v25(conn)?,
+            25 => migrate_v25_to_v26(conn)?,
+            26 => migrate_v26_to_v27(conn)?,
+            27 => migrate_v27_to_v28(conn)?,
+            28 => migrate_v28_to_v29(conn)?,
+            29 => migrate_v29_to_v30(conn)?,
+            30 => migrate_v30_to_v31(conn)?,
+            31 => migrate_v31_to_v32(conn)?,
+            32 => migrate_v32_to_v33(conn)?,
+            33 => migrate_v33_to_v34(conn)?,
+            34 => migrate_v34_to_v35(conn)?,
+            35 => migrate_v35_to_v36(conn)?,
+            36 => migrate_v36_to_v37(conn)?,
+            37 => migrate_v37_to_v38(conn)?,
+            38 => migrate_v38_to_v39(conn)?,
+            39 => migrate_v39_to_v40(conn)?,
+            40 => migrate_v40_to_v41(conn)?,
+            41 => migrate_v41_to_v42(conn)?,
+            42 => migrate_v42_to_v43(conn)?,
+            43 => migrate_v43_to_v44(conn)?,
+            44 => migrate_v44_to_v45(conn)?,
+            45 => migrate_v45_to_v46(conn)?,
+            46 => migrate_v46_to_v47(conn)?,
+            47 => migrate_v47_to_v48(conn)?,
+            48 => migrate_v48_to_v49(conn)?,
+            49 => migrate_v49_to_v50(conn)?,
+            50 => migrate_v50_to_v51(conn)?,
+            51 => migrate_v51_to_v52(conn)?,
+            52 => migrate_v52_to_v53(conn)?,
+            53 => migrate_v53_to_v54(conn)?,
+            54 => migrate_v54_to_v55(conn)?,
+            55 => migrate_v55_to_v56(conn)?,
+            56 => migrate_v56_to_v57(conn)?,
+            57 => migrate_v57_to_v58(conn)?,
+            58 => migrate_v58_to_v59(conn)?,
+            59 => migrate_v59_to_v60(conn)?,
+            60 => migrate_v60_to_v61(conn)?,
+            61 => migrate_v61_to_v62(conn)?,
+            62 => migrate_v62_to_v63(conn)?,
+            63 => migrate_v63_to_v64(conn)?,
+            _ => {
+                return Err(AppError::Custom(format!("未知的数据库版本: {}", version)));
+            }
+        }
+        version = get_version(conn)?;
+    }
+
+    log::info!("数据库迁移完成, 当前版本: {}", version);
+    Ok(())
+}
+
+/// v0 -> v1: 初始化表结构
+fn migrate_v0_to_v1(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v0 -> v1");
+
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS app_config (
+            key         TEXT PRIMARY KEY,
+            value       TEXT NOT NULL,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        -- 插入默认配置
+        INSERT OR IGNORE INTO app_config (key, value) VALUES ('theme', 'light');
+        INSERT OR IGNORE INTO app_config (key, value) VALUES ('language', 'zh-CN');
+        INSERT OR IGNORE INTO app_config (key, value) VALUES ('sidebar_collapsed', 'false');
+        ",
+    )?;
+
+    set_version(conn, 1)?;
+    Ok(())
+}
+
+/// v1 -> v2: 创建 folders 表和 notes 表
+fn migrate_v1_to_v2(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v1 -> v2");
+
+    conn.execute_batch(
+        "
+        -- 文件夹表（树形结构）
+        CREATE TABLE IF NOT EXISTS folders (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL,
+            parent_id   INTEGER REFERENCES folders(id) ON DELETE SET NULL,
+            sort_order  INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        -- 笔记表
+        CREATE TABLE IF NOT EXISTS notes (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            title       TEXT NOT NULL,
+            content     TEXT NOT NULL DEFAULT '',
+            folder_id   INTEGER REFERENCES folders(id) ON DELETE SET NULL,
+            is_daily    INTEGER NOT NULL DEFAULT 0,
+            daily_date  TEXT,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        -- 索引
+        CREATE INDEX IF NOT EXISTS idx_notes_folder  ON notes(folder_id);
+        CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_notes_daily   ON notes(is_daily, daily_date);
+        ",
+    )?;
+
+    set_version(conn, 2)?;
+    Ok(())
+}
+
+/// v2 -> v3: 添加标签、双向链接、FTS5 全文搜索、回收站等功能
+fn migrate_v2_to_v3(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v2 -> v3");
+
+    conn.execute_batch(
+        "
+        -- 给 notes 表添加新字段
+        ALTER TABLE notes ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE notes ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE notes ADD COLUMN deleted_at TEXT;
+        ALTER TABLE notes ADD COLUMN word_count INTEGER NOT NULL DEFAULT 0;
+
+        -- 标签表
+        CREATE TABLE IF NOT EXISTS tags (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL UNIQUE,
+            color       TEXT,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        -- 笔记-标签关联表
+        CREATE TABLE IF NOT EXISTS note_tags (
+            note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+            tag_id  INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+            PRIMARY KEY (note_id, tag_id)
+        );
+
+        -- 双向链接表
+        CREATE TABLE IF NOT EXISTS note_links (
+            source_id   INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+            target_id   INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+            context     TEXT,
+            PRIMARY KEY (source_id, target_id)
+        );
+
+        -- FTS5 全文搜索虚拟表
+        CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
+            title, content, content=notes, content_rowid=id,
+            tokenize='unicode61'
+        );
+
+        -- FTS5 同步触发器
+        CREATE TRIGGER IF NOT EXISTS notes_fts_insert AFTER INSERT ON notes BEGIN
+            INSERT INTO notes_fts(rowid, title, content) VALUES (new.id, new.title, new.content);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS notes_fts_update AFTER UPDATE ON notes BEGIN
+            INSERT INTO notes_fts(notes_fts, rowid, title, content) VALUES('delete', old.id, old.title, old.content);
+            INSERT INTO notes_fts(rowid, title, content) VALUES (new.id, new.title, new.content);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS notes_fts_delete AFTER DELETE ON notes BEGIN
+            INSERT INTO notes_fts(notes_fts, rowid, title, content) VALUES('delete', old.id, old.title, old.content);
+        END;
+
+        -- 索引
+        CREATE INDEX IF NOT EXISTS idx_notes_deleted ON notes(is_deleted, deleted_at);
+        CREATE INDEX IF NOT EXISTS idx_notes_pinned ON notes(is_pinned, updated_at DESC) WHERE is_deleted = 0;
+        CREATE INDEX IF NOT EXISTS idx_note_tags_tag ON note_tags(tag_id);
+        CREATE INDEX IF NOT EXISTS idx_note_links_target ON note_links(target_id);
+
+        -- 将已有笔记数据同步到 FTS5
+        INSERT INTO notes_fts(rowid, title, content) SELECT id, title, content FROM notes;
+        ",
+    )?;
+
+    set_version(conn, 3)?;
+    Ok(())
+}
+
+/// v3 -> v4: AI 知识问答（模型配置、对话、消息）
+fn migrate_v3_to_v4(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v3 -> v4");
+
+    conn.execute_batch(
+        "
+        -- AI 模型配置表
+        CREATE TABLE IF NOT EXISTS ai_models (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL,
+            provider    TEXT NOT NULL,
+            api_url     TEXT NOT NULL,
+            api_key     TEXT,
+            model_id    TEXT NOT NULL,
+            is_default  INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        -- AI 对话表
+        CREATE TABLE IF NOT EXISTS ai_conversations (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            title       TEXT NOT NULL DEFAULT '新对话',
+            model_id    INTEGER NOT NULL REFERENCES ai_models(id) ON DELETE CASCADE,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        -- AI 消息表
+        CREATE TABLE IF NOT EXISTS ai_messages (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER NOT NULL REFERENCES ai_conversations(id) ON DELETE CASCADE,
+            role            TEXT NOT NULL,
+            content         TEXT NOT NULL,
+            references_json TEXT,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        -- 索引
+        CREATE INDEX IF NOT EXISTS idx_ai_conv_updated ON ai_conversations(updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_ai_msg_conv ON ai_messages(conversation_id, created_at);
+
+        -- 默认 Ollama 本地模型
+        INSERT INTO ai_models (name, provider, api_url, api_key, model_id, is_default)
+        VALUES ('Ollama Llama3', 'ollama', 'http://localhost:11434', NULL, 'llama3', 1);
+        ",
+    )?;
+
+    set_version(conn, 4)?;
+    Ok(())
+}
+
+/// v4 -> v5: 性能优化索引 + 字数统计触发器
+fn migrate_v4_to_v5(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v4 -> v5");
+
+    conn.execute_batch(
+        "
+        -- 笔记标题索引（加速搜索）
+        CREATE INDEX IF NOT EXISTS idx_notes_title ON notes(title) WHERE is_deleted = 0;
+
+        -- 笔记创建时间索引
+        CREATE INDEX IF NOT EXISTS idx_notes_created ON notes(created_at DESC) WHERE is_deleted = 0;
+
+        -- 字数统计触发器：插入时自动计算
+        CREATE TRIGGER IF NOT EXISTS notes_word_count_insert AFTER INSERT ON notes BEGIN
+            UPDATE notes SET word_count = LENGTH(REPLACE(new.content, ' ', ''))
+            WHERE id = new.id;
+        END;
+
+        -- 字数统计触发器：更新时自动计算
+        CREATE TRIGGER IF NOT EXISTS notes_word_count_update AFTER UPDATE OF content ON notes BEGIN
+            UPDATE notes SET word_count = LENGTH(REPLACE(new.content, ' ', ''))
+            WHERE id = new.id;
+        END;
+
+        -- 优化现有数据字数
+        UPDATE notes SET word_count = LENGTH(REPLACE(content, ' ', ''))
+        WHERE word_count = 0 AND LENGTH(content) > 0;
+
+        -- ANALYZE 更新统计信息
+        ANALYZE;
+        ",
+    )?;
+
+    set_version(conn, 5)?;
+    Ok(())
+}
+
+/// v5 -> v6: 修复 FTS5 触发器级联导致的索引损坏
+///
+/// 问题根因：notes_fts_update 监听 AFTER UPDATE ON notes（全列），
+/// 当 word_count 触发器更新 word_count 列时，也会触发 FTS 更新，
+/// 导致 FTS 索引被反复 DELETE+INSERT，最终损坏 → "database disk image is malformed"
+///
+/// 修复：将 FTS 更新触发器限定为 AFTER UPDATE OF title, content
+fn migrate_v5_to_v6(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v5 -> v6 (修复 FTS 触发器级联)");
+
+    conn.execute_batch(
+        "
+        -- 1. 删除有问题的 FTS 更新触发器（监听全列）
+        DROP TRIGGER IF EXISTS notes_fts_update;
+
+        -- 2. 重建：只在 title 或 content 变更时触发
+        CREATE TRIGGER IF NOT EXISTS notes_fts_update AFTER UPDATE OF title, content ON notes BEGIN
+            INSERT INTO notes_fts(notes_fts, rowid, title, content) VALUES('delete', old.id, old.title, old.content);
+            INSERT INTO notes_fts(rowid, title, content) VALUES (new.id, new.title, new.content);
+        END;
+
+        -- 3. 重建 FTS 索引，清除可能已损坏的数据
+        INSERT INTO notes_fts(notes_fts) VALUES('rebuild');
+        ",
+    )?;
+
+    set_version(conn, 6)?;
+    Ok(())
+}
+
+/// v6 -> v7: 笔记模板表
+fn migrate_v6_to_v7(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v6 -> v7 (笔记模板)");
+
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS note_templates (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            content     TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        -- 预置常用模板
+        INSERT INTO note_templates (name, description, content) VALUES
+        ('会议记录', '记录会议要点、决策和待办事项', '<h2>会议信息</h2><p><strong>日期：</strong></p><p><strong>参与人：</strong></p><p><strong>主题：</strong></p><h2>议题与讨论</h2><ol><li><p></p></li></ol><h2>决策事项</h2><ul><li><p></p></li></ul><h2>待办事项</h2><ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"false\"><label><input type=\"checkbox\"><span></span></label><div><p></p></div></li></ul>'),
+        ('读书笔记', '记录书籍要点、摘抄和感想', '<h2>书籍信息</h2><p><strong>书名：</strong></p><p><strong>作者：</strong></p><p><strong>阅读日期：</strong></p><h2>核心观点</h2><ol><li><p></p></li></ol><h2>精彩摘录</h2><blockquote><p></p></blockquote><h2>我的思考</h2><p></p>'),
+        ('周报', '总结本周工作和下周计划', '<h2>本周完成</h2><ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"true\"><label><input type=\"checkbox\"><span></span></label><div><p></p></div></li></ul><h2>进行中</h2><ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"false\"><label><input type=\"checkbox\"><span></span></label><div><p></p></div></li></ul><h2>下周计划</h2><ol><li><p></p></li></ol><h2>问题与风险</h2><p></p>'),
+        ('项目文档', '记录项目背景、方案和进展', '<h2>项目概述</h2><p></p><h2>背景与目标</h2><p></p><h2>技术方案</h2><p></p><h2>里程碑</h2><ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"false\"><label><input type=\"checkbox\"><span></span></label><div><p></p></div></li></ul><h2>参考资料</h2><ul><li><p></p></li></ul>');
+        ",
+    )?;
+
+    set_version(conn, 7)?;
+    Ok(())
+}
+
+/// v7 -> v8: notes 表加 pdf_path 字段，用于关联导入的 PDF 原文件
+fn migrate_v7_to_v8(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v7 -> v8 (notes.pdf_path)");
+
+    conn.execute_batch(
+        "
+        -- 存相对路径 pdfs/<note_id>.pdf，拼 app_data_dir 得到绝对路径
+        ALTER TABLE notes ADD COLUMN pdf_path TEXT;
+        ",
+    )?;
+
+    set_version(conn, 8)?;
+    Ok(())
+}
+
+/// 列出表的所有列名（用 PRAGMA table_info）
+fn list_columns(conn: &Connection, table: &str) -> Result<Vec<String>, AppError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(names)
+}
+
+/// v8 -> v9: 把 pdf_path 升级为通用源文件路径
+///
+/// - 新增 source_file_type 列，区分 pdf/docx/doc 等
+/// - pdf_path 列重命名为 source_file_path（SQLite 3.25+ 支持 RENAME COLUMN）
+/// - 旧 pdf_path 不为空的行回填 source_file_type='pdf'
+fn migrate_v8_to_v9(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v8 -> v9 (pdf_path → source_file_path + source_file_type)");
+
+    conn.execute_batch(
+        "
+        ALTER TABLE notes ADD COLUMN source_file_type TEXT;
+        ALTER TABLE notes RENAME COLUMN pdf_path TO source_file_path;
+        UPDATE notes SET source_file_type = 'pdf' WHERE source_file_path IS NOT NULL;
+        ",
+    )?;
+
+    set_version(conn, 9)?;
+    Ok(())
+}
+
+/// v9 -> v10: 自愈迁移
+///
+/// 修复 v9 在某些环境下未完整执行的问题（user_version 已推到 9 但列没补齐）。
+/// 通过 PRAGMA table_info 探测当前列状态，缺啥补啥，幂等可重跑。
+///
+/// 目标终态：notes 表必有 source_file_path 与 source_file_type 两列。
+fn migrate_v9_to_v10(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v9 -> v10 (自愈 source_file_path / source_file_type)");
+
+    let cols = list_columns(conn, "notes")?;
+    let has_path = cols.iter().any(|c| c == "source_file_path");
+    let has_type = cols.iter().any(|c| c == "source_file_type");
+    let has_pdf = cols.iter().any(|c| c == "pdf_path");
+
+    // 处理 source_file_path
+    if !has_path {
+        if has_pdf {
+            log::info!("[v10 自愈] RENAME COLUMN pdf_path -> source_file_path");
+            conn.execute_batch("ALTER TABLE notes RENAME COLUMN pdf_path TO source_file_path;")?;
+        } else {
+            log::info!("[v10 自愈] ADD COLUMN source_file_path");
+            conn.execute_batch("ALTER TABLE notes ADD COLUMN source_file_path TEXT;")?;
+        }
+    } else if has_pdf {
+        // 极端情况：两列都存在，把 pdf_path 残留数据合并过去
+        log::info!("[v10 自愈] 合并残留 pdf_path 数据到 source_file_path");
+        conn.execute_batch(
+            "UPDATE notes SET source_file_path = pdf_path
+             WHERE source_file_path IS NULL AND pdf_path IS NOT NULL;",
+        )?;
+        // 不 DROP COLUMN pdf_path，避免触发 FTS 触发器引用问题；不影响功能
+    }
+
+    // 处理 source_file_type
+    if !has_type {
+        log::info!("[v10 自愈] ADD COLUMN source_file_type");
+        conn.execute_batch("ALTER TABLE notes ADD COLUMN source_file_type TEXT;")?;
+    }
+
+    // 回填类型（只填还没值的行）
+    conn.execute_batch(
+        "UPDATE notes SET source_file_type = 'pdf'
+         WHERE source_file_path IS NOT NULL AND source_file_type IS NULL;",
+    )?;
+
+    set_version(conn, 10)?;
+    Ok(())
+}
+
+/// v10 -> v11: 新增同步历史表（sync_history）
+fn migrate_v10_to_v11(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v10 -> v11（同步历史表）");
+
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS sync_history (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            direction    TEXT NOT NULL,      -- 'export' / 'import' / 'push' / 'pull'
+            started_at   TEXT NOT NULL,
+            finished_at  TEXT,
+            success      INTEGER NOT NULL DEFAULT 0,
+            error        TEXT,
+            stats_json   TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sync_history_started ON sync_history(started_at DESC);
+        ",
+    )?;
+
+    set_version(conn, 11)?;
+    Ok(())
+}
+
+/// v11 -> v12: 新增待办任务表 + 任务关联表
+fn migrate_v11_to_v12(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v11 -> v12（待办任务）");
+
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS tasks (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            title        TEXT NOT NULL,
+            description  TEXT,
+            priority     INTEGER NOT NULL DEFAULT 1,  -- 0=urgent / 1=normal / 2=low
+            important    INTEGER NOT NULL DEFAULT 0,  -- 0/1 艾森豪威尔重要性维度
+            status       INTEGER NOT NULL DEFAULT 0,  -- 0=todo / 1=done
+            due_date     TEXT,                        -- 'YYYY-MM-DD'，NULL 表示无截止
+            completed_at TEXT,                        -- 完成时间（ISO）
+            created_at   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            updated_at   TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_tasks_status    ON tasks(status);
+        CREATE INDEX IF NOT EXISTS idx_tasks_due_date  ON tasks(due_date);
+        CREATE INDEX IF NOT EXISTS idx_tasks_priority  ON tasks(priority);
+
+        -- 任务关联（多态）：一个任务可以挂多个笔记 / 路径 / URL
+        CREATE TABLE IF NOT EXISTS task_links (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id    INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            kind       TEXT NOT NULL,          -- 'note' / 'path' / 'url'
+            target     TEXT NOT NULL,          -- note_id 字符串 / 绝对路径 / URL
+            label      TEXT,                   -- 展示文案（如笔记标题）
+            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_links_task ON task_links(task_id);
+        ",
+    )?;
+
+    set_version(conn, 12)?;
+    Ok(())
+}
+
+/// v12 -> v13: 为 HTML → Markdown 迁移做准备
+///
+/// 思路：笔记存储最终要切到 Markdown，但现存 content 全是 HTML。
+/// 本次迁移只做**一次性备份**，不动任何代码逻辑：
+///   1. notes 表新增 content_html 字段（幂等）
+///   2. 把现有 content（HTML）整段拷贝到 content_html 做兜底
+///
+/// 后续阶段：
+///   · 阶段 2：接入 tiptap-markdown，编辑器切 MD I/O
+///   · 阶段 3：批量把 content_html → Markdown 写回 content
+///   · 阶段 4：清理 strip_html 等遗留逻辑
+///
+/// 即便后续翻车，content_html 始终保留原始 HTML，可以随时回滚。
+fn migrate_v12_to_v13(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v12 -> v13 (notes 新增 content_html 备份字段)");
+
+    let cols = list_columns(conn, "notes")?;
+    if !cols.iter().any(|c| c == "content_html") {
+        conn.execute_batch("ALTER TABLE notes ADD COLUMN content_html TEXT;")?;
+    }
+
+    // 幂等回填：仅对尚未备份的行执行
+    conn.execute_batch(
+        "UPDATE notes
+            SET content_html = content
+          WHERE content_html IS NULL AND content IS NOT NULL;",
+    )?;
+
+    set_version(conn, 13)?;
+    Ok(())
+}
+
+/// v13 -> v14: 批量把 notes.content 从 HTML 转成 Markdown
+///
+/// 配合前端 Tiptap 切换到 Markdown I/O 模式，数据库内容格式也从 HTML 切到 MD。
+/// 依赖 v13 已经把原 HTML 备份到 content_html，本步骤可随时回滚。
+///
+/// 回滚 SQL（仅开发者手动执行）：
+///   UPDATE notes SET content = content_html WHERE content_html IS NOT NULL;
+fn migrate_v13_to_v14(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v13 -> v14 (notes.content HTML → Markdown)");
+
+    // 1) 取出所有待转换的笔记（content 非空且未被清空的）
+    let mut stmt =
+        conn.prepare("SELECT id, content FROM notes WHERE content IS NOT NULL AND content != ''")?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+
+    log::info!("[v14] 准备转换 {} 条笔记", rows.len());
+
+    // 2) 一次事务内批量更新
+    let tx = conn.unchecked_transaction()?;
+    for (id, html) in &rows {
+        let md = crate::services::markdown::html_to_markdown(html);
+        tx.execute(
+            "UPDATE notes SET content = ?1 WHERE id = ?2",
+            rusqlite::params![md, id],
+        )?;
+    }
+    tx.commit()?;
+
+    log::info!("[v14] 转换完成");
+    set_version(conn, 14)?;
+    Ok(())
+}
+
+/// v14 -> v15: 待办任务增加定时提醒字段
+///
+/// due_date 字段保留原名，但字符串格式从仅 'YYYY-MM-DD' 扩展为可选带时分
+/// ('YYYY-MM-DD HH:MM:SS')。旧数据不迁移，继续视作全天截止。
+///
+/// 新增两列：
+///   · remind_before_minutes：提前 N 分钟提醒，NULL = 不提醒
+///   · reminded_at：上次触发提醒的时刻（ISO），用于去重
+fn migrate_v14_to_v15(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v14 -> v15 (tasks 定时提醒字段)");
+
+    let cols = list_columns(conn, "tasks")?;
+    if !cols.iter().any(|c| c == "remind_before_minutes") {
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN remind_before_minutes INTEGER;")?;
+    }
+    if !cols.iter().any(|c| c == "reminded_at") {
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN reminded_at TEXT;")?;
+    }
+
+    set_version(conn, 15)?;
+    Ok(())
+}
+
+/// v15 -> v16: 补 note_links.source_id 索引
+///
+/// 原先只建了 idx_note_links_target（反向链接查询走这条），
+/// 但保存笔记时 `DELETE FROM note_links WHERE source_id = ?1` 没有 source_id 单列索引可用。
+/// 笔记数量大时该 DELETE 会退化为全表扫描，导致保存明显变慢。
+fn migrate_v15_to_v16(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v15 -> v16 (补 note_links.source_id 索引)");
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_note_links_source ON note_links(source_id);",
+    )?;
+
+    set_version(conn, 16)?;
+    Ok(())
+}
+
+/// v16 -> v17: notes 新增 title_normalized 列 + 索引，解除 wiki 链接匹配的全表扫
+///
+/// 背景：`find_note_id_by_title_loose` 是 [[wiki-link]] 编辑器自动补全、保存时链接同步
+/// 的热路径。老实现 `SELECT id, title FROM notes WHERE is_deleted = 0` 全表拉回来，
+/// 再在 Rust 侧对每行 title 做 `normalize_title`（去转义 + 空白折叠 + lowercase）再比较。
+/// 10k 笔记时每次调用要几十毫秒，打字时卡顿肉眼可见。
+///
+/// 本迁移：
+/// 1) ALTER TABLE 新增 title_normalized 列（幂等）
+/// 2) 用 Rust 侧 `normalize_title` 批量回填（保证和运行时比较使用同一套规则）
+/// 3) 建部分索引 `idx_notes_title_normalized WHERE is_deleted = 0`
+///
+/// 之后 `find_note_id_by_title_loose` 直接 `WHERE title_normalized = ?`，走 O(log n) 索引。
+///
+/// **DAO 协议**：`create_note` / `update_note` / `get_or_create_daily` 写入时必须同步
+/// 维护 `title_normalized`。老数据一次性回填后不再需要运行时 fallback。
+fn migrate_v16_to_v17(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v16 -> v17 (notes.title_normalized + 索引)");
+
+    let cols = list_columns(conn, "notes")?;
+    if !cols.iter().any(|c| c == "title_normalized") {
+        conn.execute_batch("ALTER TABLE notes ADD COLUMN title_normalized TEXT;")?;
+    }
+
+    // 回填：仅对 title_normalized IS NULL 的行（幂等可重跑）
+    let mut stmt = conn.prepare("SELECT id, title FROM notes WHERE title_normalized IS NULL")?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+
+    log::info!("[v17] 准备回填 {} 条笔记的 title_normalized", rows.len());
+
+    let tx = conn.unchecked_transaction()?;
+    for (id, title) in &rows {
+        let norm = crate::database::links::normalize_title(title);
+        tx.execute(
+            "UPDATE notes SET title_normalized = ?1 WHERE id = ?2",
+            rusqlite::params![norm, id],
+        )?;
+    }
+    tx.commit()?;
+
+    // 部分索引：只对活跃笔记建索引，更紧凑
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_notes_title_normalized
+         ON notes(title_normalized) WHERE is_deleted = 0;",
+    )?;
+
+    set_version(conn, 17)?;
+    Ok(())
+}
+
+/// v17 -> v18: tasks 新增循环提醒字段
+///
+/// 原 v15 给任务加了"提前 N 分钟提醒 + reminded_at 去重"，只能提醒一次。
+/// 本迁移补上循环规则，让待办可按"每天/每周某几天/每月/每 N 天"反复提醒。
+///
+/// 新增列：
+///   · repeat_kind        'none'/'daily'/'weekly'/'monthly'，默认 'none'
+///   · repeat_interval    每 N 个单位（默认 1）
+///   · repeat_weekdays    '1,2,3,4,5'（1=Mon..7=Sun），仅 weekly 有效；NULL 表示按 interval 周
+///   · repeat_until       'YYYY-MM-DD'，循环终止日期；NULL 表示无上限
+///   · repeat_count       总触发次数上限（含首次）；NULL 表示无上限
+///   · repeat_done_count  已触发次数，默认 0
+fn migrate_v17_to_v18(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v17 -> v18 (tasks 循环提醒字段)");
+
+    let cols = list_columns(conn, "tasks")?;
+    if !cols.iter().any(|c| c == "repeat_kind") {
+        conn.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN repeat_kind TEXT NOT NULL DEFAULT 'none';",
+        )?;
+    }
+    if !cols.iter().any(|c| c == "repeat_interval") {
+        conn.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN repeat_interval INTEGER NOT NULL DEFAULT 1;",
+        )?;
+    }
+    if !cols.iter().any(|c| c == "repeat_weekdays") {
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN repeat_weekdays TEXT;")?;
+    }
+    if !cols.iter().any(|c| c == "repeat_until") {
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN repeat_until TEXT;")?;
+    }
+    if !cols.iter().any(|c| c == "repeat_count") {
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN repeat_count INTEGER;")?;
+    }
+    if !cols.iter().any(|c| c == "repeat_done_count") {
+        conn.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN repeat_done_count INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+
+    set_version(conn, 18)?;
+    Ok(())
+}
+
+/// v18 -> v19: AI 提示词库（prompt_templates）+ 7 条内置模板
+///
+/// 背景：编辑器 AI 菜单原本硬编码了 7 个 action（续写/总结/改写/扩展/精简/译英/译中），
+/// 用户没法加自己的 Prompt，也没法改内置文案。本迁移把模板迁移到 DB：
+///   · is_builtin=1 + builtin_code=xxx 的行是内置，首次安装写入；
+///   · 用户自定义模板 is_builtin=0；
+///   · 菜单改为读 DB 列表，点击时走 `ai_write_assist` 的 `prompt:{id}` 分支。
+///
+/// 字段说明：
+///   · output_mode: 'replace'（替换选区，默认） / 'append'（追加到选区末尾，续写场景） / 'popup'（仅展示，如总结）
+///   · builtin_code: 和旧硬编码 action 保持一致，万一前端旧版本传入也能映射到 DB
+///   · sort_order: 越小越靠前，内置占 10/20/30… 让用户插队有空间
+fn migrate_v18_to_v19(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v18 -> v19 (prompt_templates + 内置模板)");
+
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS prompt_templates (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            title         TEXT NOT NULL,
+            description   TEXT NOT NULL DEFAULT '',
+            prompt        TEXT NOT NULL,
+            output_mode   TEXT NOT NULL DEFAULT 'replace',
+            icon          TEXT,
+            is_builtin    INTEGER NOT NULL DEFAULT 0,
+            builtin_code  TEXT UNIQUE,
+            sort_order    INTEGER NOT NULL DEFAULT 0,
+            enabled       INTEGER NOT NULL DEFAULT 1,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            updated_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_prompt_templates_sort
+            ON prompt_templates(sort_order, id);
+        ",
+    )?;
+
+    // 内置模板（首次插入，INSERT OR IGNORE 保证再跑不覆盖用户修改）
+    //
+    // 所有 prompt 用 {{selection}} / {{context}} / {{title}} 三个占位符，
+    // services/prompt.rs 的 render 函数会在调用 AI 前做字符串替换。
+    //
+    // 短模板为主，长指令保留给用户自行 fork，避免内置"太啰嗦"。
+    let builtins: &[(&str, &str, &str, &str, &str, i32)] = &[
+        ("续写", "根据上下文自然地续写", "你是一个写作助手。请根据下面的上下文和已有内容，自然地续写下去。只输出续写的新内容，不要重复已有内容。使用中文。\n\n【上下文】\n{{context}}\n\n【已有内容】\n{{selection}}",
+         "append", "ArrowRight", 10),
+        ("总结", "提炼关键信息", "你是一个写作助手。请对以下文本进行简洁的总结概括，突出关键信息和核心观点。使用中文。\n\n【原文】\n{{selection}}",
+         "popup", "FileText", 20),
+        ("改写", "优化表达让文本更流畅", "你是一个写作助手。请改写以下文本，使其表达更加流畅、专业。保持原意不变。只输出改写后的内容，不要解释。使用中文。\n\n【原文】\n{{selection}}",
+         "replace", "RefreshCw", 30),
+        ("扩展", "补充细节和论述", "你是一个写作助手。请对以下文本进行扩展，补充更多细节、论据或例子。保持原有观点不变。使用中文。\n\n【原文】\n{{selection}}",
+         "replace", "Expand", 40),
+        ("精简", "去掉冗余保留核心", "你是一个写作助手。请精简以下文本，保留核心信息，去除冗余表达。只输出精简后的内容。使用中文。\n\n【原文】\n{{selection}}",
+         "replace", "Shrink", 50),
+        ("译英", "翻译成地道英文", "你是一个翻译助手。请将以下文本翻译成地道的英文。只输出翻译结果，不要解释。\n\n【原文】\n{{selection}}",
+         "replace", "Languages", 60),
+        ("译中", "翻译成准确中文", "你是一个翻译助手。请将以下文本翻译成准确、通顺的中文。只输出翻译结果，不要解释。\n\n【原文】\n{{selection}}",
+         "replace", "Languages", 70),
+    ];
+
+    // builtin_code 对应旧硬编码 action
+    let codes = [
+        "continue",
+        "summarize",
+        "rewrite",
+        "expand",
+        "shorten",
+        "translate_en",
+        "translate_zh",
+    ];
+
+    for (i, (title, desc, prompt, mode, icon, sort)) in builtins.iter().enumerate() {
+        conn.execute(
+            "INSERT OR IGNORE INTO prompt_templates
+                (title, description, prompt, output_mode, icon, is_builtin, builtin_code, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)",
+            rusqlite::params![title, desc, prompt, mode, icon, codes[i], sort],
+        )?;
+    }
+
+    set_version(conn, 19)?;
+    Ok(())
+}
+
+/// v19 -> v20: ai_messages 加 skill_calls_json 字段
+///
+/// 用途：T-004 Skills 框架下，assistant 消息里可能发生一次或多次 tool_call
+/// （`search_notes` / `get_note` 等）。把每次调用（name + args + result + status）
+/// 序列化成 JSON 数组存到这一列，便于：
+///   1. 重开对话时重绘 SkillCall 折叠卡片
+///   2. 诊断问题（AI 为啥调了这个工具、返回啥）
+///
+/// 为什么新增独立列而不是塞进 references_json：
+///   - references_json 是纯 note id 数组（给 UI 标"引用的笔记"用）
+///   - skill_calls_json 结构复杂（包含 args/result/status），语义完全不同
+fn migrate_v19_to_v20(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v19 -> v20 (ai_messages.skill_calls_json)");
+
+    let cols = list_columns(conn, "ai_messages")?;
+    if !cols.iter().any(|c| c == "skill_calls_json") {
+        conn.execute_batch("ALTER TABLE ai_messages ADD COLUMN skill_calls_json TEXT;")?;
+    }
+
+    set_version(conn, 20)?;
+    Ok(())
+}
+
+/// v20 -> v21: notes 新增 is_hidden 字段（T-003 笔记"隐藏"标记）
+///
+/// 语义是"弱隐藏"：默认视图（笔记列表 / 搜索 / 反链 / 图谱 / RAG）完全看不见；
+/// 但 wiki link [[...]] 点击跳转仍允许打开，保证链接不失效。
+///
+/// 这不是加密——数据库文件打开还是能看到内容。加密放 T-007。
+///
+/// 部分索引只建在"活跃笔记"上（is_deleted=0），避免回收站的 hidden 条目
+/// 干扰热路径查询。
+fn migrate_v20_to_v21(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v20 -> v21 (notes.is_hidden)");
+
+    let cols = list_columns(conn, "notes")?;
+    if !cols.iter().any(|c| c == "is_hidden") {
+        conn.execute_batch("ALTER TABLE notes ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0;")?;
+    }
+
+    // is_hidden 出现在 WHERE 条件里很频繁（所有主路径查询都加 is_hidden=0），
+    // 建部分索引帮助过滤；索引只覆盖"活跃"笔记，和现有 idx_notes_pinned 的思路一致
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_notes_hidden
+         ON notes(is_hidden, updated_at DESC) WHERE is_deleted = 0;",
+    )?;
+
+    set_version(conn, 21)?;
+    Ok(())
+}
+
+/// v21 -> v22: notes 新增 content_hash 字段 + 索引 + 存量回填
+///
+/// 背景：导入 Markdown 文件夹时，原实现不做去重，同一批文件反复导入会产生重复笔记。
+/// 本迁移把"内容指纹"持久化到 notes.content_hash（SHA-256 十六进制串），
+/// 后续扫描外部 md 时按 (title, content_hash) 做兜底匹配（source_file_path 为主判）。
+///
+/// DAO 协议：`create_note` / `update_note` / `update_note_content` / `get_or_create_daily`
+/// 写入正文时必须同步维护 content_hash。存量笔记由本迁移一次性回填。
+///
+/// 部分索引只覆盖活跃笔记（is_deleted=0），和 idx_notes_pinned / idx_notes_hidden 的思路一致。
+fn migrate_v21_to_v22(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v21 -> v22 (notes.content_hash)");
+
+    let cols = list_columns(conn, "notes")?;
+    if !cols.iter().any(|c| c == "content_hash") {
+        conn.execute_batch("ALTER TABLE notes ADD COLUMN content_hash TEXT;")?;
+    }
+
+    // 回填：仅对 content_hash IS NULL 的行（幂等可重跑）
+    let mut stmt = conn.prepare("SELECT id, content FROM notes WHERE content_hash IS NULL")?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+
+    log::info!("[v22] 准备回填 {} 条笔记的 content_hash", rows.len());
+
+    let tx = conn.unchecked_transaction()?;
+    for (id, content) in &rows {
+        let hash = crate::services::hash::sha256_hex(content);
+        tx.execute(
+            "UPDATE notes SET content_hash = ?1 WHERE id = ?2",
+            rusqlite::params![hash, id],
+        )?;
+    }
+    tx.commit()?;
+
+    // 部分索引：只对活跃笔记建索引
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_notes_content_hash
+         ON notes(content_hash) WHERE is_deleted = 0;",
+    )?;
+
+    set_version(conn, 22)?;
+    Ok(())
+}
+
+/// v22 -> v23: 笔记加密基础字段（T-007 笔记加密保险库）
+///
+/// - `notes.is_encrypted` 0/1：是否处于加密态
+/// - `notes.encrypted_blob` BLOB：密文全量包（nonce ‖ ciphertext ‖ tag）
+/// - vault 主密码相关写 app_config：
+///   - `vault.salt`       16 字节 base64（派生 key 用的盐）
+///   - `vault.verifier`   加密后的常量字符串（用于解锁时校验密码对不对，不泄露 key）
+///
+/// 设计取舍：
+/// 1. **App 层加密**（B1 方案）：密文存在现有 notes 表的新 BLOB 列里，不换 SQLCipher
+/// 2. **加密笔记的 content 列保留"🔒 已加密"占位**：这样老代码读取 content 时不会看到乱码；
+///    FTS5 索引到的也是这个占位，自然过滤掉加密笔记的搜索命中
+/// 3. 忘记主密码 = 数据丢失（T-007 决策 ④）：verifier 不是 key，靠解密校验密码
+fn migrate_v22_to_v23(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v22 -> v23 (notes 加密字段 + vault 基础)");
+
+    let cols = list_columns(conn, "notes")?;
+    if !cols.iter().any(|c| c == "is_encrypted") {
+        conn.execute_batch(
+            "ALTER TABLE notes ADD COLUMN is_encrypted INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    if !cols.iter().any(|c| c == "encrypted_blob") {
+        conn.execute_batch("ALTER TABLE notes ADD COLUMN encrypted_blob BLOB;")?;
+    }
+
+    // 部分索引，过滤/定位加密笔记的常用热路径
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_notes_encrypted
+         ON notes(is_encrypted) WHERE is_deleted = 0;",
+    )?;
+
+    // vault 相关配置是可选的——不预置，在首次 setup 时由代码写入
+
+    set_version(conn, 23)?;
+    Ok(())
+}
+
+/// v23 → v24: T-024 同步架构 V1
+///
+/// 新表 `sync_backends`：用户配置的同步后端列表（可同时挂多个）
+///   - `id` 自增主键
+///   - `kind`：local / webdav / s3 / git
+///   - `name`：用户起的名字（如"我的坚果云"）
+///   - `config_json`：backend 专属配置（路径 / endpoint / bucket / 凭据等，凭据已用 vault 加密）
+///   - `enabled` / `auto_sync` / `created_at`
+///
+/// 新表 `sync_remote_state`：每条笔记 × 每个 backend 的同步状态
+///   - 唯一键 (backend_id, note_id)
+///   - `last_synced_hash`：上次同步时的笔记内容 SHA-256（供 diff 用）
+///   - `last_synced_ts`：上次同步成功时间（last-write-wins 的依据之一）
+///   - `remote_path`：在 backend 上的相对路径（如 "notes/<uuid>.md"）
+///   - `tombstone`：本地已删除标记（同步后告诉远端也删，远端确认后才能从表里移除）
+///
+/// 设计要点：
+/// 1. **不动 notes 表本身**：所有同步元数据放独立表，未启用同步的用户零成本
+/// 2. **per-backend 状态独立**：用户可以同时配 LocalPath + WebDAV + S3，互不干扰
+/// 3. **soft delete 走 tombstone**：硬删笔记时同步表保留 tombstone 行，下次 sync 推出删除
+fn migrate_v23_to_v24(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v23 -> v24 (T-024 同步 V1: sync_backends + sync_remote_state)");
+
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS sync_backends (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind         TEXT    NOT NULL,             -- 'local' | 'webdav' | 's3' | 'git'
+            name         TEXT    NOT NULL,
+            config_json  TEXT    NOT NULL DEFAULT '{}',
+            enabled      INTEGER NOT NULL DEFAULT 1,
+            auto_sync    INTEGER NOT NULL DEFAULT 0,
+            sync_interval_min INTEGER NOT NULL DEFAULT 30,
+            last_push_ts TEXT,
+            last_pull_ts TEXT,
+            created_at   DATETIME NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at   DATETIME NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        CREATE TABLE IF NOT EXISTS sync_remote_state (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            backend_id         INTEGER NOT NULL,
+            note_id            INTEGER NOT NULL,
+            remote_path        TEXT    NOT NULL,
+            last_synced_hash   TEXT    NOT NULL,
+            last_synced_ts     TEXT    NOT NULL,
+            tombstone          INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (backend_id, note_id),
+            FOREIGN KEY (backend_id) REFERENCES sync_backends(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sync_remote_state_backend
+            ON sync_remote_state(backend_id);
+        CREATE INDEX IF NOT EXISTS idx_sync_remote_state_note
+            ON sync_remote_state(note_id);
+        "#,
+    )?;
+
+    set_version(conn, 24)?;
+    Ok(())
+}
+
+/// v24 -> v25: AI 双向打通笔记
+///   1. ai_models 加 max_context（用户可在设置页填模型上下文窗口大小，
+///      默认 32000，给前端动态计算附加笔记的截断阈值用）
+///   2. ai_conversations 加 attached_note_ids（JSON 数组字符串，挂在对话级，
+///      整个对话共享一组附加笔记，类比 ChatGPT 项目）
+///   3. notes 加 from_ai_conversation_id（归档来源追溯，给 B 方向"AI → 笔记"用）
+fn migrate_v24_to_v25(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v24 -> v25");
+
+    conn.execute_batch(
+        r#"
+        ALTER TABLE ai_models
+            ADD COLUMN max_context INTEGER NOT NULL DEFAULT 32000;  -- v51 起新建模型默认 128000，见 migrate_v50_to_v51
+
+        ALTER TABLE ai_conversations
+            ADD COLUMN attached_note_ids TEXT NOT NULL DEFAULT '[]';
+
+        ALTER TABLE notes
+            ADD COLUMN from_ai_conversation_id INTEGER REFERENCES ai_conversations(id) ON DELETE SET NULL;
+
+        CREATE INDEX IF NOT EXISTS idx_notes_from_ai_conv
+            ON notes(from_ai_conversation_id)
+            WHERE from_ai_conversation_id IS NOT NULL;
+        "#,
+    )?;
+
+    set_version(conn, 25)?;
+    Ok(())
+}
+
+/// v25 -> v26: 笔记伴生 AI 对话
+///
+/// `companion_conversation_id` 给"在编辑器右侧抽屉里问 AI"功能用：
+/// 每篇笔记懒创建一个独立 AI 对话，下次打开同笔记自动复用对话历史。
+/// 删除笔记时如果对话还在，对话不会被强制删（用户可能想保留聊天记录），
+/// 这里 ON DELETE SET NULL 让对话自由存在。
+fn migrate_v25_to_v26(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v25 -> v26");
+    conn.execute_batch(
+        r#"
+        ALTER TABLE notes
+            ADD COLUMN companion_conversation_id INTEGER
+            REFERENCES ai_conversations(id) ON DELETE SET NULL;
+
+        CREATE INDEX IF NOT EXISTS idx_notes_companion_conv
+            ON notes(companion_conversation_id)
+            WHERE companion_conversation_id IS NOT NULL;
+        "#,
+    )?;
+    set_version(conn, 26)?;
+    Ok(())
+}
+
+/// v26 -> v27: tasks 表加 source_batch_id（AI 批量导入用，支持一键撤销整批）
+///
+/// 当用户用「AI 智能规划」一次生成 N 条待办时，所有同批次任务共享一个 batch_id，
+/// 后续可以按 batch_id 批量删除/撤销，避免用户手动一条条清理。
+/// 老数据 source_batch_id 为 NULL，自然不参与批次操作。
+fn migrate_v26_to_v27(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v26 -> v27 (tasks 新增 source_batch_id)");
+
+    let cols = list_columns(conn, "tasks")?;
+    if !cols.iter().any(|c| c == "source_batch_id") {
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN source_batch_id TEXT;")?;
+    }
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_source_batch
+            ON tasks(source_batch_id)
+            WHERE source_batch_id IS NOT NULL;",
+    )?;
+
+    set_version(conn, 27)?;
+    Ok(())
+}
+
+/// v27 -> v28: 外部 .md 双向同步基础设施
+///
+/// 1. 新表 `note_url_mapping`：记录笔记里每张图的"内部 URL ↔ 原始 URL"映射
+///    - 打开 .md 时：原始链接（./images/foo.png 或 https://...）→ 内部 asset.localhost URL
+///      在收集替换的同时把这一对落库；
+///    - 写回 .md 时：扫笔记 content 的所有 URL，命中映射就反查替换回原始 URL
+///      → 原文件链接保持原样，不污染用户的图床/相对路径写法。
+///    - 用户在编辑器里新插的图（不在映射表）按"复制到 <basename>.assets/"策略处理。
+///    UNIQUE (note_id, internal_url) 保证同一张图不会被反复写多条。
+///
+/// 2. notes 表新增 `last_writeback_mtime`：上次成功写回原 .md 时该文件的 mtime（秒级时间戳）。
+///    每次写回前比对：若磁盘当前 mtime ≠ 此值，说明外部编辑器（VSCode 等）改过文件，
+///    弹冲突 Modal 让用户选「覆盖外部 / 保留外部 / 取消」。
+fn migrate_v27_to_v28(conn: &Connection) -> Result<(), AppError> {
+    log::info!(
+        "数据库迁移: v27 -> v28 (外部 .md 双向同步: note_url_mapping + last_writeback_mtime)"
+    );
+
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS note_url_mapping (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            note_id       INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+            internal_url  TEXT    NOT NULL,
+            original_url  TEXT    NOT NULL,
+            created_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+            UNIQUE (note_id, internal_url)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_url_mapping_note ON note_url_mapping(note_id);
+        ",
+    )?;
+
+    let cols = list_columns(conn, "notes")?;
+    if !cols.iter().any(|c| c == "last_writeback_mtime") {
+        conn.execute_batch("ALTER TABLE notes ADD COLUMN last_writeback_mtime INTEGER;")?;
+    }
+
+    set_version(conn, 28)?;
+    Ok(())
+}
+
+/// v28 -> v29: 把笔记 content 里的素材绝对路径替换成相对协议 `kb-asset://`
+///
+/// 历史背景：旧版前端用 `convertFileSrc(absolute)` 直接把 `http://asset.localhost/<URL编码的绝对路径>`
+/// 写进笔记 content。这导致一旦用户改变数据目录（指针文件 / KB_DATA_DIR），
+/// 笔记里 src 仍指向旧位置，文件读不到 → 全裂图。
+///
+/// 治本方案：content 里只存 `kb-asset://<相对 data_dir 的 POSIX 路径>`，
+/// 渲染时由前端 MutationObserver 实时拼当前 data_dir 解析。
+///
+/// 本迁移 = 一次性数据清洗：
+/// 1. 正则扫每条笔记 content，匹配 `http://asset.localhost/<encoded>` 与 `asset://localhost/<encoded>`
+/// 2. URL-decode 拿到原始绝对路径
+/// 3. 用 `services::asset_path::abs_to_rel` 把绝对路径转相对（支持 fallback 找已知子目录段，
+///    解决"绝对路径来自旧机器/旧 data_dir、当前 data_dir 不是其前缀"的场景）
+/// 4. 替换为 `kb-asset://<rel>` 写回
+///
+/// 失败兜底：路径既不在 data_dir 下也找不到已知段名时保留原样（极少见，迁移日志会告警）。
+/// 跑完后 content 里出现的 `http://asset.localhost/...` 全部应为 0；遗留的视为外链。
+fn migrate_v28_to_v29(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v28 -> v29 (笔记 content 绝对资产路径 → kb-asset://)");
+
+    use regex::Regex;
+
+    // 匹配两种 asset 协议前缀，捕获后面的 URL 编码部分（直到引号/空格/<>/换行/反引号）
+    let re = Regex::new(
+        r#"(?P<scheme>(?:http://asset\.localhost/|asset://localhost/))(?P<path>[^"'\s<>`]+)"#,
+    )
+    .expect("正则字面量恒定，编译失败属于代码 BUG");
+
+    let mut stmt =
+        conn.prepare("SELECT id, content FROM notes WHERE content IS NOT NULL AND content != ''")?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+
+    log::info!("[v29] 扫描 {} 条笔记里的 asset URL", rows.len());
+
+    // 临时拿一个 dummy data_dir：abs_to_rel 在 fallback 路径里只用 known segments 切，
+    // 不实际依赖 data_dir。准确 strip_prefix 走不通时 fallback 即可。
+    let dummy_data_dir = std::path::Path::new("");
+
+    let mut replaced_notes = 0usize;
+    let mut replaced_urls = 0usize;
+    let mut unresolved = 0usize;
+
+    let tx = conn.unchecked_transaction()?;
+    for (id, content) in &rows {
+        let mut changed_in_this_note = false;
+        let new_content = re.replace_all(content, |caps: &regex::Captures<'_>| -> String {
+            let encoded = caps.name("path").map(|m| m.as_str()).unwrap_or("");
+            let decoded = match urlencoding::decode(encoded) {
+                Ok(s) => s.into_owned(),
+                Err(_) => return caps.get(0).map(|m| m.as_str()).unwrap_or("").to_string(),
+            };
+            let abs = std::path::Path::new(&decoded);
+            match crate::services::asset_path::abs_to_rel(abs, dummy_data_dir) {
+                Some(rel) => {
+                    replaced_urls += 1;
+                    changed_in_this_note = true;
+                    format!("kb-asset://{}", rel)
+                }
+                None => {
+                    unresolved += 1;
+                    log::warn!(
+                        "[v29] 笔记 {} 中 asset 路径无法解析为相对路径，保留原样: {}",
+                        id,
+                        decoded
+                    );
+                    caps.get(0).map(|m| m.as_str()).unwrap_or("").to_string()
+                }
+            }
+        });
+
+        if changed_in_this_note {
+            tx.execute(
+                "UPDATE notes SET content = ?1 WHERE id = ?2",
+                rusqlite::params![new_content.as_ref(), id],
+            )?;
+            replaced_notes += 1;
+        }
+    }
+    tx.commit()?;
+
+    log::info!(
+        "[v29] 迁移完成：触达 {} 条笔记，替换 {} 个 asset URL，{} 个无法解析（已保留）",
+        replaced_notes,
+        replaced_urls,
+        unresolved
+    );
+
+    set_version(conn, 29)?;
+    Ok(())
+}
+
+/// v29 → v30: 待办任务一级分类
+///
+/// 新表 `task_categories`：用户自定义分类（彩色圆点 + 名称 + 排序）
+/// `tasks.category_id`：外键，NULL = 未分类（虚拟分类）
+///
+/// 设计：
+/// - `ON DELETE SET NULL`：删分类时任务回落到未分类，不级联删任务
+/// - 不预置种子数据，让用户首次进设置页自己建（避免清理负担）
+fn migrate_v29_to_v30(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v29 -> v30 (待办分类: task_categories + tasks.category_id)");
+
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS task_categories (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL UNIQUE,
+            color      TEXT NOT NULL DEFAULT '#1677ff',
+            icon       TEXT,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+        );
+        ",
+    )?;
+
+    let cols = list_columns(conn, "tasks")?;
+    if !cols.iter().any(|c| c == "category_id") {
+        conn.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN category_id INTEGER
+                REFERENCES task_categories(id) ON DELETE SET NULL;",
+        )?;
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_category
+            ON tasks(category_id) WHERE category_id IS NOT NULL;",
+    )?;
+
+    set_version(conn, 30)?;
+    Ok(())
+}
+
+/// v30 -> v31: notes 加 sort_order 字段（笔记自定义排序）
+///
+/// 设计：
+/// - INTEGER NOT NULL DEFAULT 0；越小越靠前；同 folder 内按 1000 间隔留空隙
+///   留给未来插队（同 folders.sort_order 一致的模式）
+/// - 初始化：每个 folder_id 分组内按 (updated_at DESC, id ASC) 给序号 *1000
+///   未分类（folder_id IS NULL）的笔记按 -1 单独分组
+/// - 索引 idx_notes_folder_sort 覆盖 (folder_id, sort_order)，is_deleted=0
+///   的部分索引，与 idx_notes_folder / idx_notes_pinned 思路一致
+fn migrate_v30_to_v31(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v30 -> v31 (notes.sort_order 自定义排序)");
+
+    let cols = list_columns(conn, "notes")?;
+    if !cols.iter().any(|c| c == "sort_order") {
+        conn.execute_batch("ALTER TABLE notes ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;")?;
+    }
+
+    // 初始化已有数据：同一 folder 内按修改时间倒序分配 0/1000/2000...
+    // ROW_NUMBER 在 SQLite 3.25+ 提供，rusqlite bundled 自带的版本远高于此
+    conn.execute_batch(
+        "
+        WITH ranked AS (
+            SELECT id,
+                   (ROW_NUMBER() OVER (
+                        PARTITION BY COALESCE(folder_id, -1)
+                        ORDER BY updated_at DESC, id ASC
+                   ) - 1) * 1000 AS new_order
+            FROM notes
+            WHERE is_deleted = 0
+        )
+        UPDATE notes
+        SET sort_order = (SELECT new_order FROM ranked WHERE ranked.id = notes.id)
+        WHERE id IN (SELECT id FROM ranked);
+        ",
+    )?;
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_notes_folder_sort
+            ON notes(folder_id, sort_order) WHERE is_deleted = 0;",
+    )?;
+
+    set_version(conn, 31)?;
+    Ok(())
+}
+
+/// v31 -> v32: tasks 加 parent_task_id（子任务支持）
+///
+/// 设计：
+/// - parent_task_id NULL → 主任务（出现在主列表）
+/// - parent_task_id 非 NULL → 子任务（在主任务详情下显示）
+/// - ON DELETE CASCADE：删主任务自动删所有子任务，避免孤儿
+/// - 部分索引只覆盖子任务（非 NULL），节省空间
+///
+/// 不限制嵌套层级（DB 层允许多层），但前端 UI 默认只展示 1 层 —— 与
+/// Microsoft To Do / Things 一致的"步骤"模型，足够个人使用。
+fn migrate_v31_to_v32(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v31 -> v32 (tasks.parent_task_id 子任务)");
+
+    let cols = list_columns(conn, "tasks")?;
+    if !cols.iter().any(|c| c == "parent_task_id") {
+        conn.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN parent_task_id INTEGER
+                REFERENCES tasks(id) ON DELETE CASCADE;",
+        )?;
+    }
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_parent
+            ON tasks(parent_task_id) WHERE parent_task_id IS NOT NULL;",
+    )?;
+
+    set_version(conn, 32)?;
+    Ok(())
+}
+
+/// v32 -> v33: 外部 MCP server 注册表（M5-2）
+///
+/// 让用户可以在主应用里加任意 MCP server（GitHub / Filesystem / 高德地图…），
+/// 自家 AI 对话页通过 services::mcp_client::McpClientManager 统一调用。
+///
+/// 字段说明：
+/// - transport: 目前只支持 "stdio"（streamable-http 留给后续）
+/// - command: 可执行文件路径或命令名（如 "npx" / 绝对路径）
+/// - args: JSON array of strings，命令行参数
+/// - env: JSON object，环境变量（OAuth token 等敏感配置走这里）
+/// - enabled: 0/1，禁用时不会被 spawn
+fn migrate_v32_to_v33(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v32 -> v33 (mcp_servers 外部 MCP 注册表)");
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mcp_servers (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL UNIQUE,
+            transport   TEXT NOT NULL DEFAULT 'stdio',
+            command     TEXT NOT NULL,
+            args        TEXT NOT NULL DEFAULT '[]',
+            env         TEXT NOT NULL DEFAULT '{}',
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_mcp_servers_enabled ON mcp_servers(enabled);",
+    )?;
+
+    set_version(conn, 33)?;
+    Ok(())
+}
+
+/// v33 -> v34: 闪卡 + FSRS 复习
+///
+/// `cards` 存卡片正反面 + FSRS 调度状态（下次到期/稳定度/难度等）。
+/// `card_review_logs` 每次复习写一条历史，可用于参数优化（FSRS optimizer）和统计图表。
+///
+/// SRS 算法（FSRS）跑在前端 ts-fsrs，后端只负责持久化。前端复习时算出
+/// 新的 (due/stability/difficulty/...) 一起传回 review_card 命令更新。
+fn migrate_v33_to_v34(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v33 -> v34 (闪卡 + FSRS 复习)");
+
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS cards (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            note_id         INTEGER REFERENCES notes(id) ON DELETE SET NULL,
+            front           TEXT NOT NULL,
+            back            TEXT NOT NULL,
+            deck            TEXT NOT NULL DEFAULT 'default',
+
+            -- FSRS 调度状态（默认值对应『新卡』）
+            due             TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            stability       REAL NOT NULL DEFAULT 0,
+            difficulty      REAL NOT NULL DEFAULT 0,
+            elapsed_days    INTEGER NOT NULL DEFAULT 0,
+            scheduled_days  INTEGER NOT NULL DEFAULT 0,
+            reps            INTEGER NOT NULL DEFAULT 0,
+            lapses          INTEGER NOT NULL DEFAULT 0,
+            -- FSRS state: 0=New, 1=Learning, 2=Review, 3=Relearning
+            state           INTEGER NOT NULL DEFAULT 0,
+            last_review     TEXT,
+
+            -- 软删除（与 notes 一致的回收站语义）
+            is_deleted      INTEGER NOT NULL DEFAULT 0,
+
+            created_at      TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at      TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cards_due ON cards(due) WHERE is_deleted = 0;
+        CREATE INDEX IF NOT EXISTS idx_cards_deck ON cards(deck) WHERE is_deleted = 0;
+        CREATE INDEX IF NOT EXISTS idx_cards_note ON cards(note_id) WHERE is_deleted = 0;
+
+        CREATE TABLE IF NOT EXISTS card_review_logs (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            card_id             INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+            -- 用户评分: 1=Again, 2=Hard, 3=Good, 4=Easy（与 ts-fsrs Rating 枚举一致）
+            rating              INTEGER NOT NULL,
+            state               INTEGER NOT NULL,
+            due                 TEXT NOT NULL,
+            stability           REAL NOT NULL,
+            difficulty          REAL NOT NULL,
+            elapsed_days        INTEGER NOT NULL,
+            last_elapsed_days   INTEGER NOT NULL DEFAULT 0,
+            scheduled_days      INTEGER NOT NULL,
+            review              TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_card_logs_card ON card_review_logs(card_id);
+        CREATE INDEX IF NOT EXISTS idx_card_logs_review ON card_review_logs(review);
+        ",
+    )?;
+
+    set_version(conn, 34)?;
+    Ok(())
+}
+
+/// v34 -> v35: 文件夹自定义颜色
+///
+/// 给 `folders` 表加 `color TEXT` 列，存十六进制颜色（如 `#1677ff`）。
+/// `NULL` 表示沿用默认色（由前端决定 = `token.colorPrimary`）。
+fn migrate_v34_to_v35(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v34 -> v35 (folders.color 自定义颜色)");
+
+    let cols = list_columns(conn, "folders")?;
+    if !cols.iter().any(|c| c == "color") {
+        conn.execute_batch("ALTER TABLE folders ADD COLUMN color TEXT;")?;
+    }
+
+    set_version(conn, 35)?;
+    Ok(())
+}
+
+/// v35 -> v36: notes.stable_uuid 多端稳定标识（T-S010 同步重构）
+///
+/// 同步 V1 manifest 中的 `stable_id` 早期版本直接用本地 i64 主键 → 多端撞车
+/// （A 的 note_id=5 和 B 的 note_id=5 各是不同笔记，同步到一起会复制错乱）。
+///
+/// 这里加 `notes.stable_uuid TEXT`：
+/// - 现有存量笔记由本迁移一次性生成 UUID v4 回填（在单个事务里完成）
+/// - DAO 在 `create_note` 时同步生成 UUID 写入
+/// - 用**部分唯一索引** `WHERE stable_uuid IS NOT NULL` 保护 UNIQUE 约束，
+///   兼容 NULL 行（理论上 backfill 完成后不会有 NULL，但为防御老库异常路径）
+///
+/// 注意：SQLite `ALTER TABLE ADD COLUMN` 不支持加 `NOT NULL`（除非有静态 DEFAULT），
+/// UUID 必须 Rust 侧生成而非 SQL，所以"列允许 NULL + 单独 UNIQUE 索引"是唯一方案。
+fn migrate_v35_to_v36(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v35 -> v36 (notes.stable_uuid 多端稳定标识)");
+
+    let cols = list_columns(conn, "notes")?;
+    if !cols.iter().any(|c| c == "stable_uuid") {
+        conn.execute_batch("ALTER TABLE notes ADD COLUMN stable_uuid TEXT;")?;
+    }
+
+    // backfill：对 stable_uuid IS NULL 的行（幂等可重跑）生成 UUID v4
+    let mut stmt = conn.prepare("SELECT id FROM notes WHERE stable_uuid IS NULL")?;
+    let ids: Vec<i64> = stmt
+        .query_map([], |r| r.get::<_, i64>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+
+    log::info!("[v36] 准备回填 {} 条笔记的 stable_uuid", ids.len());
+    let tx = conn.unchecked_transaction()?;
+    for id in &ids {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "UPDATE notes SET stable_uuid = ?1 WHERE id = ?2",
+            rusqlite::params![uuid, id],
+        )?;
+    }
+    tx.commit()?;
+
+    // 部分唯一索引：只对非 NULL 行强制唯一（NULL 行被排除，防御性的，正常路径不会出现）
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_stable_uuid
+         ON notes(stable_uuid) WHERE stable_uuid IS NOT NULL;",
+    )?;
+
+    set_version(conn, 36)?;
+    Ok(())
+}
+
+/// v36 -> v37: note_attachments 表（T-S020 sidecar CAS 附件同步索引）
+///
+/// 记录每条笔记引用了哪些本地资产文件（`kb_assets/images/...` / `pdfs/...` / `sources/...` 等），
+/// 以及内容 sha256 hex —— 同步时按 hash 去重上传，远端走 CAS 平铺。
+///
+/// 设计取舍：**不动现有本地目录结构**，本表是 sidecar 索引；同步流程通过此表知道
+/// "哪些文件要上传 / 远端哪些已经有了"。本地 markdown 引用保持原相对路径，零迁移风险。
+///
+/// 字段语义：
+/// - `note_id`：所属笔记（CASCADE：笔记物理删除时一同清理引用）
+/// - `local_rel_path`：相对 data_dir 的 POSIX 路径，例如 `kb_assets/images/abc.png`
+/// - `sha256_hex`：文件内容 hash，决定远端文件名
+/// - `size` / `mime`：元数据，供 UI 显示和远端 manifest 用
+fn migrate_v36_to_v37(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v36 -> v37 (note_attachments 索引表 - sidecar CAS)");
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS note_attachments (
+            note_id        INTEGER NOT NULL,
+            local_rel_path TEXT NOT NULL,
+            sha256_hex     TEXT NOT NULL,
+            size           INTEGER NOT NULL DEFAULT 0,
+            mime           TEXT,
+            created_at     TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            PRIMARY KEY (note_id, local_rel_path),
+            FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_note_attachments_hash
+            ON note_attachments(sha256_hex);
+
+        CREATE INDEX IF NOT EXISTS idx_note_attachments_note
+            ON note_attachments(note_id);",
+    )?;
+
+    set_version(conn, 37)?;
+    Ok(())
+}
+
+/// v37 -> v38: notes.attachment_scan_at — 增量附件扫描标记
+///
+/// 修「同步前 push 自动跑 scan_all_active_notes 全库扫」的性能问题：
+/// 之前每次 push 都对所有未删笔记跑 regex + 文件 IO + 算 hash，1 万笔记可能要十几秒。
+/// 加这一列存"上次该笔记被附件扫描时的 updated_at"；下次 scan 只处理
+/// `attachment_scan_at IS NULL OR attachment_scan_at < updated_at` 的笔记 → 增量。
+///
+/// 列允许 NULL（存量行回填 NULL → 首次 scan 仍会全库扫一遍，之后稳态只扫变更的）。
+fn migrate_v37_to_v38(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v37 -> v38 (notes.attachment_scan_at 增量扫描标记)");
+
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(notes)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .collect();
+    if !cols.iter().any(|c| c == "attachment_scan_at") {
+        conn.execute_batch("ALTER TABLE notes ADD COLUMN attachment_scan_at TEXT;")?;
+    }
+
+    set_version(conn, 38)?;
+    Ok(())
+}
+
+/// v38 -> v39: 标签树形结构支持（tags.parent_id）
+///
+/// 设计：parent_id INTEGER NULL，NULL 表示顶层标签。引用 tags(id) 但 SQLite ALTER 加 FK
+/// 实际不会生效（且 foreign_keys 默认 OFF），所以"删父级时孩子置 NULL"的语义在 Service 层主动处理。
+fn migrate_v38_to_v39(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v38 -> v39 (tags.parent_id 树形结构支持)");
+
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(tags)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .collect();
+    if !cols.iter().any(|c| c == "parent_id") {
+        conn.execute_batch(
+            "ALTER TABLE tags ADD COLUMN parent_id INTEGER;
+             CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_id);",
+        )?;
+    }
+
+    set_version(conn, 39)?;
+    Ok(())
+}
+
+/// v40 -> v41: 项目 + 甘特图（projects 表 + tasks.project_id + tasks.start_date）
+///
+/// 与 task_categories 的区别：
+/// - task_categories 是轻量"分类"（彩色圆点 + 名字），跨项目复用
+/// - projects 是更高一级的"工作流容器"，有时间维度（start/end_date）和归档状态
+/// - 一个任务可以同时挂 category（横切分组）+ project（项目归属）
+///
+/// `start_date` 是甘特图条左端；`due_date`（已存在）是右端。
+/// `ON DELETE SET NULL` 让删项目时任务回到"无项目"，不级联误删。
+fn migrate_v40_to_v41(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v40 -> v41 (projects 表 + tasks.project_id / start_date)");
+
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS projects (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL,
+            description TEXT,
+            color       TEXT NOT NULL DEFAULT '#1677ff',
+            start_date  TEXT,
+            end_date    TEXT,
+            archived    INTEGER NOT NULL DEFAULT 0,
+            sort_order  INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_projects_archived ON projects(archived, sort_order);
+        ",
+    )?;
+
+    let task_cols = list_columns(conn, "tasks")?;
+    if !task_cols.iter().any(|c| c == "project_id") {
+        conn.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN project_id INTEGER
+                REFERENCES projects(id) ON DELETE SET NULL;
+             CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id)
+                WHERE project_id IS NOT NULL;",
+        )?;
+    }
+    if !task_cols.iter().any(|c| c == "start_date") {
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN start_date TEXT;")?;
+    }
+
+    set_version(conn, 41)?;
+    Ok(())
+}
+
+/// v39 -> v40: 工作流看板阶段（tasks.kanban_stage）
+///
+/// 与 status (0=todo/1=done) 互补——status 是"是否完成"，kanban_stage 是"看板列归属"。
+/// 双向语义同步在 Service 层做：
+/// - 勾完成 status=1 时把 kanban_stage 设为 'done'
+/// - 拖到 done 列把 status 设为 1（含 completed_at）
+/// - 拖回 todo/doing 把 status 设为 0
+///
+/// 初始数据：status=1 的老任务回填 'done'；其余 'todo'。
+fn migrate_v39_to_v40(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v39 -> v40 (tasks.kanban_stage 工作流看板)");
+
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(tasks)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .collect();
+    if !cols.iter().any(|c| c == "kanban_stage") {
+        conn.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN kanban_stage TEXT NOT NULL DEFAULT 'todo';
+             CREATE INDEX IF NOT EXISTS idx_tasks_kanban_stage ON tasks(kanban_stage);",
+        )?;
+        // 老的已完成任务回填到 done 列
+        conn.execute_batch(
+            "UPDATE tasks SET kanban_stage = 'done' WHERE status = 1;",
+        )?;
+    }
+
+    set_version(conn, 40)?;
+    Ok(())
+}
+
+/// v41 -> v42: projects 跨端同步基础设施（stable_uuid + is_deleted 软删 + 远端状态表）
+///
+/// 设计与 notes 同套：UUID v4 由 Rust 侧生成（SQLite 没有内建），现有项目本次迁移
+/// 一次性回填；后续 `create_project` 同步生成。`is_deleted` 用 tombstone 模式代替物理
+/// 删除，让其他端能感知到"这个项目被删了"。
+///
+/// 新增 `sync_remote_state_project` 表：与 `sync_remote_state`（笔记用）结构对称，
+/// 记录每个 (backend_id, project_id) 上次同步的 hash / updated_at / 是否已删，用来
+/// 在 diff 时判断"内容是否变化"避免无意义 push。
+fn migrate_v41_to_v42(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v41 -> v42 (projects 跨端同步：stable_uuid + is_deleted + sync_remote_state_project)");
+
+    let cols = list_columns(conn, "projects")?;
+    if !cols.iter().any(|c| c == "stable_uuid") {
+        conn.execute_batch("ALTER TABLE projects ADD COLUMN stable_uuid TEXT;")?;
+    }
+    if !cols.iter().any(|c| c == "is_deleted") {
+        conn.execute_batch(
+            "ALTER TABLE projects ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+
+    // backfill：对 stable_uuid IS NULL 的项目（幂等可重跑）生成 UUID v4
+    let mut stmt = conn.prepare("SELECT id FROM projects WHERE stable_uuid IS NULL")?;
+    let ids: Vec<i64> = stmt
+        .query_map([], |r| r.get::<_, i64>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+    log::info!("[v42] 准备回填 {} 个项目的 stable_uuid", ids.len());
+    let tx = conn.unchecked_transaction()?;
+    for id in &ids {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "UPDATE projects SET stable_uuid = ?1 WHERE id = ?2",
+            rusqlite::params![uuid, id],
+        )?;
+    }
+    tx.commit()?;
+
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_stable_uuid
+            ON projects(stable_uuid) WHERE stable_uuid IS NOT NULL;
+         CREATE INDEX IF NOT EXISTS idx_projects_is_deleted
+            ON projects(is_deleted);
+
+         CREATE TABLE IF NOT EXISTS sync_remote_state_project (
+            backend_id        INTEGER NOT NULL,
+            project_id        INTEGER NOT NULL,
+            remote_path       TEXT NOT NULL,
+            last_synced_hash  TEXT NOT NULL,
+            last_synced_at    TEXT NOT NULL,
+            last_synced_tombstone INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (backend_id, project_id)
+         );",
+    )?;
+
+    set_version(conn, 42)?;
+    Ok(())
+}
+
+/// v42 -> v43: tasks 跨端同步基础设施（stable_uuid + is_deleted + sync_remote_state_task）
+///
+/// tasks 此前是物理 DELETE，跨端同步需改成软删 tombstone：把 `delete_task` 改成
+/// `UPDATE is_deleted=1 + updated_at=now`，并在所有读路径加 `is_deleted=0` 过滤。
+///
+/// 字段范围（用户决策"全量版"）：
+/// - 主任务字段全部跨端：title/desc/priority/important/status/due_date/start_date/
+///   completed_at/remind_before_minutes/repeat_kind/repeat_interval/...
+/// - **不跨端**：reminded_at（本地提醒去重）/ repeat_done_count（本地推进，避免双端互推）/
+///   source_batch_id（本地批次标识）
+/// - 子任务（parent_task_id）通过 parent_task_uuid 跨端引用
+fn migrate_v42_to_v43(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v42 -> v43 (tasks 跨端同步：stable_uuid + is_deleted + sync_remote_state_task)");
+
+    let cols = list_columns(conn, "tasks")?;
+    if !cols.iter().any(|c| c == "stable_uuid") {
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN stable_uuid TEXT;")?;
+    }
+    if !cols.iter().any(|c| c == "is_deleted") {
+        conn.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+
+    let mut stmt = conn.prepare("SELECT id FROM tasks WHERE stable_uuid IS NULL")?;
+    let ids: Vec<i64> = stmt
+        .query_map([], |r| r.get::<_, i64>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+    log::info!("[v43] 准备回填 {} 个任务的 stable_uuid", ids.len());
+    let tx = conn.unchecked_transaction()?;
+    for id in &ids {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "UPDATE tasks SET stable_uuid = ?1 WHERE id = ?2",
+            rusqlite::params![uuid, id],
+        )?;
+    }
+    tx.commit()?;
+
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_stable_uuid
+            ON tasks(stable_uuid) WHERE stable_uuid IS NOT NULL;
+         CREATE INDEX IF NOT EXISTS idx_tasks_is_deleted
+            ON tasks(is_deleted);
+
+         CREATE TABLE IF NOT EXISTS sync_remote_state_task (
+            backend_id        INTEGER NOT NULL,
+            task_id           INTEGER NOT NULL,
+            remote_path       TEXT NOT NULL,
+            last_synced_hash  TEXT NOT NULL,
+            last_synced_at    TEXT NOT NULL,
+            last_synced_tombstone INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (backend_id, task_id)
+         );",
+    )?;
+
+    set_version(conn, 43)?;
+    Ok(())
+}
+
+/// v43 -> v44: task_categories 跨端识别（stable_uuid）
+///
+/// 让"用户在 A 端把分类「工作」重命名为「Work」"也能跨端识别为同一个分类。
+/// 不加 is_deleted —— 分类是辅助元数据，删除时任务自动落到"未分类"（ON DELETE SET NULL），
+/// 跨端只关心"存在性 + 名称变化"，不需要 tombstone。
+fn migrate_v43_to_v44(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v43 -> v44 (task_categories.stable_uuid 跨端识别)");
+
+    let cols = list_columns(conn, "task_categories")?;
+    if !cols.iter().any(|c| c == "stable_uuid") {
+        conn.execute_batch("ALTER TABLE task_categories ADD COLUMN stable_uuid TEXT;")?;
+    }
+
+    let mut stmt = conn.prepare("SELECT id FROM task_categories WHERE stable_uuid IS NULL")?;
+    let ids: Vec<i64> = stmt
+        .query_map([], |r| r.get::<_, i64>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+    log::info!("[v44] 准备回填 {} 个任务分类的 stable_uuid", ids.len());
+    let tx = conn.unchecked_transaction()?;
+    for id in &ids {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "UPDATE task_categories SET stable_uuid = ?1 WHERE id = ?2",
+            rusqlite::params![uuid, id],
+        )?;
+    }
+    tx.commit()?;
+
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_task_categories_stable_uuid
+            ON task_categories(stable_uuid) WHERE stable_uuid IS NOT NULL;",
+    )?;
+
+    set_version(conn, 44)?;
+    Ok(())
+}
+
+/// v44 -> v45: tags 加 sort_order（同级自定义排序）
+///
+/// 设计（对齐 v30→v31 notes.sort_order / folders.sort_order）：
+/// - INTEGER NOT NULL DEFAULT 0；越小越靠前；同 parent 内按 1000 间隔留空隙
+///   留给未来插队，避免每次拖动都全量重排
+/// - 初始化：按 COALESCE(parent_id, -1) 分组，组内按 name 字母序赋 0/1000/2000…
+///   (顶层标签 parent_id IS NULL 单独成一组 = -1)
+/// - 索引 idx_tags_parent_sort 覆盖 (parent_id, sort_order)，加速 list_tags 排序
+fn migrate_v44_to_v45(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v44 -> v45 (tags.sort_order 自定义排序)");
+
+    let cols = list_columns(conn, "tags")?;
+    if !cols.iter().any(|c| c == "sort_order") {
+        conn.execute_batch("ALTER TABLE tags ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;")?;
+    }
+
+    // 已有数据初始化：同一 parent 内按 name COLLATE NOCASE 升序分配 0/1000/2000...
+    conn.execute_batch(
+        "
+        WITH ranked AS (
+            SELECT id,
+                   (ROW_NUMBER() OVER (
+                        PARTITION BY COALESCE(parent_id, -1)
+                        ORDER BY name COLLATE NOCASE ASC, id ASC
+                   ) - 1) * 1000 AS new_order
+            FROM tags
+        )
+        UPDATE tags
+        SET sort_order = (SELECT new_order FROM ranked WHERE ranked.id = tags.id)
+        WHERE id IN (SELECT id FROM ranked);
+        ",
+    )?;
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_tags_parent_sort
+            ON tags(parent_id, sort_order);",
+    )?;
+
+    set_version(conn, 45)?;
+    Ok(())
+}
+
+fn migrate_v47_to_v48(conn: &Connection) -> Result<(), AppError> {
+    // v48 原为「Rhai 脚本插件 scripts 表」，该功能已撤销（与内置 AI 文本转换重叠、
+    // 价值边际）。版本号**保留 48 不回退**——否则装过 dev v48 的库会「版本高于应用」报错。
+    // 空迁移即可：装过旧 dev 版的库里残留的 scripts 表无害（不再被任何代码引用），新库不建表。
+    log::info!("数据库迁移: v47 -> v48 (脚本插件已撤销，空迁移占位)");
+
+    set_version(conn, 48)?;
+    Ok(())
+}
+
+fn migrate_v46_to_v47(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v46 -> v47 (定时推送 push_jobs / push_run_logs)");
+
+    // 定时推送独立子系统。push_jobs 存订阅本体，push_run_logs 存每次执行快照。
+    // next_run_at 物化存表（而非每次算）：调度器只需 SELECT MIN(next_run_at) 即知下次该睡到几点，
+    // 空闲时零计算。建 (enabled, next_run_at) 复合索引让 peek/list_due 走索引。
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS push_jobs (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            name            TEXT NOT NULL,
+            prompt          TEXT NOT NULL,
+            model_id        INTEGER,
+            source_kind     TEXT NOT NULL DEFAULT 'none',
+            source_config   TEXT NOT NULL DEFAULT '{}',
+            schedule_time   TEXT NOT NULL,
+            repeat_kind     TEXT NOT NULL DEFAULT 'daily',
+            repeat_weekdays TEXT,
+            channels        TEXT NOT NULL DEFAULT '[\"notification\"]',
+            enabled         INTEGER NOT NULL DEFAULT 1,
+            last_run_at     TEXT,
+            next_run_at     TEXT,
+            created_at      DATETIME DEFAULT (datetime('now','localtime')),
+            updated_at      DATETIME DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_push_jobs_next ON push_jobs(enabled, next_run_at);
+        CREATE TABLE IF NOT EXISTS push_run_logs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id      INTEGER NOT NULL,
+            run_at      TEXT NOT NULL,
+            status      TEXT NOT NULL,
+            item_count  INTEGER NOT NULL DEFAULT 0,
+            payload     TEXT,
+            error       TEXT,
+            FOREIGN KEY(job_id) REFERENCES push_jobs(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_push_run_logs_job ON push_run_logs(job_id, run_at);",
+    )?;
+
+    set_version(conn, 47)?;
+    Ok(())
+}
+
+fn migrate_v45_to_v46(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v45 -> v46 (ai_conversations.scope_folder_id 文件夹范围问答)");
+
+    // scope_folder_id：对话级 RAG 范围限定。
+    // NULL = 全库检索（默认旧行为）；有值 = RAG 只在该文件夹及其所有子孙文件夹内检索。
+    // 存文件夹 id 而非展开后的 id 列表：文件夹结构/笔记归属变化后范围能自动跟上。
+    let cols = list_columns(conn, "ai_conversations")?;
+    if !cols.iter().any(|c| c == "scope_folder_id") {
+        conn.execute_batch(
+            "ALTER TABLE ai_conversations ADD COLUMN scope_folder_id INTEGER;",
+        )?;
+    }
+
+    set_version(conn, 46)?;
+    Ok(())
+}
+
+/// 把 content 里所有 `kb-asset://` URL 中的**裸空白**（空格 / Tab）percent-encode。
+///
+/// 返回 `(新内容, 是否有改动)`。幂等：URL 里没有裸空白（本就干净或已编码）时原样返回。
+///
+/// 背景见 `migrate_v48_to_v49` 文档。这里抽成纯函数便于单测（无 DB 依赖）。
+///
+/// 正则从 `kb-asset://` 起，吃到 URL 边界（引号 / 反引号 / `)` / `]` / `<>` / 换行）为止。
+/// **故意不排除 `\s`** —— 正是要把中间的裸空格捕进来再编码。边界字符覆盖两种承载形态：
+/// markdown 链接 `[txt](kb-asset://…)`（止于 `)`）与 HTML `<img src="kb-asset://…">`（止于 `"`）。
+fn encode_kb_asset_whitespace(content: &str) -> (String, bool) {
+    use regex::Regex;
+    use std::sync::OnceLock;
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r#"kb-asset://[^"'`)\]<>\r\n]*"#)
+            .expect("正则字面量恒定，编译失败属于代码 BUG")
+    });
+
+    let mut changed = false;
+    let new = re.replace_all(content, |caps: &regex::Captures<'_>| -> String {
+        let m = caps.get(0).map(|x| x.as_str()).unwrap_or("");
+        if m.contains(' ') || m.contains('\t') {
+            changed = true;
+            m.replace(' ', "%20").replace('\t', "%09")
+        } else {
+            m.to_string()
+        }
+    });
+    (new.into_owned(), changed)
+}
+
+/// v48 -> v49: 修复附件链接 `kb-asset://` URL 里的裸空格
+///
+/// 历史 Bug：批量/工具栏插入附件时，前端把 `[📎 文件名 (大小)](kb-asset://<相对路径>)` 作为
+/// **link mark** 写入。link mark 的 markdown 序列化走 prosemirror-markdown 的 `state.esc()`，
+/// 它**不 percent-encode、也不转义空格**。于是文件名含空格（如 `220ml瓶型（HDPE VD钙奶富邦）.dwg`）
+/// 时，落盘 `.md`/DB 里的 URL 带着**裸空格**：
+///   1. 重新打开笔记 / 同步拉回时，markdown-it 按 CommonMark 解析 —— 未用 `<>` 包裹的链接目标
+///      不能含空格 → 链接解析失败 → 整条以**原始文本**暴露（用户可见的坏链接）。
+///   2. Rust `sync_v1::attachment_scan` 的 `re_kb_asset` 正则遇空白即截断 → 抓到的路径不完整
+///      → 磁盘找不到该文件 → 该附件**永远漏同步**。
+///
+/// 前端已在插入时改用 `toKbAssetHref`（percent-encode）根治新数据；本迁移做**存量清洗**：
+/// 把已存 content 里 `kb-asset://` URL 中的裸空格 / Tab 编码为 `%20` / `%09`。编码后：
+///   - markdown 链接目标合法 → 重开正常渲染成附件链接；
+///   - 消费端 `parseKbAsset`（前端）/ `url_decode`（Rust 扫描）都会解码还原 → 打开 / 同步都正常。
+///
+/// 顺带把改动过的笔记 `attachment_scan_at` 置空，强制下次 push 前重扫，让修好的附件被同步索引到。
+/// 幂等：无裸空格的笔记不改（`encode_kb_asset_whitespace` 返回 changed=false）。
+///
+/// ⚠️ 已知边界：若文件名本身含 ASCII 半角括号 `)`，正则会在该 `)` 处提前截断（markdown 链接语义
+/// 本就无法表达这种文件名）—— 属极少见情形，本迁移不处理，保持最小改动。
+fn migrate_v48_to_v49(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v48 -> v49 (修复附件链接 kb-asset:// URL 裸空格)");
+
+    let mut stmt = conn
+        .prepare("SELECT id, content FROM notes WHERE content IS NOT NULL AND content != ''")?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+
+    log::info!("[v49] 扫描 {} 条笔记里的 kb-asset:// URL", rows.len());
+
+    let mut touched = 0usize;
+    let tx = conn.unchecked_transaction()?;
+    for (id, content) in &rows {
+        let (new_content, changed) = encode_kb_asset_whitespace(content);
+        if changed {
+            tx.execute(
+                "UPDATE notes SET content = ?1, attachment_scan_at = NULL WHERE id = ?2",
+                rusqlite::params![new_content, id],
+            )?;
+            touched += 1;
+        }
+    }
+    tx.commit()?;
+
+    log::info!("[v49] 修复完成：{} 条笔记的附件链接 URL 空格已编码", touched);
+
+    set_version(conn, 49)?;
+    Ok(())
+}
+
+/// v49 -> v50：AI 对话支持「角色预设」
+///
+/// 给 ai_conversations 加 preset_id，指向 prompt_templates 里的一条提示词。
+/// 对话每次请求时把该提示词追加到 system prompt 末尾，于是同一个模型可以按
+/// 「代码审查员 / 文案编辑 / 学习助教」等不同角色回答，而不用每轮重复交代身份。
+///
+/// 不加外键约束：SQLite 的 ALTER TABLE ADD COLUMN 对外键支持有限，而且提示词被删后
+/// 让 preset_id 悬空反而更安全 —— 读取时走 JOIN，查不到就当没设预设，不会让对话打不开。
+fn migrate_v49_to_v50(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v49 -> v50 (AI 对话角色预设)");
+
+    let has_col = conn
+        .prepare("SELECT preset_id FROM ai_conversations LIMIT 1")
+        .is_ok();
+    if !has_col {
+        conn.execute_batch("ALTER TABLE ai_conversations ADD COLUMN preset_id INTEGER;")?;
+    }
+
+    set_version(conn, 50)?;
+    Ok(())
+}
+
+/// v50 → v51：把仍是老默认值 32000 的模型上下文抬到 128000
+///
+/// 32000 是 2024 年定的保守值。如今主流模型（DeepSeek / GPT / Claude / Qwen…）
+/// 都是 128K 起步，卡在 32K 意味着 RAG 检索和挂载笔记白白少拿三四倍预算，
+/// AI 经常基于被截断的片段作答。
+///
+/// **只动仍是 32000 的那批** —— 用户手动改过的（比如本地 7B 填了 8000）保持原样，
+/// 迁移不该覆盖用户的判断。
+///
+/// **Ollama 一律不动**：Ollama 模型的实际窗口由 `num_ctx` 决定，默认只有 2048/4096，
+/// 跟模型标称的 32K/128K 完全是两回事。把它抬到 128000 会让 RAG 塞 14 万字符进去，
+/// Ollama 只会默默从头截断 —— 比抬之前更糟。本地模型让用户自己按 num_ctx 填。
+fn migrate_v50_to_v51(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v50 -> v51 (max_context 默认值 32000 -> 128000，Ollama 除外)");
+
+    conn.execute_batch(
+        "UPDATE ai_models SET max_context = 128000
+         WHERE max_context = 32000 AND provider <> 'ollama';",
+    )?;
+
+    set_version(conn, 51)?;
+    Ok(())
+}
+
+/// v51 -> v52: notes.note_type — 区分普通 Markdown 笔记与白板笔记
+///
+/// 白板走「一种笔记类型」而不是独立表，是为了**白拿现有全部基建**：
+/// 文件夹 / 标签 / 回收站 / 同步（S3・WebDAV・本地）/ 加密 / 置顶 / 双链 / 导出
+/// 都不用为白板再实现一遍。白板内容以 Excalidraw JSON 存在 `notes.content` 里。
+///
+/// 取值：`markdown`（默认，存量全部）/ `whiteboard`。
+/// 有意用 TEXT 而非整数枚举：同步下去的 `.md` front-matter 里人眼可读，
+/// 将来加第三种类型（如 canvas）也不用改表。
+/// 同批加 `notes.search_text`，并把 FTS 触发器改成索引 `COALESCE(search_text, content)`。
+///
+/// 为什么必须一起做：白板的 `content` 是一整坨 Excalidraw JSON。FTS 触发器原样索引
+/// `content` 的话，用户搜「black」「width」「rectangle」会命中每一块白板 —— 等于把
+/// 现有全文搜索污染掉。所以白板保存时由 Rust 侧抽出画布里的**纯文字**写进
+/// `search_text`，FTS 只认它。
+///
+/// 普通笔记 `search_text` 恒为 NULL → `COALESCE` 落回 `content` → 行为与改造前**完全一致**。
+fn migrate_v51_to_v52(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v51 -> v52 (notes.note_type + search_text — 白板笔记)");
+
+    conn.execute_batch(
+        "ALTER TABLE notes ADD COLUMN note_type TEXT NOT NULL DEFAULT 'markdown';
+
+         -- 白板专用的「可搜索文本」；普通笔记恒为 NULL
+         ALTER TABLE notes ADD COLUMN search_text TEXT;
+
+         -- 列表页要按类型过滤/加图标，未删笔记量大时全表扫不划算
+         CREATE INDEX IF NOT EXISTS idx_notes_type ON notes(note_type);
+
+         -- FTS 触发器改喂 COALESCE(search_text, content)。
+         -- 三个触发器必须同批改：delete 端用的键要和 insert 端写进去的值**逐字一致**，
+         -- 否则 fts5 的 'delete' 命令删不掉旧行，索引会越积越脏（v6 踩过这个坑）。
+         DROP TRIGGER IF EXISTS notes_fts_insert;
+         DROP TRIGGER IF EXISTS notes_fts_update;
+         DROP TRIGGER IF EXISTS notes_fts_delete;
+
+         CREATE TRIGGER notes_fts_insert AFTER INSERT ON notes BEGIN
+             INSERT INTO notes_fts(rowid, title, content)
+             VALUES (new.id, new.title, COALESCE(new.search_text, new.content));
+         END;
+
+         -- 监听列表要带上 search_text：白板保存时变的是它，不带的话索引不会刷新
+         CREATE TRIGGER notes_fts_update AFTER UPDATE OF title, content, search_text ON notes BEGIN
+             INSERT INTO notes_fts(notes_fts, rowid, title, content)
+             VALUES('delete', old.id, old.title, COALESCE(old.search_text, old.content));
+             INSERT INTO notes_fts(rowid, title, content)
+             VALUES (new.id, new.title, COALESCE(new.search_text, new.content));
+         END;
+
+         CREATE TRIGGER notes_fts_delete AFTER DELETE ON notes BEGIN
+             INSERT INTO notes_fts(notes_fts, rowid, title, content)
+             VALUES('delete', old.id, old.title, COALESCE(old.search_text, old.content));
+         END;",
+    )?;
+
+    set_version(conn, 52)?;
+    Ok(())
+}
+
+/// v52 -> v53: 修 FTS「索引内容 ≠ 原表内容」的不一致
+///
+/// v52 让触发器把 `COALESCE(search_text, content)` 写进索引，解决了白板 JSON
+/// 污染搜索的问题 —— 但 `notes_fts` 是 **external content 表**
+/// (`content=notes, content_rowid=id`)，fts5 对这类表有个硬契约：
+/// **索引里的内容必须和它按列名回原表读到的一致**。
+///
+/// 违反的后果不是搜不到（倒排索引是触发器写的，MATCH 正常），而是：
+/// - `snippet()` / `highlight()` 回原表读 `notes.content` → 白板的搜索摘要
+///   直接把 Excalidraw JSON 糊在用户脸上（`{"appState":{"gridModeEnabled":fa...`）
+/// - 任何 `INSERT INTO notes_fts(notes_fts) VALUES('rebuild')` 都会按原表重建，
+///   把白板的索引打回 JSON，v52 的努力全部作废
+/// - `integrity-check` 会判定索引损坏
+///
+/// 修法：给 notes 加一个**虚拟生成列** `fts_body = COALESCE(search_text, content)`，
+/// 让 fts5 的第二列直接绑到它。这样"触发器写进去的"和"fts5 回读的"是同一个表达式，
+/// 契约重新成立，上面三个问题一起消失。
+///
+/// 生成列是 VIRTUAL（不占存储，查询时现算），所以不会让 notes 表变大。
+fn migrate_v52_to_v53(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v52 -> v53 (FTS external-content 一致性：fts_body 生成列)");
+
+    conn.execute_batch(
+        "-- 1) 生成列：fts5 回读的就是它，与触发器写入的表达式逐字相同
+         ALTER TABLE notes ADD COLUMN fts_body TEXT
+             GENERATED ALWAYS AS (COALESCE(search_text, content)) VIRTUAL;
+
+         -- 2) 重建 fts5 表，把第二列绑到 fts_body。
+         --    列的**位置**不变（0=title, 1=正文），所以 search.rs 里的
+         --    snippet(notes_fts, 1, ...) 和 bm25(notes_fts, 5.0, 1.0) 都不用改。
+         DROP TRIGGER IF EXISTS notes_fts_insert;
+         DROP TRIGGER IF EXISTS notes_fts_update;
+         DROP TRIGGER IF EXISTS notes_fts_delete;
+         DROP TABLE IF EXISTS notes_fts;
+
+         CREATE VIRTUAL TABLE notes_fts USING fts5(
+             title, fts_body, content=notes, content_rowid=id,
+             tokenize='unicode61'
+         );
+
+         -- 3) 触发器写入同一个表达式。三个必须同批改：delete 端的键要和
+         --    insert 端写的值逐字一致，否则删不掉旧行（v6 踩过这个坑）。
+         CREATE TRIGGER notes_fts_insert AFTER INSERT ON notes BEGIN
+             INSERT INTO notes_fts(rowid, title, fts_body)
+             VALUES (new.id, new.title, COALESCE(new.search_text, new.content));
+         END;
+
+         CREATE TRIGGER notes_fts_update AFTER UPDATE OF title, content, search_text ON notes BEGIN
+             INSERT INTO notes_fts(notes_fts, rowid, title, fts_body)
+             VALUES('delete', old.id, old.title, COALESCE(old.search_text, old.content));
+             INSERT INTO notes_fts(rowid, title, fts_body)
+             VALUES (new.id, new.title, COALESCE(new.search_text, new.content));
+         END;
+
+         CREATE TRIGGER notes_fts_delete AFTER DELETE ON notes BEGIN
+             INSERT INTO notes_fts(notes_fts, rowid, title, fts_body)
+             VALUES('delete', old.id, old.title, COALESCE(old.search_text, old.content));
+         END;
+
+         -- 4) 从原表重建索引。现在 rebuild 读的是 fts_body，白板拿到的是画布文字，
+         --    与触发器口径一致 —— 这一步以后再跑多少次都是安全的。
+         INSERT INTO notes_fts(notes_fts) VALUES('rebuild');",
+    )?;
+
+    set_version(conn, 53)?;
+    Ok(())
+}
+
+/// v53 → v54: 笔记 content 里素材路径的**全量归一化**（补 v29 的三个漏洞）
+///
+/// ## 背景：跨平台搬数据后全库裂图
+///
+/// 笔记 content 里素材的唯一合法形态是 `kb-asset://<相对 data_dir 的 POSIX 路径>`，
+/// 渲染时由前端拼当前 data_dir 解析。v29 做过一次清洗，但漏了三类：
+///
+/// 1. **v29 自己产出的坏数据**：它给 `abs_to_rel` 传的 dummy data_dir 是 `Path::new("")`，
+///    而 `Path::new("C:/x/kb_assets/a.png").strip_prefix("")` 返回 `Ok(整个绝对路径)` ——
+///    fallback 分支从未执行。于是写出 `kb-asset://C:/…/kb_assets/x.png`（rel 里含绝对路径）。
+///    前端 `resolveAssetSrc` 无条件 `dataDir + "/" + rel`，拼出的路径必然不存在 → 裂图。
+///    （`abs_to_rel` 的空 data_dir 分支已在同批修复。）
+/// 2. **`file://` 形态**：老版本拖入附件写的是 `[📎 附件](file:///E:/…/attachments/x.pdf)`。
+///    v29 的正则只认 `http://asset.localhost/` 和 `asset://localhost/`，完全没碰这类。
+/// 3. **裸绝对路径**：更早期直接把 `E:\…\kb_assets\x.png` 写进 `src` / markdown 链接。
+///
+/// 这三类的共同点是 content 里存了**某台机器的绝对路径**。同一台 Windows 机器上碰巧还能打开，
+/// 一旦同步 / 拷贝到 macOS 就全部失效 —— 正是用户反馈的"从 Windows 同步过来后，
+/// 图片地址还是 Windows 上存放的那个地址"。
+///
+/// ## 处理策略
+///
+/// 只改写**能收敛到已知资产段**（`kb_assets` / `pdfs` / `sources` / `attachments` 及 dev 变体）
+/// 的 URL；其余一律保留原样：
+/// - 真外链（`http(s)://` 非 asset.localhost）、`data:` / `blob:` / 锚点 / `mailto:` → 不动
+/// - 用户手动链接到本机其它位置的文件（不在资产目录下）→ 不动（改了反而破坏用户意图）
+///
+/// 幂等：已是干净 `kb-asset://<相对路径>` 的不会被再改；重复执行结果相同。
+fn migrate_v53_to_v54(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v53 -> v54 (笔记素材路径全量归一化 → kb-asset://<相对路径>)");
+
+    let mut stmt =
+        conn.prepare("SELECT id, content FROM notes WHERE content IS NOT NULL AND content != ''")?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([], |r| {
+            // 降级读：坏库不该让迁移整体失败（见 database::text_health）
+            Ok((
+                r.get::<_, i64>(0)?,
+                crate::database::text_health::get_text_lossy(r, 1, "notes.content")?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+
+    log::info!("[v54] 扫描 {} 条笔记的素材路径", rows.len());
+
+    let mut touched_notes = 0usize;
+    let mut rewritten_urls = 0usize;
+
+    let tx = conn.unchecked_transaction()?;
+    for (id, content) in &rows {
+        let (new_content, n) = normalize_asset_urls_in_content(content);
+        if n == 0 {
+            continue;
+        }
+        tx.execute(
+            "UPDATE notes SET content = ?1 WHERE id = ?2",
+            rusqlite::params![new_content, id],
+        )?;
+        // content 变了，content_hash 必须跟着重算，否则同步 diff 会与远端永久对不上
+        tx.execute(
+            "UPDATE notes SET content_hash = ?1 WHERE id = ?2",
+            rusqlite::params![crate::services::hash::sha256_hex(&new_content), id],
+        )?;
+        touched_notes += 1;
+        rewritten_urls += n;
+    }
+    tx.commit()?;
+
+    // 清空增量附件扫描标记，强制下次 push 前全库重扫一遍。
+    //
+    // **必须做**，否则本次修复对存量数据无效：
+    // - 同批修复给 `attachment_scan::KNOWN_PREFIXES` 补了 `attachments/`（此前整个目录
+    //   从未参与同步）。但增量扫描只挑 `attachment_scan_at <> updated_at` 的笔记，
+    //   老笔记的标记早已对齐 → 新前缀永远不会被应用到它们身上。
+    // - 上面的 URL 归一化只改 `content`，不动 `updated_at`，同样不会触发重扫。
+    //
+    // 代价：升级后第一次 push 会全库扫一遍附件（1 万条笔记约几秒），之后恢复增量。
+    let cleared = conn.execute("UPDATE notes SET attachment_scan_at = NULL", [])?;
+
+    log::info!(
+        "[v54] 归一化完成：触达 {} 条笔记，改写 {} 个素材 URL；已清空 {} 条笔记的附件扫描标记（下次 push 全库重扫）",
+        touched_notes,
+        rewritten_urls,
+        cleared
+    );
+
+    set_version(conn, 54)?;
+    Ok(())
+}
+
+/// v54 → v55: 把日记从日期文件夹里摘出来（`folder_id = NULL`）
+///
+/// ## 背景：一个自相矛盾的归属关系
+///
+/// 「导入历史日记」按 `2020-05-26/日记.md` 的结构导入时，笔记既被标成日记
+/// （`is_daily = 1`），又留在 `2020-05-26` 这个文件夹下。而 `list_notes` 对所有
+/// 用户视角的笔记列表都强制 `is_daily = 0` —— 于是：
+///
+/// - 用户点开那个文件夹，笔记列表显示"暂无数据"，看着就是个**空文件夹**
+/// - 删它时却弹出"该文件夹下还有 1 篇笔记，将一并处理"
+/// - 确认后，那天的日记被扫进了回收站（真实用户反馈，得从回收站捞回来）
+///
+/// 根子在于"日记同时被两套体系管辖"：日记页按 `daily_date` 组织，笔记树按
+/// `folder_id` 组织，而列表又不显示日记。日期文件夹对用户没有任何信息价值
+/// （它的名字就是日记的日期），留着只会制造上面这种误删。
+///
+/// ## 这次做什么
+///
+/// 只把日记的 `folder_id` 置空，**不删任何文件夹**。空掉的日期文件夹交给
+/// 侧栏「清理空文件夹」按钮，让用户看过预览再决定 —— 批量删目录这种事不该
+/// 由一次静默的版本升级替用户做主。
+///
+/// 回收站里的日记一并处理：不然用户把这次误删的日记恢复出来，又会回到日期文件夹。
+/// 只改 `folder_id`，不动 `updated_at` / `content`，FTS 触发器（只监听 title /
+/// content / search_text）也不会被触发。
+fn migrate_v54_to_v55(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v54 -> v55 (日记脱离日期文件夹，修「看着空、删了却带走日记」)");
+
+    let detached = conn.execute(
+        "UPDATE notes SET folder_id = NULL WHERE is_daily = 1 AND folder_id IS NOT NULL",
+        [],
+    )?;
+
+    if detached > 0 {
+        log::info!(
+            "[v55] {} 篇日记已移出所在文件夹（内容与日期不变）；空掉的文件夹可在笔记侧栏「清理空文件夹」里批量删除",
+            detached
+        );
+    }
+
+    set_version(conn, 55)?;
+    Ok(())
+}
+
+/// v55 -> v56: notes 新增 is_scratch 字段（临时编辑标记）
+///
+/// ## 解决什么
+///
+/// 用户拿本应用当 markdown 编辑器改一份外部 .md（README、别处的稿子）时，
+/// 那份文件会被当成正式笔记进库，于是主列表和搜索结果里堆满了"其实不属于我知识库"
+/// 的条目。用户的原话是"能不能不入库、直接当 md 编辑器用"。
+///
+/// ## 为什么不真的"不入库"
+///
+/// 入库带来的能力（写回原文件、冲突检测、图片资产落地、下次打开复用同一条笔记）
+/// 都在 `services/source_writeback.rs` 里跑得好好的，真做成"纯文件模式"要另起
+/// 一套编辑器状态机。真正让用户不适的只是**列表被污染**，那就只解决这一件事：
+/// 照常入库，但打上标记、默认不出现在主列表 / 搜索 / 双链里。
+///
+/// ## 与 is_hidden 的区别（别合并这两个字段）
+///
+/// `is_hidden` 是隐私向的"弱隐藏"，配 PIN 保护（见 `services/hidden_pin.rs`）；
+/// `is_scratch` 是"临时"，不涉及隐私、不该要 PIN 才能查看。两者语义不同，
+/// 混在一个列表里会让用户在找临时文件时被要求输 PIN。
+///
+/// 部分索引与 idx_notes_hidden 同思路：只覆盖活跃笔记，不让回收站条目干扰热路径。
+/// v58：快照支持「笔记内嵌的白板块」。
+///
+/// 笔记正文走 notes 表，而正文里插的白板块存的是独立文件
+/// （`kb_assets/images/<note_id>/wb-<uuid>.excalidraw`）—— 两者不是一回事，
+/// 但都属于同一条笔记、都需要"覆盖前留底"。
+///
+/// 加一列区分而不是另起一张表：份数上限、时间窗节流、内容去重、
+/// 以及笔记删除时的 CASCADE 清理，整套逻辑原样复用。
+/// `target_path` 为 NULL = 笔记正文本身（v57 的既有语义，存量行自动落到这一档）。
+/// v62 -> v63：`ai_messages.turn_meta_json`（一轮回复的收尾信息）。
+///
+/// # 为什么需要
+/// AI 助手改成「一轮回复 = 一张卡片」后，卡片要显示这一轮是怎么结束的（完成 / 被停止 / 失败）、
+/// 花了多久、智能模式下每轮调工具前说了什么、推理模型的思考过程。这些以前要么只在流式期间
+/// 存在内存里（重开会话就没了），要么根本没记：
+/// - 停止：智能模式直接 return，已经调过的工具和写了一半的回答全丢
+/// - 失败：连用户那条提问都删掉，只弹一个几秒就消失的 toast
+///
+/// # 为什么是一列 JSON 而不是多列
+/// 这些字段只给前端渲染卡片用，不参与任何查询 / 排序 / 同步冲突判断；结构后面还会长
+/// （token 用量等），塞一列 JSON 省得每加一项就升一次版本。与 `skill_calls_json` 同一思路。
+///
+/// 存量行为 NULL：前端按「已完成、无统计」渲染。
+fn migrate_v62_to_v63(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v62 -> v63 (ai_messages.turn_meta_json)");
+
+    let cols = list_columns(conn, "ai_messages")?;
+    if !cols.iter().any(|c| c == "turn_meta_json") {
+        conn.execute_batch("ALTER TABLE ai_messages ADD COLUMN turn_meta_json TEXT;")?;
+    }
+
+    set_version(conn, 63)?;
+    Ok(())
+}
+
+/// v63 -> v64：给 MCP 建的笔记 / 任务补 `stable_uuid`。
+///
+/// # 为什么需要
+/// kb-core（MCP / kb-mcp CLI 共用的写库实现）的 `create_note` / `create_task` 直接拼 INSERT，
+/// 一直没写 `stable_uuid`。该列可空、只有 v36 / v43 迁移回填过一次，此后经 MCP 新建的行都是 NULL。
+/// 同步 manifest 用 `WHERE stable_uuid IS NOT NULL` 过滤，于是这些笔记 / 任务被**静默**排除，
+/// 永远不会推到其他端，冲突处理也无从谈起。kb-core 的 INSERT 已修，这里补存量。
+///
+/// # 为什么直接 UPDATE 是安全的
+/// notes 上的触发器都限定了列（`UPDATE OF title, content, search_text` 等），只改 `stable_uuid`
+/// 不会触发，也不会碰 `updated_at` —— 回填不会让笔记看起来"刚被修改过"而扰乱同步的新旧判断。
+///
+/// 幂等：只处理 `stable_uuid IS NULL` 的行，重跑无副作用；软删行也一并补齐（tombstone 推送要用）。
+fn migrate_v63_to_v64(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v63 -> v64 (回填 notes / tasks 缺失的 stable_uuid)");
+
+    let tx = conn.unchecked_transaction()?;
+    // 表名只来自这里的字面量，不会有外部输入拼进 SQL
+    for table in ["notes", "tasks"] {
+        let ids: Vec<i64> = {
+            let mut stmt =
+                tx.prepare(&format!("SELECT id FROM {table} WHERE stable_uuid IS NULL"))?;
+            let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        if !ids.is_empty() {
+            log::info!("[v64] 回填 {} 行 {}.stable_uuid", ids.len(), table);
+        }
+        let mut update = tx.prepare(&format!("UPDATE {table} SET stable_uuid = ?1 WHERE id = ?2"))?;
+        for id in ids {
+            update.execute(rusqlite::params![uuid::Uuid::new_v4().to_string(), id])?;
+        }
+    }
+    tx.commit()?;
+
+    set_version(conn, 64)?;
+    Ok(())
+}
+
+/// v61 -> v62：模型服务改由 ai-profile crate 提供。
+///
+/// 三件事，都是「把旧语义写进数据」，让切换到 crate 后行为不变：
+///
+/// 1. **`api_url` 规范化**：旧拼接会自动补 `/v1`，crate 原样使用。按旧规则把会补的那段写进
+///    地址（`services::legacy_api_url`，对照测试保证修正前后请求地址逐字相同）。Ollama 的
+///    `http://localhost:11434` 也在内 —— 5 个非流式功能靠补 `/v1` 走它的 OpenAI 兼容层；
+///    原生 `/api/chat` 改由应用侧从 `…/v1` 反推根地址。
+/// 2. **`provider` 改存 crate 预置 key**：`kimi` → `moonshot` 等；`claude` / 混元 / 零一万物 /
+///    未知 → 「OpenAI 兼容自定义」（映射表见 `legacy_provider_key`）。
+/// 3. **限额来源**：新增 `limits_source`（`user` / `endpoint`，NULL = 没设）与 `max_output`
+///    （端点上报的模型输出上限，用来给 `max_tokens` 封顶）。`max_context` 列保持 NOT NULL，
+///    改用 **0 表示未设置**（避免重建表；代码里 `<= 0` 本来就按「未知」处理）。
+///    恰好等于历史默认 128000 的行分不清是不是用户填的，当作未设置 —— 回落到端点上报或预置值；
+///    其余值视为用户设置。
+///
+/// 🔴 整个迁移包在一个事务里：逐行重写中途被杀掉会回滚到 v61，重启重跑。`ALTER TABLE` 在
+/// SQLite 里受事务保护。
+///
+/// 整库恢复（ZIP / WebDAV / `.bak`）后 `Database::init` 会重新跑迁移，所以恢复进来的旧库同样被修正。
+fn migrate_v61_to_v62(conn: &Connection) -> Result<(), AppError> {
+    use crate::services::legacy_api_url::{legacy_provider_key, normalize_legacy_api_url};
+
+    log::info!("数据库迁移: v61 -> v62 (模型服务接入 ai-profile)");
+    // drop 未 commit 的 tx 会自动回滚
+    let tx = conn.unchecked_transaction()?;
+    let conn: &Connection = &tx;
+
+    conn.execute_batch(
+        "ALTER TABLE ai_models ADD COLUMN limits_source TEXT;
+         ALTER TABLE ai_models ADD COLUMN max_output INTEGER;",
+    )?;
+
+    let rows: Vec<(i64, String, String, i64)> = {
+        let mut stmt = conn.prepare("SELECT id, provider, api_url, max_context FROM ai_models")?;
+        let it = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        it.collect::<Result<_, _>>()?
+    };
+
+    for (id, provider, api_url, max_context) in &rows {
+        let (context, source): (i64, Option<&str>) =
+            if *max_context <= 0 || *max_context == LEGACY_DEFAULT_MAX_CONTEXT {
+                (0, None)
+            } else {
+                (*max_context, Some("user"))
+            };
+        conn.execute(
+            "UPDATE ai_models SET provider = ?1, api_url = ?2, max_context = ?3, limits_source = ?4
+             WHERE id = ?5",
+            rusqlite::params![
+                legacy_provider_key(provider),
+                normalize_legacy_api_url(api_url),
+                context,
+                source,
+                id
+            ],
+        )?;
+    }
+
+    set_version(conn, 62)?;
+    tx.commit()?;
+    log::info!("数据库迁移: v61 -> v62 完成，修正 {} 个模型配置", rows.len());
+    Ok(())
+}
+
+/// v60 -> v61：`ai_models.max_tokens`（单次回答长度上限）。
+///
+/// # 为什么需要
+///
+/// 此前主对话流**完全不传** `max_tokens`，用服务商默认值。两个问题：
+///
+/// 1. **Ollama 的默认值不可靠** —— 官方文档写 `num_predict` 默认 128
+///    （≈190 个中文字，答两句就断），但 issue #7691 指出文档与实际不符、
+///    不同调用方式行为还不一致。这种不确定性只能用显式赋值消除。
+/// 2. **各家上限差异极大且在变** —— 实测 `deepseek-chat` 报
+///    `valid range of max_tokens is [1, 393216]`，而它旧版文档写的是 8192。
+///    写死任何一个数都会在某些模型上出错。
+///
+/// # 为什么默认 NULL 而不是给个数
+///
+/// NULL = 不传该参数，保持现有行为（服务商默认）。给死默认值的风险是：
+/// 上限只有 8192 的模型收到 32768 会**直接 400**，用户开箱即错。
+/// 让用户按自己的模型填，UI 里给推荐值和"填超了会报错"的提示。
+///
+/// 例外是 Ollama：本地推理不计费，迁移时统一置 -1（无限），
+/// 既消除 128 那个坑，又不产生任何成本。
+fn migrate_v60_to_v61(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v60 -> v61 (ai_models.max_tokens)");
+
+    conn.execute_batch(
+        "ALTER TABLE ai_models ADD COLUMN max_tokens INTEGER;",
+    )?;
+
+    // Ollama 存量模型统一给 -1（无限生成）—— 本地推理零成本，
+    // 且这是消除"默认 128 截断"那个坑最直接的办法
+    let n = conn.execute(
+        "UPDATE ai_models SET max_tokens = -1 WHERE provider = 'ollama'",
+        [],
+    )?;
+    log::info!("数据库迁移: v60 -> v61 完成，{} 个 Ollama 模型设为无限输出", n);
+
+    set_version(conn, 61)?;
+    Ok(())
+}
+
+/// v59 -> v60：Excel 二维数据集（P1-3b）。
+///
+/// # 为什么要落库而不是每次现解析
+///
+/// Excel 附件此前只有两条用途：预览成表格、把整张 markdown 表塞给 AI 生成计划。
+/// 数据本身**不入库、不可查询**。落库后才能做"精确计算"这一轨 ——
+/// 向量检索永远算不准 count/sum，而把全表行灌进索引又会淹没检索
+/// （对标项目 0018→0021 迁移就是在修这个：一张 5 万行表造出几百个近乎同构的向量）。
+///
+/// # 三张表的分工
+///
+/// - `datasets`：一个「数据区域」= 一条记录。同一个 sheet 里可能有多个区域
+///   （上面一张主表、下面一张小计表），故 `(source_path, sheet_name, region_index)` 唯一
+/// - `dataset_fields`：列画像（类型 / 语义角色 / 非空率 / 去重数），供 UI 展示与
+///   将来的查询计划校验列名
+/// - `dataset_rows`：行数据存 JSON1（`{"列名": "值"}`）。
+///   **不用"语义行文本"**（对标项目把行转成 `行N｜列名=值` 存文本再正则反解，
+///   单元格里出现分隔符就串列）—— JSON 天然免疫这个问题
+///
+/// `source_hash` 用来判断源文件是否变过：变了就整体重建该文件的所有数据集，
+/// 避免"文件改了但库里还是旧数据"这种最难排查的不一致。
+fn migrate_v59_to_v60(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v59 -> v60 (Excel 二维数据集)");
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS datasets (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            -- 相对 data_dir 的附件路径（kb-asset:// 后那段），附件本身没有 DB 表
+            source_path   TEXT    NOT NULL,
+            sheet_name    TEXT    NOT NULL,
+            region_index  INTEGER NOT NULL,
+            -- 表头在原始行数组里的下标；无表头为 NULL（列名回退 A列/B列）
+            header_row    INTEGER,
+            row_count     INTEGER NOT NULL,
+            col_count     INTEGER NOT NULL,
+            -- 源文件内容哈希：变了就重建，防止库里留着旧数据
+            source_hash   TEXT    NOT NULL,
+            created_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+            UNIQUE (source_path, sheet_name, region_index)
+        );
+
+        CREATE TABLE IF NOT EXISTS dataset_fields (
+            dataset_id     INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+            col_index      INTEGER NOT NULL,
+            name           TEXT    NOT NULL,
+            -- number / date / boolean / text（90% 投票推断）
+            inferred_type  TEXT    NOT NULL,
+            -- time / measure / identifier / status / category，可为 NULL
+            semantic_role  TEXT,
+            -- 非空率 0.0~1.0
+            completeness   REAL    NOT NULL,
+            distinct_count INTEGER NOT NULL,
+            PRIMARY KEY (dataset_id, col_index)
+        );
+
+        CREATE TABLE IF NOT EXISTS dataset_rows (
+            dataset_id INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+            row_index  INTEGER NOT NULL,
+            -- JSON1 对象：{\"列名\": \"值\"}
+            data_json  TEXT    NOT NULL,
+            PRIMARY KEY (dataset_id, row_index)
+        );
+
+        -- 按源文件查/删是最高频操作（重新导入时先清后建）
+        CREATE INDEX IF NOT EXISTS idx_datasets_source ON datasets(source_path);",
+    )?;
+
+    set_version(conn, 60)?;
+    Ok(())
+}
+
+/// v58 -> v59：把存量的 API Key 就地加密。
+///
+/// 在此之前 `ai_models.api_key` 与 `app_config['asr.api_key']` 都是**明文**落库的，
+/// 拿到 app.db 就等于拿到用户所有模型服务商的 Key。加密后的威胁模型见 `crate::crypto`：
+/// 目标是"app.db 被复制到别的机器后打不开密文"，不防同机器上的恶意程序。
+///
+/// 三条容错原则（都是为了「宁可这条不加密，也不能让用户打不开应用」）：
+/// 1. **幂等**：已带 `enc:v1:` 前缀的跳过，迁移重复执行不会二次加密
+/// 2. **单条失败不中断**：某条加密失败只记 warn 并保持明文；读取侧 `decrypt_field`
+///    对无前缀内容原样返回，那条 Key 照常可用
+/// 3. **不删数据**：全程只做 UPDATE，不 DROP 不 DELETE
+fn migrate_v58_to_v59(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v58 -> v59 (API Key 加密入库)");
+
+    // ── ai_models.api_key ──
+    let models: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, api_key FROM ai_models
+             WHERE api_key IS NOT NULL AND TRIM(api_key) <> ''",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    let mut done = 0usize;
+    for (id, stored) in models {
+        if crate::crypto::is_encrypted_field(&stored) {
+            continue; // 幂等：已加密
+        }
+        match crate::crypto::encrypt_field(stored.trim()) {
+            Ok(enc) => {
+                conn.execute(
+                    "UPDATE ai_models SET api_key = ?1 WHERE id = ?2",
+                    rusqlite::params![enc, id],
+                )?;
+                done += 1;
+            }
+            Err(e) => {
+                log::warn!("[migrate v59] AI 模型 #{} 的 Key 加密失败，保持明文: {}", id, e);
+            }
+        }
+    }
+
+    // ── app_config['asr.api_key'] ──
+    let asr_key: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_config WHERE key = 'asr.api_key'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    if let Some(stored) = asr_key {
+        let trimmed = stored.trim();
+        if !trimmed.is_empty() && !crate::crypto::is_encrypted_field(trimmed) {
+            match crate::crypto::encrypt_field(trimmed) {
+                Ok(enc) => {
+                    conn.execute(
+                        "UPDATE app_config SET value = ?1 WHERE key = 'asr.api_key'",
+                        rusqlite::params![enc],
+                    )?;
+                    done += 1;
+                }
+                Err(e) => log::warn!("[migrate v59] ASR Key 加密失败，保持明文: {}", e),
+            }
+        }
+    }
+
+    log::info!("数据库迁移: v58 -> v59 完成，已加密 {} 条 Key", done);
+    set_version(conn, 59)?;
+    Ok(())
+}
+
+fn migrate_v57_to_v58(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v57 -> v58 (note_snapshots.target_path 内嵌白板)");
+
+    let cols = list_columns(conn, "note_snapshots")?;
+    if !cols.iter().any(|c| c == "target_path") {
+        conn.execute_batch("ALTER TABLE note_snapshots ADD COLUMN target_path TEXT;")?;
+    }
+
+    // 查询一律带 target_path 条件，索引跟着带上，否则一条笔记有多块白板时会全表扫
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_note_snapshots_target
+         ON note_snapshots(note_id, target_path, created_at DESC);",
+    )?;
+
+    set_version(conn, 58)?;
+    Ok(())
+}
+
+/// v57：笔记内容快照表（白板"画了一下午被一次误操作覆盖"的兜底）。
+///
+/// 为什么必须有：白板是 800ms 防抖**自动**保存的，用户误删一大片图形后不需要做任何事，
+/// 改动就已经落库；撤销栈又只活在内存里，关掉应用就没了 —— 在此之前，
+/// 这种情况下用户没有任何找回内容的手段。
+///
+/// 表设计成 note_id 通用（不是 whiteboard_id）：普通笔记将来要接版本历史时直接复用，
+/// 不用再迁一次库。`ON DELETE CASCADE` + 库里已开 `PRAGMA foreign_keys=ON`，
+/// 笔记永久删除时快照自动清干净，不留孤儿数据。
+fn migrate_v56_to_v57(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v56 -> v57 (note_snapshots 内容快照)");
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS note_snapshots (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            note_id      INTEGER NOT NULL,
+            content      TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            byte_size    INTEGER NOT NULL,
+            reason       TEXT NOT NULL DEFAULT 'auto',
+            created_at   DATETIME DEFAULT (datetime('now', 'localtime')),
+            FOREIGN KEY(note_id) REFERENCES notes(id) ON DELETE CASCADE
+        );
+         CREATE INDEX IF NOT EXISTS idx_note_snapshots_note
+         ON note_snapshots(note_id, created_at DESC);",
+    )?;
+
+    set_version(conn, 57)?;
+    Ok(())
+}
+
+fn migrate_v55_to_v56(conn: &Connection) -> Result<(), AppError> {
+    log::info!("数据库迁移: v55 -> v56 (notes.is_scratch 临时编辑标记)");
+
+    let cols = list_columns(conn, "notes")?;
+    if !cols.iter().any(|c| c == "is_scratch") {
+        conn.execute_batch("ALTER TABLE notes ADD COLUMN is_scratch INTEGER NOT NULL DEFAULT 0;")?;
+    }
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_notes_scratch
+         ON notes(is_scratch, updated_at DESC) WHERE is_deleted = 0;",
+    )?;
+
+    set_version(conn, 56)?;
+    Ok(())
+}
+
+/// 把一段 content 里所有素材 URL 归一化为 `kb-asset://<相对路径>`。
+///
+/// 返回 `(新内容, 改写的 URL 数)`；没有任何改动时计数为 0（调用方据此跳过写库）。
+///
+/// 只处理**出现在 URL 位置**的字符串（HTML 的 `src=` / `href=` 属性、markdown 的 `](…)`），
+/// 不裸扫全文 —— 否则笔记正文里讲解路径的普通文字（"图片存在 E:\photos 下"）会被误改。
+fn normalize_asset_urls_in_content(content: &str) -> (String, usize) {
+    use regex::Regex;
+    use std::sync::OnceLock;
+
+    // `src="…"` / `href='…'`：引号种类分两个正则，因为 Rust regex 不支持反向引用配对引号
+    static RE_ATTR_DQ: OnceLock<Regex> = OnceLock::new();
+    static RE_ATTR_SQ: OnceLock<Regex> = OnceLock::new();
+    // markdown 链接 / 图片目标：`](url)` 或 `](url "title")`
+    static RE_MD: OnceLock<Regex> = OnceLock::new();
+
+    let re_attr_dq = RE_ATTR_DQ.get_or_init(|| {
+        Regex::new(r#"((?:src|href)\s*=\s*")([^"]+)(")"#)
+            .expect("正则字面量恒定，编译失败属于代码 BUG")
+    });
+    let re_attr_sq = RE_ATTR_SQ.get_or_init(|| {
+        Regex::new(r#"((?:src|href)\s*=\s*')([^']+)(')"#)
+            .expect("正则字面量恒定，编译失败属于代码 BUG")
+    });
+    let re_md = RE_MD.get_or_init(|| {
+        Regex::new(r#"(\]\()([^)\s]+)((?:\s+"[^"]*")?\))"#)
+            .expect("正则字面量恒定，编译失败属于代码 BUG")
+    });
+
+    let mut count = 0usize;
+    let mut out = content.to_string();
+
+    for re in [re_attr_dq, re_attr_sq, re_md] {
+        out = re
+            .replace_all(&out, |caps: &regex::Captures<'_>| {
+                let whole = caps.get(0).map(|m| m.as_str()).unwrap_or("").to_string();
+                let (pre, url, post) = match (caps.get(1), caps.get(2), caps.get(3)) {
+                    (Some(a), Some(b), Some(c)) => (a.as_str(), b.as_str(), c.as_str()),
+                    _ => return whole,
+                };
+                match normalize_one_asset_url(url) {
+                    Some(fixed) => {
+                        count += 1;
+                        format!("{}{}{}", pre, fixed, post)
+                    }
+                    None => whole,
+                }
+            })
+            .into_owned();
+    }
+
+    (out, count)
+}
+
+/// 单个 URL 的归一化。返回 `None` = 保持原样。
+///
+/// 判定顺序刻意做成"先排除、再收敛"，宁可不改也不瞎改。
+fn normalize_one_asset_url(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // 已经是 kb-asset://：只在 rel 仍是**绝对路径**时才修（v29 遗留的坏数据）
+    if let Some(rel) = trimmed.strip_prefix("kb-asset://") {
+        let decoded = urlencoding::decode(rel)
+            .map(|c| c.into_owned())
+            .unwrap_or_else(|_| rel.to_string());
+        if !looks_absolute_path(&decoded) {
+            return None; // 干净的相对路径，不动
+        }
+        let fixed = crate::services::asset_path::abs_to_rel(
+            std::path::Path::new(&decoded),
+            std::path::Path::new(""),
+        )?;
+        // 收敛后没变化 → 不计入改写
+        if fixed == decoded {
+            return None;
+        }
+        return Some(format!("kb-asset://{}", fixed));
+    }
+
+    // 剥协议 → 拿到本地绝对路径。`resolve_content_url` 已覆盖
+    // file:// / asset://localhost/ / http://asset.localhost/ / 裸路径，
+    // 并对真外链 / data: / blob: / 锚点 / mailto: 返回 None（这些不该动）。
+    //
+    // 传空 data_dir：迁移期拿不到运行期数据目录，也不需要——真正要的是
+    // 下一步 abs_to_rel 按已知资产段截取。
+    let abs = crate::services::asset_path::resolve_content_url(trimmed, std::path::Path::new(""))?;
+    let rel = crate::services::asset_path::abs_to_rel(&abs, std::path::Path::new(""))?;
+    Some(format!("kb-asset://{}", rel))
+}
+
+/// 粗判一个字符串是否是绝对路径（Windows 盘符 / UNC / POSIX 根）
+fn looks_absolute_path(s: &str) -> bool {
+    let b = s.as_bytes();
+    let has_drive =
+        b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\');
+    has_drive || s.starts_with('/') || s.starts_with(r"\\")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 库版本高于应用时，必须返回**可区分**的 `SchemaTooNew`，而不是笼统的 `Custom`。
+    ///
+    /// 这条锁的是 `lib.rs` 里那个分支：调用方靠这个变体决定「不要走 db_recovery」。
+    /// 一旦有人图省事把它改回 `AppError::Custom`，`should_attempt_recovery` 就会
+    /// 重新对它返回 true —— 用户装回旧版应用打开，库被改名留档、界面上笔记全空。
+    #[test]
+    fn schema_newer_than_app_returns_dedicated_error() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        // 伪造一个"未来版本"的库
+        set_version(&conn, SCHEMA_VERSION + 1).unwrap();
+
+        match migrate(&conn) {
+            Err(AppError::SchemaTooNew { db, app }) => {
+                assert_eq!(db, SCHEMA_VERSION + 1);
+                assert_eq!(app, SCHEMA_VERSION);
+            }
+            other => panic!("期望 SchemaTooNew，实际: {:?}", other.err()),
+        }
+        // 失败也不能顺手把版本号改掉
+        assert_eq!(get_version(&conn).unwrap(), SCHEMA_VERSION + 1);
+    }
+
+    /// v64：补齐 MCP 建的笔记 / 任务缺失的 stable_uuid。
+    ///
+    /// 锁四件事：NULL 行被补上 UUID（含软删行）、已有 UUID 不被覆盖、
+    /// 回填不改 `updated_at`（否则同步会把这些笔记当成"刚被修改"）、重跑幂等。
+    #[test]
+    fn v64_backfills_missing_stable_uuid_without_touching_updated_at() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(get_version(&conn).unwrap(), SCHEMA_VERSION);
+
+        // 复现 kb-core 旧版 INSERT：不写 stable_uuid
+        conn.execute_batch(
+            "INSERT INTO notes (title, content, title_normalized, content_hash, updated_at)
+               VALUES ('MCP 笔记', '正文', 'mcp 笔记', 'h1', '2020-01-01 00:00:00');
+             INSERT INTO notes (title, content, title_normalized, content_hash, updated_at, is_deleted, deleted_at)
+               VALUES ('MCP 软删笔记', '正文', 'mcp 软删笔记', 'h2', '2020-01-02 00:00:00', 1, '2020-01-03 00:00:00');
+             INSERT INTO notes (title, content, title_normalized, content_hash, stable_uuid)
+               VALUES ('正常笔记', '正文', '正常笔记', 'h3', 'keep-me-untouched');
+             INSERT INTO tasks (title) VALUES ('MCP 任务');",
+        )
+        .unwrap();
+        let null_notes: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notes WHERE stable_uuid IS NULL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(null_notes, 2, "前置：应有 2 条缺 UUID 的笔记");
+
+        // 回拨到 v63 再迁移，模拟用户从 1.64.0 升级
+        set_version(&conn, 63).unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(get_version(&conn).unwrap(), SCHEMA_VERSION);
+
+        for (table, label) in [("notes", "笔记"), ("tasks", "任务")] {
+            let n: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE stable_uuid IS NULL"),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0, "{label}回填后不应再有 NULL stable_uuid");
+        }
+
+        let (uuid, updated_at): (String, String) = conn
+            .query_row(
+                "SELECT stable_uuid, updated_at FROM notes WHERE title = 'MCP 笔记'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(uuid.len(), 36, "应为标准 UUID，实际: {uuid}");
+        assert_eq!(updated_at, "2020-01-01 00:00:00", "回填不能改 updated_at");
+
+        let deleted_uuid: Option<String> = conn
+            .query_row(
+                "SELECT stable_uuid FROM notes WHERE title = 'MCP 软删笔记'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(deleted_uuid.is_some(), "软删行也要补（tombstone 推送要用）");
+
+        let kept: String = conn
+            .query_row(
+                "SELECT stable_uuid FROM notes WHERE title = '正常笔记'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, "keep-me-untouched", "已有 UUID 不能被覆盖");
+
+        // 幂等：再回拨重跑，UUID 不变
+        set_version(&conn, 63).unwrap();
+        migrate(&conn).unwrap();
+        let again: String = conn
+            .query_row(
+                "SELECT stable_uuid FROM notes WHERE title = 'MCP 笔记'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(again, uuid, "重跑迁移不能重新生成已补的 UUID");
+    }
+
+    /// v53 的核心契约：白板的搜索**摘要**必须是画布文字，不能是 Excalidraw JSON。
+    ///
+    /// 这条锁住的是 fts5 external-content 表"索引内容必须等于按列回读原表"的要求 ——
+    /// 之前 fts5 第二列绑的是 `notes.content`，触发器写的却是 search_text，
+    /// 于是 `snippet()` 回读原表把整坨 JSON 吐给了用户。
+    #[test]
+    fn v53_snippet_uses_canvas_text_not_json() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(get_version(&conn).unwrap(), SCHEMA_VERSION);
+
+        let whiteboard_json =
+            r#"{"type":"excalidraw","elements":[{"type":"text","text":"架构草图"}],"appState":{"gridModeEnabled":false}}"#;
+        conn.execute(
+            "INSERT INTO notes (title, content, note_type, search_text)
+             VALUES ('我的白板', ?1, 'whiteboard', '架构草图')",
+            [whiteboard_json],
+        )
+        .unwrap();
+
+        // snippet() 取第 1 列（正文）→ 必须是画布文字，绝不能出现 JSON 属性名
+        let snip: String = conn
+            .query_row(
+                "SELECT snippet(notes_fts, 1, '<mark>', '</mark>', '...', 32)
+                 FROM notes_fts WHERE notes_fts MATCH '架构草图'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(snip.contains("架构草图"), "摘要应含画布文字，实际: {}", snip);
+        assert!(
+            !snip.contains("appState") && !snip.contains("excalidraw"),
+            "摘要不该泄露 Excalidraw JSON，实际: {}",
+            snip
+        );
+    }
+
+    /// rebuild 之后白板索引不能退化回 JSON —— 这正是 v52 单独存在时会坏掉的地方。
+    #[test]
+    fn v53_survives_fts_rebuild() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO notes (title, content, note_type, search_text)
+             VALUES ('板', ?1, 'whiteboard', '流程图内容')",
+            // 用 r##""## 包：内容里的 `"#1e1e1e` 会把普通 r#""# 提前截断
+            [r##"{"elements":[{"type":"text","text":"流程图内容"}],"strokeColor":"#1e1e1e"}"##],
+        )
+        .unwrap();
+
+        // 模拟"重建搜索索引"这类维护操作
+        conn.execute_batch("INSERT INTO notes_fts(notes_fts) VALUES('rebuild');")
+            .unwrap();
+
+        // 重建后仍应搜得到画布文字
+        let hits: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM notes_fts WHERE notes_fts MATCH '流程图内容'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1, "rebuild 后应仍能按画布文字搜到白板");
+
+        // 且 JSON 里的属性名不该进索引
+        let noise: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM notes_fts WHERE notes_fts MATCH 'strokeColor'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(noise, 0, "rebuild 后 JSON 属性名不该被索引");
+    }
+
+    /// 普通笔记走 COALESCE 的兜底分支，行为必须和加这个特性之前完全一致
+    #[test]
+    fn v53_keeps_markdown_notes_indexed_by_content() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO notes (title, content) VALUES ('普通笔记', '正文里的关键词')",
+            [],
+        )
+        .unwrap();
+
+        let hits: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM notes_fts WHERE notes_fts MATCH '正文里的关键词'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1, "普通笔记仍应按 content 建索引");
+    }
+
+    /// v51 抬默认上下文：只动仍是 32000 的**非 Ollama** 模型。
+    ///
+    /// 三条不变式，缺一条都会坑到人：
+    /// - 用户手动填过的（8000 / 200000）不能被覆盖 —— 那是他对自己模型的判断
+    /// - Ollama 一律不动 —— 它的真实窗口是 num_ctx（默认 2048/4096），不是模型标称值
+    /// - 云端模型停在老默认值的才抬
+    #[test]
+    fn v51_raises_only_stale_cloud_defaults() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE ai_models (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                max_context INTEGER NOT NULL
+            );
+            INSERT INTO ai_models (name, provider, max_context) VALUES
+                ('云端·老默认',   'deepseek', 32000),
+                ('云端·手动调小', 'openai',    8000),
+                ('云端·手动调大', 'custom',  200000),
+                ('本地·老默认',   'ollama',   32000),
+                ('本地·手动填',   'ollama',    4096);
+            "#,
+        )
+        .unwrap();
+        set_version(&conn, 50).unwrap();
+
+        migrate_v50_to_v51(&conn).unwrap();
+
+        let read = |name: &str| -> i64 {
+            conn.query_row(
+                "SELECT max_context FROM ai_models WHERE name = ?1",
+                [name],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(read("云端·老默认"), 128_000, "停在老默认值的云端模型应该被抬上来");
+        assert_eq!(read("云端·手动调小"), 8_000, "用户手填的值不能被覆盖");
+        assert_eq!(read("云端·手动调大"), 200_000, "用户手填的值不能被覆盖");
+        assert_eq!(
+            read("本地·老默认"),
+            32_000,
+            "Ollama 即使停在老默认值也不能抬：真实窗口是 num_ctx，抬了只会让 RAG 塞爆被静默截断"
+        );
+        assert_eq!(read("本地·手动填"), 4_096);
+        assert_eq!(get_version(&conn).unwrap(), 51);
+    }
+
+    /// 真实数据库**副本**的迁移演练（手动跑，CI 不跑）。
+    ///
+    /// 单测只能证明逻辑，证明不了「用户库里实际存着什么」。发版前拿一份真实库的副本跑一遍，
+    /// 看迁移后的数据是否符合预期：
+    ///
+    /// ```text
+    /// KB_MIGRATE_DB_COPY=<副本路径> cargo test --manifest-path src-tauri/Cargo.toml --lib \
+    ///     migrate_real_db_copy -- --ignored --nocapture
+    /// ```
+    ///
+    /// 🔴 只能指向**副本**：迁移会写库。副本用 SQLite 的只读备份导出（原库 `?mode=ro` + `backup()`），
+    /// 别直接复制正在使用的 app.db —— WAL 里的内容会丢。只打印与迁移相关的列，不打印 api_key。
+    #[test]
+    #[ignore]
+    fn migrate_real_db_copy() {
+        let Ok(path) = std::env::var("KB_MIGRATE_DB_COPY") else {
+            eprintln!("未设置 KB_MIGRATE_DB_COPY，跳过");
+            return;
+        };
+        let conn = Connection::open(&path).unwrap();
+        let before = get_version(&conn).unwrap();
+        migrate(&conn).unwrap();
+        println!("schema: v{before} -> v{}", get_version(&conn).unwrap());
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, provider, api_url, model_id, max_context, max_tokens, \
+                 limits_source, max_output FROM ai_models ORDER BY id",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(format!(
+                    "#{} {} | provider={} | api_url={} | model={} | max_context={} | max_tokens={:?} | source={:?} | max_output={:?}",
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, Option<i64>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<i64>>(8)?,
+                ))
+            })
+            .unwrap();
+        for row in rows {
+            println!("  {}", row.unwrap());
+        }
+    }
+
+    /// v62：地址按旧规则补齐、厂商 id 改用 crate key、历史默认窗口视为未设置。
+    #[test]
+    fn v62_rewrites_ai_models_for_ai_profile() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE ai_models (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                api_url TEXT NOT NULL,
+                max_context INTEGER NOT NULL
+            );
+            INSERT INTO ai_models (name, provider, api_url, max_context) VALUES
+                ('DS 裸根',     'deepseek', 'https://api.deepseek.com',                 128000),
+                ('Kimi',        'kimi',     'https://api.moonshot.cn/v1',                 8000),
+                ('Claude',      'claude',   'https://api.anthropic.com/v1',             200000),
+                ('Gemini 预置', 'gemini',   'https://generativelanguage.googleapis.com/v1beta/openai#', 128000),
+                ('本地 Ollama', 'ollama',   'http://localhost:11434',                    32000),
+                ('混元',        'hunyuan',  'https://api.hunyuan.cloud.tencent.com/v1',  128000);
+            "#,
+        )
+        .unwrap();
+        set_version(&conn, 61).unwrap();
+
+        migrate_v61_to_v62(&conn).unwrap();
+
+        let read = |name: &str| -> (String, String, i64, Option<String>) {
+            conn.query_row(
+                "SELECT provider, api_url, max_context, limits_source FROM ai_models WHERE name = ?1",
+                [name],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap()
+        };
+
+        let ds = read("DS 裸根");
+        assert_eq!(ds.1, "https://api.deepseek.com/v1", "旧规则会补 /v1，要写进数据");
+        assert_eq!((ds.2, ds.3), (0, None), "历史默认 128000 当作未设置");
+
+        let kimi = read("Kimi");
+        assert_eq!(kimi.0, "moonshot", "厂商 id 改用 crate key");
+        assert_eq!((kimi.2, kimi.3.as_deref()), (8000, Some("user")), "用户填的值保留并标来源");
+
+        let claude = read("Claude");
+        assert_eq!(claude.0, "openai_compatible_custom", "没有 Anthropic 原生对话，归自定义");
+        assert_eq!(claude.1, "https://api.anthropic.com/v1", "地址不变");
+
+        assert!(read("Gemini 预置").1.ends_with("/openai#"), "带 # 的原样保留（幂等）");
+
+        let ollama = read("本地 Ollama");
+        assert_eq!(ollama.0, "ollama");
+        assert_eq!(ollama.1, "http://localhost:11434/v1", "OpenAI 兼容层要 /v1；原生路径由应用侧反推");
+        assert_eq!(ollama.2, 32_000, "Ollama 的 32000 是 v51 刻意保留的，不是历史默认");
+
+        assert_eq!(read("混元").0, "openai_compatible_custom");
+        assert_eq!(get_version(&conn).unwrap(), 62);
+    }
+
+    #[test]
+    fn v49_encodes_space_in_attachment_link() {
+        let content = "前文 [📎 220ml瓶型（HDPE VD钙奶富邦）.dwg (210.8 KB)](kb-asset://kb_assets/attachments/43/220ml瓶型（HDPE VD钙奶富邦）.dwg) 后文";
+        let (out, changed) = encode_kb_asset_whitespace(content);
+        assert!(changed, "含裸空格应判定为有改动");
+        // URL 里的空格已被编码
+        assert!(
+            out.contains("kb-asset://kb_assets/attachments/43/220ml瓶型（HDPE%20VD钙奶富邦）.dwg"),
+            "URL 空格应编码为 %20；实际：{out}"
+        );
+        // 链接文本里的空格（(210.8 KB) 那处）不在 URL 内，不该被动
+        assert!(out.contains("(210.8 KB)"), "链接文本不应被改动：{out}");
+    }
+
+    #[test]
+    fn v49_encodes_space_in_html_img_src() {
+        let content = r#"<img src="kb-asset://kb_assets/images/1/my photo.png" alt="x">"#;
+        let (out, changed) = encode_kb_asset_whitespace(content);
+        assert!(changed);
+        assert!(out.contains(r#"kb-asset://kb_assets/images/1/my%20photo.png"#), "实际：{out}");
+    }
+
+    #[test]
+    fn v49_idempotent_on_clean_url() {
+        // 已编码 / 无空格 → 不改动
+        let content = "![](kb-asset://kb_assets/attachments/1/a%20b.dwg) 和 <img src=\"kb-asset://kb_assets/images/2/clean.png\">";
+        let (out, changed) = encode_kb_asset_whitespace(content);
+        assert!(!changed, "无裸空格不应改动");
+        assert_eq!(out, content);
+
+        // 对编码结果再跑一遍（模拟迁移二次执行）仍不变
+        let (out2, changed2) = encode_kb_asset_whitespace(&out);
+        assert!(!changed2);
+        assert_eq!(out2, out);
+    }
+
+    #[test]
+    fn v49_does_not_touch_non_kb_asset_urls() {
+        // 普通外链里的空格不归本迁移管（也不该动）
+        let content = "[链接](https://example.com/a b) 和普通文本 有 空格";
+        let (out, changed) = encode_kb_asset_whitespace(content);
+        assert!(!changed);
+        assert_eq!(out, content);
+    }
+
+    #[test]
+    fn v49_multiple_refs_in_one_note() {
+        let content = "[a](kb-asset://kb_assets/attachments/1/x y.zip) [b](kb-asset://kb_assets/attachments/1/p q.pdf)";
+        let (out, changed) = encode_kb_asset_whitespace(content);
+        assert!(changed);
+        assert!(out.contains("x%20y.zip"), "{out}");
+        assert!(out.contains("p%20q.pdf"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod v54_asset_path_tests {
+    use super::*;
+
+    /// v29 遗留的坏数据：rel 里塞了整条 Windows 绝对路径 → 必须收敛成真正的相对路径。
+    /// 这类数据在 Windows 上也是裂的（前端会拼成 dataDir + "/" + "C:/..."）。
+    #[test]
+    fn fixes_kb_asset_with_absolute_rel() {
+        let src = r#"<img src="kb-asset://C:/Users/me/AppData/Roaming/com.agilefr.kb/kb_assets/images/1/x.png">"#;
+        let (out, n) = normalize_asset_urls_in_content(src);
+        assert_eq!(n, 1, "应改写 1 个, got out = {out}");
+        assert!(out.contains("kb-asset://kb_assets/images/1/x.png"), "{out}");
+        assert!(!out.contains("C:/Users"), "绝对路径必须被剥掉: {out}");
+    }
+
+    /// 干净的相对 kb-asset:// 一个都不该动（幂等性 + 不误伤）
+    #[test]
+    fn leaves_clean_kb_asset_untouched() {
+        let src = r#"<img src="kb-asset://kb_assets/images/1/x.png"><video src="kb-asset://kb_assets/videos/2/c.mp4"></video>"#;
+        let (out, n) = normalize_asset_urls_in_content(src);
+        assert_eq!(n, 0, "干净数据不应被改写");
+        assert_eq!(out, src);
+    }
+
+    /// v29 完全没处理的 file:// 附件链接（markdown link mark 形态）
+    #[test]
+    fn converts_file_url_attachment_link() {
+        let src = r#"见 [📎 报告.pdf](file:///E:/kb/attachments/5/report.pdf) 附件"#;
+        let (out, n) = normalize_asset_urls_in_content(src);
+        assert_eq!(n, 1, "{out}");
+        assert!(out.contains("](kb-asset://attachments/5/report.pdf)"), "{out}");
+    }
+
+    /// 裸绝对路径（最早期写法），出现在 src 属性里
+    #[test]
+    fn converts_bare_windows_absolute_in_src() {
+        let src = r#"<img src="E:\my\kb\dev-kb_assets\images\3\pic.png" alt="x">"#;
+        let (out, n) = normalize_asset_urls_in_content(src);
+        assert_eq!(n, 1, "{out}");
+        assert!(out.contains("kb-asset://dev-kb_assets/images/3/pic.png"), "{out}");
+    }
+
+    /// v29 处理过的两种 asset 协议，作为兜底也要能收敛（防漏网）
+    #[test]
+    fn converts_legacy_asset_protocol_forms() {
+        let src = concat!(
+            r#"<img src="http://asset.localhost/C%3A%2Fkb%2Fkb_assets%2Fimages%2F1%2Fa.png">"#,
+            r#"<img src="asset://localhost/C:/kb/pdfs/2/b.pdf">"#,
+        );
+        let (out, n) = normalize_asset_urls_in_content(src);
+        assert_eq!(n, 2, "{out}");
+        assert!(out.contains("kb-asset://kb_assets/images/1/a.png"), "{out}");
+        assert!(out.contains("kb-asset://pdfs/2/b.pdf"), "{out}");
+    }
+
+    /// 真外链、data:、锚点、mailto 一律不动 —— 改了就是破坏用户内容
+    #[test]
+    fn never_touches_external_or_special_urls() {
+        let src = concat!(
+            r#"<img src="https://example.com/pic.png">"#,
+            r#"<img src="data:image/png;base64,iVBORw0KGgo=">"#,
+            // 用 r##"…"## 是因为内部含 `"#` 序列，会提前终止 r#"…"#
+            r##"<a href="#section-1">锚点</a>"##,
+            r#"<a href="mailto:x@y.com">邮件</a>"#,
+            r#"[外链](https://github.com/a/b)"#,
+        );
+        let (out, n) = normalize_asset_urls_in_content(src);
+        assert_eq!(n, 0, "外链/特殊协议不该被改: {out}");
+        assert_eq!(out, src);
+    }
+
+    /// 不在资产目录下的本机文件（用户手动链接的外部文件）→ 保留原样，
+    /// 因为收敛后的相对路径在别的机器上同样无意义，改了反而丢失原始信息
+    #[test]
+    fn keeps_absolute_path_outside_asset_dirs() {
+        let src = r#"<a href="file:///E:/我的文档/年度报表.xlsx">报表</a>"#;
+        let (out, n) = normalize_asset_urls_in_content(src);
+        assert_eq!(n, 0, "非资产目录的路径不该被收敛: {out}");
+        assert_eq!(out, src);
+    }
+
+    /// 单引号属性也要覆盖（tiptap/外部导入的 HTML 两种引号都可能出现）
+    #[test]
+    fn handles_single_quoted_attributes() {
+        let src = r#"<img src='file:///E:/kb/kb_assets/images/9/s.png'>"#;
+        let (out, n) = normalize_asset_urls_in_content(src);
+        assert_eq!(n, 1, "{out}");
+        assert!(out.contains("kb-asset://kb_assets/images/9/s.png"), "{out}");
+    }
+
+    /// markdown 图片 + 带 title 的链接形态
+    #[test]
+    fn handles_markdown_image_and_titled_link() {
+        let src = concat!(
+            "![封面](file:///E:/kb/kb_assets/images/1/cover.png)\n",
+            "[文档](file:///E:/kb/sources/7/doc.docx \"我的文档\")",
+        );
+        let (out, n) = normalize_asset_urls_in_content(src);
+        assert_eq!(n, 2, "{out}");
+        assert!(out.contains("](kb-asset://kb_assets/images/1/cover.png)"), "{out}");
+        assert!(out.contains("](kb-asset://sources/7/doc.docx \"我的文档\")"), "{out}");
+    }
+
+    /// 迁移整体：真库上跑一遍，笔记被改写且 content_hash 同步重算
+    #[test]
+    fn migration_rewrites_notes_and_refreshes_hash() {
+        let db = crate::database::Database::init(":memory:").unwrap();
+        let id = db
+            .create_note(&crate::models::NoteInput {
+                title: "带老路径的笔记".into(),
+                content: r#"<img src="kb-asset://C:/kb/kb_assets/images/1/x.png">"#.into(),
+                folder_id: None,
+            })
+            .unwrap()
+            .id;
+
+        let conn = db.conn_lock().unwrap();
+        // Database::init 已跑到最新版本，这里把版本退回 53 再单独执行本迁移
+        set_version(&conn, 53).unwrap();
+        migrate_v53_to_v54(&conn).unwrap();
+        assert_eq!(get_version(&conn).unwrap(), 54);
+
+        let content: String = conn
+            .query_row("SELECT content FROM notes WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap();
+        assert!(content.contains("kb-asset://kb_assets/images/1/x.png"), "{content}");
+        assert!(!content.contains("C:/kb"), "{content}");
+
+        let hash: String = conn
+            .query_row("SELECT content_hash FROM notes WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            hash,
+            crate::services::hash::sha256_hex(&content),
+            "content 改了 content_hash 必须同步重算，否则同步 diff 与远端永久对不上"
+        );
+    }
+
+    /// 迁移幂等：干净库跑一遍什么都不改
+    #[test]
+    fn migration_is_idempotent_on_clean_db() {
+        let db = crate::database::Database::init(":memory:").unwrap();
+        let clean = r#"<img src="kb-asset://kb_assets/images/1/ok.png">正文"#;
+        let id = db
+            .create_note(&crate::models::NoteInput {
+                title: "干净笔记".into(),
+                content: clean.into(),
+                folder_id: None,
+            })
+            .unwrap()
+            .id;
+
+        let conn = db.conn_lock().unwrap();
+        let hash_before: String = conn
+            .query_row("SELECT content_hash FROM notes WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap();
+
+        set_version(&conn, 53).unwrap();
+        migrate_v53_to_v54(&conn).unwrap();
+
+        let content: String = conn
+            .query_row("SELECT content FROM notes WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap();
+        let hash_after: String = conn
+            .query_row("SELECT content_hash FROM notes WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(content, clean);
+        assert_eq!(hash_before, hash_after);
+    }
+}
+
+#[cfg(test)]
+mod v59_key_encryption_tests {
+    use super::*;
+
+    /// v59 必须把存量明文 Key 就地加密，且**重复执行不能套娃**。
+    ///
+    /// 幂等性是硬要求：迁移在异常中断后会被重跑，若第二遍把密文再加密一层，
+    /// 读取侧只会解出上一层密文，等于把用户的 Key 永久锁死。
+    #[test]
+    fn migration_encrypts_plaintext_keys_idempotently() {
+        let db = crate::database::Database::init(":memory:").unwrap();
+        let conn = db.conn_lock().unwrap();
+
+        // 模拟 v58 遗留：明文 Key 直接躺在库里
+        conn.execute(
+            "INSERT INTO ai_models (name, provider, api_url, api_key, model_id, max_context)
+             VALUES ('legacy', 'custom', 'http://x', 'sk-plain-secret', 'm', 128000)",
+            [],
+        )
+        .unwrap();
+        let id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT OR REPLACE INTO app_config (key, value) VALUES ('asr.api_key', 'sk-asr-plain')",
+            [],
+        )
+        .unwrap();
+
+        // 第一遍：明文 → 密文
+        migrate_v58_to_v59(&conn).unwrap();
+        let enc1: String = conn
+            .query_row("SELECT api_key FROM ai_models WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(crate::crypto::is_encrypted_field(&enc1), "应已加密");
+        assert!(!enc1.contains("sk-plain-secret"), "库里不能残留明文");
+        assert_eq!(
+            crate::crypto::decrypt_field(&enc1).unwrap(),
+            "sk-plain-secret",
+            "解密应还原出原始 Key"
+        );
+
+        let asr1: String = conn
+            .query_row(
+                "SELECT value FROM app_config WHERE key = 'asr.api_key'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(crate::crypto::is_encrypted_field(&asr1));
+        assert_eq!(crate::crypto::decrypt_field(&asr1).unwrap(), "sk-asr-plain");
+
+        // 第二遍：幂等，密文原样不动
+        migrate_v58_to_v59(&conn).unwrap();
+        let enc2: String = conn
+            .query_row("SELECT api_key FROM ai_models WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(enc1, enc2, "重复迁移不能二次加密");
+        assert_eq!(
+            crate::crypto::decrypt_field(&enc2).unwrap(),
+            "sk-plain-secret"
+        );
+    }
+
+    /// 空 Key / 无 Key 的行不该被迁移碰到（避免把 NULL 写成一串密文）
+    #[test]
+    fn migration_skips_empty_keys() {
+        let db = crate::database::Database::init(":memory:").unwrap();
+        let conn = db.conn_lock().unwrap();
+        conn.execute(
+            "INSERT INTO ai_models (name, provider, api_url, api_key, model_id, max_context)
+             VALUES ('no-key', 'ollama', 'http://x', NULL, 'm', 128000)",
+            [],
+        )
+        .unwrap();
+        let id = conn.last_insert_rowid();
+
+        migrate_v58_to_v59(&conn).unwrap();
+
+        let after: Option<String> = conn
+            .query_row("SELECT api_key FROM ai_models WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(after, None, "NULL 应保持 NULL");
+    }
+}
+
+#[cfg(test)]
+mod v54_rescan_tests {
+    use super::*;
+
+    /// v54 必须清空 attachment_scan_at，否则同批给 KNOWN_PREFIXES 补的 `attachments/`
+    /// 对**存量笔记**完全无效 —— 增量扫描只挑标记落后的笔记，老笔记的标记早已对齐。
+    #[test]
+    fn migration_clears_attachment_scan_marker() {
+        let db = crate::database::Database::init(":memory:").unwrap();
+        let id = db
+            .create_note(&crate::models::NoteInput {
+                title: "早就扫过的老笔记".into(),
+                // 干净格式，URL 归一化不会改它 —— 正因如此才更要靠清标记来重扫
+                content: r#"<a href="kb-asset://attachments/3/spec.pdf">附件</a>"#.into(),
+                folder_id: None,
+            })
+            .unwrap()
+            .id;
+
+        let conn = db.conn_lock().unwrap();
+        // 模拟"这条笔记之前已被扫过"：标记对齐到当前 updated_at
+        conn.execute(
+            "UPDATE notes SET attachment_scan_at = updated_at WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+        let before: Option<String> = conn
+            .query_row("SELECT attachment_scan_at FROM notes WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap();
+        assert!(before.is_some(), "前置条件：标记应已对齐");
+
+        set_version(&conn, 53).unwrap();
+        migrate_v53_to_v54(&conn).unwrap();
+
+        let after: Option<String> = conn
+            .query_row("SELECT attachment_scan_at FROM notes WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap();
+        assert!(
+            after.is_none(),
+            "迁移后标记必须为 NULL，下次 push 才会重扫到 attachments/ 下的附件"
+        );
+    }
+}

@@ -1,0 +1,2048 @@
+/** 应用配置 */
+export interface AppConfig {
+  key: string;
+  value: string;
+}
+
+/** 用户导入的自定义待办提醒提示音（文件落在 app_data_dir/reminder-sounds/） */
+export interface CustomReminderSound {
+  /** 落盘文件名（含扩展名），也是配置里 `custom:<file_name>` 存的句柄 */
+  file_name: string;
+  /** 去掉扩展名的展示名 */
+  display_name: string;
+  /** 绝对路径，前端 convertFileSrc 后喂 <audio> */
+  path: string;
+  /** 字节数 */
+  size: number;
+}
+
+/** 全局快捷键绑定（仅 global scope，由 Rust 侧 global-shortcut 插件管理） */
+export interface ShortcutBinding {
+  /** 内部唯一 ID（如 'global.quickCapture'） */
+  id: string;
+  /** 当前生效的 accelerator；空字符串 = 已禁用 */
+  accel: string;
+  /** 默认 accelerator */
+  defaultAccel: string;
+  /** 用户已改键 / 已禁用 */
+  isCustom: boolean;
+  /** 是否被禁用（accel 为空） */
+  disabled: boolean;
+}
+
+/** 系统信息 */
+export interface SystemInfo {
+  os: string;
+  arch: string;
+  appVersion: string;
+  /** 当前数据根目录（用户改自定义目录 / KB_DATA_DIR / 便携模式后为对应路径） */
+  dataDir: string;
+  imagesDir: string;
+}
+
+/** 数据库文本体检：单个含非法 UTF-8 的 cell */
+export interface TextHealthIssue {
+  table: string;
+  column: string;
+  /** 该行主键值（notes.id 等），用于定位是哪条笔记 */
+  rowId: number;
+  /** 修正后的内容预览（截断到 80 字符） */
+  preview: string;
+  /** 是否已写回修复（体检模式恒为 false） */
+  repaired: boolean;
+}
+
+/**
+ * 数据库文本体检报告。
+ *
+ * 非法 UTF-8 不是应用写出来的（Rust String 写不出），而是 db 文件被外部拷坏：
+ * 跨平台直接拷 app.db 漏了 -wal、数据目录放网盘双向同步、磁盘坏道 / 异常断电。
+ * 症状是同步报 `Conversion error from type Text at index: N`。
+ */
+export interface TextHealthReport {
+  /** 实际扫过的 TEXT cell 数 */
+  scannedCells: number;
+  issues: TextHealthIssue[];
+  /** 成功写回修复的 cell 数 */
+  repairedCells: number;
+  /** 修复过程中写回失败的说明（不中断整体流程） */
+  errors: string[];
+}
+
+// ─── 笔记 ─────────────────────────────────────
+
+/** 笔记 */
+export interface Note {
+  id: number;
+  title: string;
+  content: string;
+  folder_id: number | null;
+  is_daily: boolean;
+  daily_date: string | null;
+  is_pinned: boolean;
+  /** T-003: 是否"隐藏"（主列表/搜索/反链/图谱/RAG 全部过滤；wiki 跳转仍可访问）*/
+  is_hidden: boolean;
+  /** T-007: 是否加密。content 字段会是占位符，真实内容需调 decryptNote */
+  is_encrypted: boolean;
+  /**
+   * 是否"临时编辑"。以临时方式打开的外部 .md：照常写回原文件，
+   * 但不进主列表 / 搜索 / 双链 / RAG，只在「临时文件」面板可见。
+   * 与 is_hidden 的区别：那个是隐私（配 PIN），这个只是"不想污染知识库"。
+   */
+  is_scratch: boolean;
+  word_count: number;
+  created_at: string;
+  updated_at: string;
+  /** 关联的原始文件相对路径（相对 app_data_dir），纯笔记为 null */
+  source_file_path: string | null;
+  /** 原始文件类型："pdf" / "docx" / "doc" / null */
+  source_file_type: string | null;
+  /** 同 folder 内的自定义排序值，越小越靠前；只在 NoteQuery.sort_by="custom" 时生效 */
+  sort_order: number;
+  /** 笔记类型：普通 Markdown 笔记 or 白板。决定点开时进哪个编辑器 */
+  note_type: NoteType;
+}
+
+/**
+ * 笔记类型（对齐 Rust `models::note_type`）。
+ *
+ * - `markdown`：普通笔记，`content` 是 Markdown 正文
+ * - `whiteboard`：白板，`content` 是 Excalidraw 场景 JSON（别拿去当正文渲染）
+ */
+export type NoteType = "markdown" | "whiteboard";
+
+/**
+ * 笔记内嵌白板保存后的资源路径（相对 data_dir 的 POSIX 路径）。
+ * 场景文件与预览图配对命名，改同一块白板永远覆盖这两个文件。
+ */
+export interface EmbeddedWhiteboardSaved {
+  scene_path: string;
+  preview_path: string;
+}
+
+/**
+ * 快照来源（对齐 Rust `services::snapshot::reason`）。
+ *
+ * - `auto`：自动保存覆盖前留的底
+ * - `manual`：用户主动存档
+ * - `before_restore`：回滚前对当前版本的兜底，让"恢复"本身也能撤销
+ */
+export type SnapshotReason = "auto" | "manual" | "before_restore";
+
+/**
+ * 历史版本元信息（列表用，不含画布正文）。与 Rust `models::NoteSnapshotMeta` 对齐。
+ *
+ * 正文按需单条取（`whiteboardApi.getSnapshotScene`）—— 一块白板的快照几十 KB 起步，
+ * 列表连正文一起拉就是几 MB 的 IPC 负担。
+ */
+export interface NoteSnapshotMeta {
+  id: number;
+  note_id: number;
+  byte_size: number;
+  reason: SnapshotReason;
+  created_at: string;
+}
+
+/** 历史版本的完整内容（预览 / 回滚用）。与 Rust `models::NoteSnapshot` 对齐 */
+export interface NoteSnapshot extends NoteSnapshotMeta {
+  content: string;
+}
+
+/** 单条笔记的历史版本占用（设置页"占用最大的笔记"列表）。与 Rust `models::SnapshotNoteUsage` 对齐 */
+export interface SnapshotNoteUsage {
+  note_id: number;
+  title: string;
+  /** 决定点进去跳编辑器还是白板页 */
+  note_type: NoteType;
+  count: number;
+  byte_size: number;
+}
+
+/**
+ * 白板「笔记卡片」要显示的笔记摘要。与 Rust `models::NoteExcerpt` 对齐。
+ *
+ * 卡片是活的：每次打开白板都重新取一次，笔记改了卡片跟着变。
+ */
+export interface NoteExcerpt {
+  note_id: number;
+  title: string;
+  /** 已转纯文本并截断的正文；笔记不存在 / 已加密时是提示文案 */
+  excerpt: string;
+  /** 笔记已删除 —— 卡片显示成失效样式 */
+  missing: boolean;
+}
+
+/** 全库历史版本用量总览。与 Rust `models::SnapshotUsage` 对齐 */
+export interface SnapshotUsage {
+  total_count: number;
+  total_bytes: number;
+  /** 占用最大的前 N 条（不是全量） */
+  top_notes: SnapshotNoteUsage[];
+}
+
+/**
+ * AI 引用笔记里抽出的图片清单（回答下方"溯源"挂缩略图）。
+ * 与 Rust models::NoteImageRef 对齐。
+ * images 是相对 data_dir 的 POSIX 路径，前端 `toKbAsset` 拼 `kb-asset://` 后渲染。
+ */
+export interface NoteImageRef {
+  note_id: number;
+  title: string;
+  images: string[];
+}
+
+/** PDF 导入结果（单个文件） */
+export interface PdfImportResult {
+  sourcePath: string;
+  noteId: number | null;
+  title: string | null;
+  error: string | null;
+}
+
+/** Excel / ODS / CSV 导入单个文件的结果（与 Rust `ExcelImportResult` 对齐） */
+export interface ExcelImportResult {
+  sourcePath: string;
+  noteId: number | null;
+  title: string | null;
+  error: string | null;
+  /** 因行数超限被截断的工作表名；正文不全，完整数据在源文件里 */
+  truncatedSheets: string[];
+}
+
+/** .doc 转换器探测结果（serde kebab-case） */
+export type DocConverter = "libre-office" | "windows-com" | "none";
+
+/** 单个 ProgId 的实测结果 */
+export interface ComProgIdAttempt {
+  progid: string;
+  ok: boolean;
+  error: string | null;
+}
+
+/** 转换器完整诊断报告 */
+export interface ConverterDiagnostic {
+  libreOfficePath: string | null;
+  comAttempts: ComProgIdAttempt[];
+  active: DocConverter;
+}
+
+/** 创建/更新笔记入参 */
+export interface NoteInput {
+  title: string;
+  content: string;
+  folder_id?: number | null;
+}
+
+/** 笔记列表查询参数 */
+export interface NoteQuery {
+  folder_id?: number | null;
+  keyword?: string | null;
+  page?: number;
+  page_size?: number;
+  /** true 时只返回 folder_id IS NULL 的笔记（"未分类"虚拟文件夹） */
+  uncategorized?: boolean;
+  /** true 时点父文件夹连同所有子孙文件夹的笔记一起返回（默认 true，符合"文件夹=容器"直觉） */
+  include_descendants?: boolean;
+  /** 排序模式：默认按 is_pinned DESC, updated_at DESC */
+  sort_by?: "default" | "custom" | "created" | "title";
+}
+
+// ─── 文件夹 ───────────────────────────────────
+
+/** 文件夹（树形结构） */
+export interface Folder {
+  id: number;
+  name: string;
+  parent_id: number | null;
+  sort_order: number;
+  children: Folder[];
+  note_count: number;
+  /** 自定义图标颜色（hex `#RRGGBB`）；null = 默认主题色 */
+  color: string | null;
+}
+
+/**
+ * 一个「空文件夹」——子树内（含自身）没有任何未回收笔记。
+ * 「导入历史日记」会建出成百上千个日期文件夹，日记摘走后就成了空壳，靠清理功能批量删。
+ */
+export interface EmptyFolderInfo {
+  id: number;
+  /** 从根到该文件夹的完整路径（`日记/2020/2020-05-26`） */
+  path: string;
+}
+
+// ─── 标签 ─────────────────────────────────────
+
+/** 标签 */
+export interface Tag {
+  id: number;
+  name: string;
+  color: string | null;
+  note_count: number;
+  /** 父标签 id，null = 顶层。v39 schema 引入的树形层级 */
+  parent_id: number | null;
+}
+
+/** 笔记列表「标签」列用的轻量标签（不含 note_count），与 Rust `NoteTagBrief` 对齐 */
+export interface NoteTagBrief {
+  id: number;
+  name: string;
+  color: string | null;
+}
+
+/** 创建/更新标签入参 */
+export interface TagInput {
+  name: string;
+  color?: string | null;
+}
+
+// ─── 搜索 ─────────────────────────────────────
+
+/** 全文搜索结果 */
+export interface SearchResult {
+  id: number;
+  title: string;
+  snippet: string;
+  updated_at: string;
+  folder_id: number | null;
+  /** 笔记类型：搜索结果据此换图标（白板点开是画布，不是编辑器） */
+  note_type: NoteType;
+}
+
+
+// ─── Excel 二维数据集（P1-3b）────────────────────
+
+/** 字段推断出的数据类型 */
+export type DatasetFieldType = "number" | "date" | "boolean" | "text";
+
+/**
+ * 字段的语义角色。
+ * - `identifier` 是标识列（编号 / ID），**不该被求和**
+ * - `measure` 是度量列（金额 / 数量），适合聚合
+ * - `category` 适合分组
+ */
+export type DatasetSemanticRole =
+  | "time"
+  | "measure"
+  | "identifier"
+  | "status"
+  | "category";
+
+/**
+ * 一个数据集 = Excel 某个 sheet 里的一个「数据区域」。
+ *
+ * 同一个 sheet 可能有多个区域（主表 + 下方小计表），
+ * 靠 `(sourcePath, sheetName, regionIndex)` 区分。
+ */
+export interface Dataset {
+  id: number;
+  /** 相对 data_dir 的附件路径 */
+  sourcePath: string;
+  sheetName: string;
+  regionIndex: number;
+  /** 表头在原始行里的下标；null = 无表头（列名是 A列/B列） */
+  headerRow: number | null;
+  rowCount: number;
+  colCount: number;
+  createdAt: string;
+}
+
+/** 列画像 */
+export interface DatasetField {
+  colIndex: number;
+  name: string;
+  inferredType: DatasetFieldType;
+  semanticRole: DatasetSemanticRole | null;
+  /** 非空率 0.0~1.0 */
+  completeness: number;
+  distinctCount: number;
+}
+
+/** 数据集详情 = 元信息（扁平展开）+ 列画像 */
+export type DatasetSchema = Dataset & {
+  fields: DatasetField[];
+};
+
+/**
+ * 搜索筛选条件（P1-2）。与 Rust 侧 `models::SearchFilters` 对齐（camelCase）。
+ *
+ * 只传用户真正勾选的维度，没勾的字段**省略**（不要传 `undefined` 之外的值）。
+ *
+ * 🔴 **传空数组 = 零结果**：后端 fail-closed，`folderIds: []` 表示
+ * "勾了文件夹维度但一个都没选" → 返回空。这是防御性设计：
+ * 一个前端状态 bug 不该把"筛选到零结果"变成"把整个知识库倒出来"。
+ * 所以清空筛选时请**删掉该字段**，而不是传 `[]`。
+ */
+export interface SearchFilters {
+  /** 限定文件夹（需前端展开成含子孙的完整 id 列表） */
+  folderIds?: number[];
+  /** 限定标签，笔记需**同时**含全部所选标签（AND 语义） */
+  tagIds?: number[];
+  /** 更新时间下界（含），格式与 notes.updated_at 一致 */
+  updatedAfter?: string;
+  /** 更新时间上界（含） */
+  updatedBefore?: string;
+  /** 限定笔记类型 */
+  noteTypes?: NoteType[];
+  /** 创建时间下界（含），格式与 notes.created_at 一致 */
+  createdAfter?: string;
+  /** 创建时间上界（含） */
+  createdBefore?: string;
+  /** 仅在标题里搜（不看正文）。不勾选时请省略，不要传 false */
+  titleOnly?: boolean;
+}
+
+// ─── 回收站 ───────────────────────────────────
+
+/** 回收站笔记查询参数 */
+export interface TrashQuery {
+  page?: number;
+  page_size?: number;
+}
+
+// ─── 笔记链接 ─────────────────────────────────
+
+/** 反向链接 */
+export interface NoteLink {
+  source_id: number;
+  source_title: string;
+  context: string | null;
+  updated_at: string;
+}
+
+/** 与当前笔记相连的一篇笔记（出链 / 入链共用；字段名中性，不叫 source/target） */
+export interface LinkedNote {
+  id: number;
+  title: string;
+  updatedAt: string;
+}
+
+/** 当前笔记的链接全貌，编辑器底部状态条一次取回 */
+export interface NoteLinkSummary {
+  /** 本篇链出去的笔记（我引用了谁） */
+  outgoing: LinkedNote[];
+  /** 链进来的笔记（谁引用了我） */
+  incoming: LinkedNote[];
+  /** 断链：正文写了 [[X]] 但 X 不存在 / 已删 / 已隐藏，按原文标题去重 */
+  broken: string[];
+}
+
+/** wiki 链接候选项（`[[` 补全下拉用，带 folder 名做重名消歧义） */
+export interface WikiLinkSuggestItem {
+  id: number;
+  title: string;
+  /** 直接父文件夹名；无父文件夹为 null */
+  folderName: string | null;
+}
+
+// ─── 知识图谱 ─────────────────────────────────
+
+/** 图谱节点 */
+export interface GraphNode {
+  id: number;
+  title: string;
+  /** 节点类型："note" = 笔记，"folder" = 文件夹 */
+  node_type: "note" | "folder";
+  is_daily: boolean;
+  is_pinned: boolean;
+  tag_count: number;
+  link_count: number;
+  /** 文件夹自定义颜色（仅 folder 节点可能有；note 恒为 null） */
+  color: string | null;
+}
+
+/** 图谱边 */
+export interface GraphEdge {
+  source: number;
+  target: number;
+  /**
+   * 边类型：
+   * - "link"         = wiki 双链（note → note，实线带箭头）
+   * - "folder_child" = 父子文件夹（folder → folder，虚线无箭头）
+   * - "folder_note"  = 文件夹归属（folder → note，虚线无箭头）
+   */
+  edge_type: "link" | "folder_child" | "folder_note";
+}
+
+/** 知识图谱数据 */
+export interface GraphData {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+// ─── AI 知识问答 ─────────────────────────────
+
+/** AI 模型配置 */
+export interface AiModel {
+  id: number;
+  name: string;
+  /**
+   * 服务商预置 key（ai-profile crate 的 `ProviderPreset.key`，如 `deepseek` / `ollama` /
+   * `openai_compatible_custom`）。schema v62 起不再是本项目自己的厂商 id。
+   */
+  provider: string;
+  /** 接口地址，**原样使用、不推断版本段**（含 `/v1` 等，不含 `/chat/completions`） */
+  api_url: string;
+  /**
+   * 🔴 **恒为 null** —— Command 层会擦掉明文（P0-1b）。
+   * 判断"配没配"用 {@link has_api_key}；需要明文（分享配置）走
+   * `aiModelApi.getApiKey(id)`，那是明文离开进程的唯一入口。
+   */
+  api_key: string | null;
+  /** 是否已配置 API Key */
+  has_api_key: boolean;
+  /** 模型标识 (如 gpt-4o-mini, claude-sonnet-4-20250514, llama3) */
+  model_id: string;
+  is_default: boolean;
+  /**
+   * 已存的上下文窗口（token）。**0 = 未设置**，对话时回落到端点上报 / 预置值
+   * （生效值由后端 `effective_limits` 算，决定 RAG 与挂载笔记的预算）。
+   */
+  max_context: number;
+  /** `max_context` / `max_output` 的来源：`user` 手填、`endpoint`「获取」时端点上报；null = 没存 */
+  limits_source: "user" | "endpoint" | null;
+  /** 端点上报的模型输出上限，用来给 `max_tokens` 封顶；null = 不知道 */
+  max_output: number | null;
+  /**
+   * 单次回答的 token 上限。**null = 不传该参数**，用服务商默认值。
+   *
+   * 与 {@link max_context} 是两回事：那个管"输入能塞多少"，
+   * 这个管"输出最多写多长"，两者之和不能超过模型窗口。
+   * Ollama 用 -1 表示无限生成。
+   */
+  max_tokens: number | null;
+  created_at: string;
+}
+
+/** 创建/更新 AI 模型入参 */
+export interface AiModelInput {
+  name: string;
+  provider: string;
+  api_url: string;
+  /**
+   * API Key，**更新时是三态**：
+   * - 字段缺失 / `undefined` → 保持原值不变
+   * - `""` → 清除
+   * - 其它 → 替换
+   *
+   * 🔴 因为 Key 不回显，用户只改模型名时表单里的 Key 是空的 ——
+   * 此时必须**省略该字段**，传空串会把 Key 清掉。
+   */
+  api_key?: string | null;
+  model_id: string;
+  /** 上下文窗口；缺省 / null / 0 = 未设置（回落端点上报 / 预置） */
+  max_context?: number | null;
+  /** 限额来源，与 `max_context` / `max_output` 一起传；null = 清除 */
+  limits_source?: "user" | "endpoint" | null;
+  /** 端点上报的输出上限（「获取」时带回） */
+  max_output?: number | null;
+  /**
+   * 单次回答 token 上限，**三态**（与 `api_key` 同理）：
+   * - 字段缺失 / `undefined` → 保持原值不变
+   * - `null` → 清空，回到"不传该参数、用服务商默认"
+   * - 数字 → 设为该值（Ollama 可用 -1 表示无限）
+   */
+  max_tokens?: number | null;
+}
+
+/** 服务商预置里的一个模型候选（ai-profile `ModelOption` 的线格式）。 */
+export interface AiPresetModel {
+  value: string;
+  label: string;
+  /** 预置静态限额；null = 官方文档没写，不猜 */
+  contextWindow: number | null;
+  maxOutput: number | null;
+}
+
+/**
+ * 服务商预置（ai-profile `ProviderPreset` 的线格式，camelCase）。
+ *
+ * 🔴 清单本体在 **ai-profile crate**（`E:/my/桌面软件tauri/ai-profile`），后端只暴露
+ * OpenAI 兼容协议的那些 —— 加服务商 / 加模型去那个仓库改，本项目只升依赖。
+ * 本项目没有多语言，用纯文本的 `label` / `hint` / `groupLabel`。
+ */
+export interface AiProviderPreset {
+  key: string;
+  groupKey: string;
+  groupLabel: string;
+  label: string;
+  /** 一句「选择的依据」，下拉副文本 */
+  hint: string | null;
+  /** 预填地址（含版本段）；null = 该档不预填 */
+  baseUrl: string | null;
+  /** 默认模型；空串 = 让用户自己填 */
+  model: string;
+  models: AiPresetModel[];
+  /** 本机推理服务（Ollama / LM Studio / vLLM），通常不需要密钥 */
+  isLocal: boolean;
+  /** 对话协议：Anthropic 走 /v1/messages，其余走 OpenAI 兼容 /chat/completions */
+  protocol: "anthropic" | "openai_compatible";
+}
+
+/** ai-profile 的 token 限额（线格式） */
+export interface TokenLimits {
+  contextWindow: number | null;
+  maxOutput: number | null;
+  source: "user" | "endpoint" | "preset";
+}
+
+/** 零成本验证失败的结构化原因。🔴 字段是 snake_case，每个 code 对应一个界面动作 */
+export type VerifyError =
+  | { code: "auth_failed"; detail: string }
+  | { code: "not_found"; requested_url: string; suggested_url: string | null }
+  | { code: "unreachable"; proxy_hint: boolean }
+  | { code: "model_not_found"; available: string[] }
+  | { code: "protocol_mismatch"; expect: string }
+  | { code: "missing_extra_field"; key: string }
+  | { code: "malformed"; detail: string };
+
+export interface VerifyOk {
+  latencyMs: number;
+  /** 已清洗（去重 + 滤掉向量 / 重排 / 语音等）的对话模型清单 */
+  models: string[];
+  /** 清洗时滤掉的条数 */
+  dropped: number;
+  modelInList: boolean;
+  limits: TokenLimits | null;
+  /** 端点逐个模型上报的限额 */
+  modelLimits: [string, TokenLimits][];
+}
+
+/** 「获取」的结果。`ok: false` 不是调用失败 —— 连不上本身就是验证结果 */
+export interface VerifyOutcome {
+  ok: boolean;
+  result: VerifyOk | null;
+  error: VerifyError | null;
+  /** 失败能否靠改配置解决；false = 只能重试 */
+  actionable: boolean;
+}
+
+/** ai.profile 解析出的一条配置（已换成 ai_models 字段口径）。🔴 含明文密钥 */
+export interface ImportedAiModel {
+  name: string;
+  provider: string;
+  api_url: string;
+  api_key: string | null;
+  model_id: string;
+}
+
+export interface ImportedAiModels {
+  models: ImportedAiModel[];
+  /** 跳过的条数（设备绑定的 OAuth 档案 / 没有模型名的） */
+  skipped: number;
+  bundle: boolean;
+}
+
+/** 旧版本导出的模型配置换成新口径后的字段 */
+export interface LegacyAiModelFix {
+  provider: string;
+  api_url: string;
+  max_context: number | null;
+}
+
+/** AI 模型连通性测试结果 */
+export interface AiModelTestResult {
+  ok: boolean;
+  /** 端到端往返耗时（毫秒） */
+  latency_ms: number;
+  /** 服务端样本：成功时为模型回复前 40 字 */
+  sample: string | null;
+}
+
+/** AI 对话 */
+export interface AiConversation {
+  id: number;
+  title: string;
+  model_id: number;
+  /** 附加给本对话的笔记 ID 列表，整个对话共享 */
+  attached_note_ids: number[];
+  /** RAG 检索范围限定到某文件夹（含子孙）；null = 全库。「对此文件夹问 AI」发起时带上 */
+  scope_folder_id: number | null;
+  /** 角色预设：提示词库里的一条（prompt_templates.id）；null = 不套角色 */
+  preset_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** AI 消息 */
+export interface AiMessage {
+  id: number;
+  conversation_id: number;
+  /** 角色: user / assistant */
+  role: string;
+  content: string;
+  /** 引用的笔记 ID 列表 (JSON 字符串) */
+  references: string | null;
+  /** T-004: Skills 框架下 AI 调用的工具记录（JSON 字符串，反序列化后是 SkillCall[]）*/
+  skill_calls: string | null;
+  /** v63：一轮回复的收尾信息（JSON 字符串，反序列化后是 TurnMeta）；存量消息为 null */
+  turn_meta?: string | null;
+  created_at: string;
+}
+
+/** 一轮回复的收尾信息（与 Rust `models::TurnMeta` 对齐）*/
+export interface TurnMeta {
+  endReason: "done" | "stopped" | "error";
+  /** endReason = "error" 时的错误原文 */
+  error?: string;
+  /** 从收到提问到这一轮结束的耗时 */
+  durationMs?: number;
+  /** 智能模式下各轮调工具前模型说的话，下标 = 轮次 */
+  roundTexts?: string[];
+  /** 推理模型走 reasoning_content 的思考过程 */
+  reasoning?: string;
+}
+
+/** AI Skill 调用记录（T-004）*/
+export interface SkillCall {
+  id: string;
+  name: string;
+  /** 参数 JSON 字符串（展示给用户看） */
+  argsJson: string;
+  /** Skill 执行结果文本（可能是 JSON 或截断的文本） */
+  result: string;
+  /** 'running' | 'ok' | 'error' */
+  status: "running" | "ok" | "error";
+  /** 第几轮发起的调用（从 0 开始）；v63 前的存量记录没有，按 0 处理 */
+  round?: number;
+  /** 工具执行耗时；running 时没有 */
+  durationMs?: number;
+}
+
+// ─── AI 规划今日待办（T-005） ────────────
+
+export interface PlanTodayRequest {
+  /** 用户输入的"今日目标"，可留空 */
+  goal?: string | null;
+  /** 是否把昨日未完成/过期任务一起带进 AI 的上下文；默认 true */
+  includeYesterdayUnfinished?: boolean;
+}
+
+/** AI 对一条待办的建议；尚未写入 DB */
+export interface TaskSuggestion {
+  title: string;
+  /** 0=紧急 / 1=普通 / 2=低 */
+  priority?: number | null;
+  important?: boolean | null;
+  /** 'YYYY-MM-DD' 或 'YYYY-MM-DD HH:MM:SS' */
+  dueDate?: string | null;
+  /** AI 自动判断的提醒时间（分钟）：null=不提醒；0=准时；正数=提前 N 分钟。
+   *  推荐值：null / 0 / 15 / 30 / 60 / 180 / 1440 / 10080 */
+  remindBefore?: number | null;
+  /** AI 给出的推荐理由，UI 折叠展示 */
+  reason?: string | null;
+}
+
+export interface PlanTodayResponse {
+  tasks: TaskSuggestion[];
+  summary?: string | null;
+}
+
+// ─── AI 智能规划（目标驱动）────────────
+
+export interface PlanFromGoalRequest {
+  /** 用户描述的目标，例如"180 天减肥到 55 公斤" */
+  goal: string;
+  /** 计划周期天数，默认 30，最大 365 */
+  horizonDays?: number;
+  /** 起始日期 'YYYY-MM-DD'；缺省=今天 */
+  startDate?: string | null;
+  /** 用户额外补充信息（作息/兴趣/约束） */
+  profileHint?: string | null;
+}
+
+export interface MilestoneDraft {
+  title: string;
+  /** 自然语言日期范围，如 "5月1日-5月31日" */
+  dateRange?: string | null;
+  description?: string | null;
+}
+
+export interface PlanFromGoalResponse {
+  tasks: TaskSuggestion[];
+  milestones: MilestoneDraft[];
+  summary?: string | null;
+  /** 服务端生成的批次 ID，前端落库时每条任务都要透传到 source_batch_id */
+  batchId: string;
+  /** 服务端友好警告（如 Excel 体积大被截断）；UI 在预览页顶部展示 */
+  warnings?: string[];
+}
+
+export interface PlanFromExcelRequest {
+  /** Excel/ODS 文件绝对路径（来自 Tauri dialog） */
+  filePath: string;
+  /** 计划周期天数，默认 30，最大 365 */
+  horizonDays?: number;
+  /** 起始日期 'YYYY-MM-DD'；缺省=今天 */
+  startDate?: string | null;
+  /** 用户对 Excel 内容的额外说明（可选），如"重点关注健身部分" */
+  extraGoal?: string | null;
+}
+
+// ─── AI 会话附件（路线 A） ────────────
+
+/** Excel/ODS 附件解析预览。 */
+export interface ExcelPreview {
+  filePath: string;
+  displayName: string;
+  /** calamine 解析后的多 sheet markdown 全文 */
+  markdown: string;
+  totalRows: number;
+  /** 因体积过大被截断的 sheet 名（空数组=未截断） */
+  truncatedSheets: string[];
+  /** markdown 字符数（用于 UI 提示"占用约 12k 上下文"） */
+  charsEstimated: number;
+}
+
+/** 文本类附件（md / txt / json / 代码等）解析预览。 */
+export interface TextPreview {
+  filePath: string;
+  displayName: string;
+  content: string;
+  totalLines: number;
+  charsEstimated: number;
+  /** 单文件超 60k 字符时尾部被截断 */
+  truncated: boolean;
+}
+
+/** PDF 附件解析预览（仅文字层抽取，扫描件会报错）。 */
+export interface PdfPreview {
+  filePath: string;
+  displayName: string;
+  content: string;
+  charsEstimated: number;
+  truncated: boolean;
+}
+
+/**
+ * 统一附件预览：后端按扩展名自动分发到 Excel/Text/PDF 解析器返回。
+ * tagged union 用 kind 区分，对应后端 AttachmentPreview enum。
+ */
+export type AttachmentPreview =
+  | ({ kind: "excel" } & ExcelPreview)
+  | ({ kind: "text" } & TextPreview)
+  | ({ kind: "pdf" } & PdfPreview);
+
+/**
+ * 发送给 AI 的消息附件。每种 kind 字段不同（参考后端 MessageAttachment）。
+ */
+export type MessageAttachment =
+  | {
+      kind: "excel";
+      filePath: string;
+      displayName: string;
+      markdown: string;
+      totalRows: number;
+      truncatedSheets: string[];
+    }
+  | {
+      kind: "text";
+      filePath: string;
+      displayName: string;
+      content: string;
+      truncated: boolean;
+    }
+  | {
+      kind: "pdf";
+      filePath: string;
+      displayName: string;
+      content: string;
+      truncated: boolean;
+    };
+
+// ─── AI 写笔记并归档（T-006） ────────────
+
+export type TargetLength = "short" | "medium" | "long";
+
+export interface DraftNoteRequest {
+  topic: string;
+  reference?: string | null;
+  /** short=100~300 / medium=300~800 / long=800~2000 */
+  targetLength?: TargetLength;
+}
+
+/** AI 生成的笔记草稿（未落库，Modal 里用户确认后才写入）*/
+export interface DraftNoteResponse {
+  title: string;
+  /** Markdown 正文 */
+  content: string;
+  /** 建议目录路径，如 "工作/周报"；空串 = 根目录 */
+  folderPath: string;
+  reason?: string | null;
+}
+
+// ─── T-007 笔记加密 / Vault ─────────────────────
+
+/** Vault 整体状态（三态机）*/
+export type VaultStatus = "notset" | "locked" | "unlocked";
+
+/**
+ * 应用启动锁状态（软锁 / 全局进入密码，非真加密）。
+ * 与 Rust models::AppLockStatus 对齐。
+ */
+export interface AppLockStatus {
+  /** 是否已设置进入密码（= 锁是否开启） */
+  enabled: boolean;
+  /** 闲置自动锁定分钟数；0 = 关闭自动锁定 */
+  autoLockMinutes: number;
+}
+
+// ─── 导入 ─────────────────────────────────────
+
+/** 扫描到的文件在库中的匹配类型（后端扫描时判定） */
+export type ImportMatchKind = "new" | "path" | "fuzzy";
+
+/** 扫描到的文件条目 */
+export interface ScannedFile {
+  path: string;
+  /** 相对扫描根的父目录，斜杠统一；根层文件为空串 */
+  relative_dir: string;
+  name: string;
+  size: number;
+  /**
+   * 去重匹配结果：
+   * - "new"   全新文件
+   * - "path"  按 source_file_path 精确命中（已导入过）
+   * - "fuzzy" 按 (title, content_hash) 兜底命中（用户可能搬动过源文件）
+   */
+  match_kind: ImportMatchKind;
+  /** match_kind 非 "new" 时，指向已存在笔记的 id */
+  existing_note_id: number | null;
+  /** 从所在文件夹名（优先）或文件名识别出的日期 YYYY-MM-DD；不像日记则为 null */
+  detected_date: string | null;
+  /** 文件夹名与文件名都解析出日期但不一致（以文件夹为准） */
+  date_conflict: boolean;
+}
+
+/** 历史日记转换：一天对应的候选（可能由多篇笔记合并而来） */
+export interface DailyCandidate {
+  /** 目标日期 YYYY-MM-DD */
+  date: string;
+  /** 参与这一天的笔记 id（与 titles 同序，合并时按此顺序拼接） */
+  noteIds: number[];
+  titles: string[];
+  /** 该日期已存在日记时，指向那条已有日记的 id */
+  existingDailyId: number | null;
+}
+
+/** 历史日记转换计划（只读扫描结果，给用户预览用） */
+export interface DailyConvertPlan {
+  /** 单文件日期：直接认领，无损 */
+  single: DailyCandidate[];
+  /** 多文件日期：按策略合并 / 选主 */
+  multi: DailyCandidate[];
+  /** 与已有日记冲突的日期 */
+  conflicts: DailyCandidate[];
+  /** 名字不像日期、被跳过的文件夹名（去重，最多 50 条） */
+  skippedFolders: string[];
+  dateFrom: string | null;
+  dateTo: string | null;
+}
+
+/** 一天有多篇笔记时怎么办 */
+export type MultiFileStrategy = "merge" | "keepFirst" | "skip";
+/** 该日期已有日记时怎么办 */
+export type DailyConflictStrategy = "skip" | "append";
+
+export interface DailyConvertOptions {
+  multiFile: MultiFileStrategy;
+  conflict: DailyConflictStrategy;
+}
+
+export interface DailyConvertResult {
+  convertedDays: number;
+  /** 因合并而并入其它笔记、随后进回收站的笔记数 */
+  mergedNotes: number;
+  appendedDays: number;
+  skippedDays: number;
+  /** 日记摘出日期文件夹后，被顺手清掉的空文件夹数 */
+  foldersRemoved: number;
+  errors: string[];
+}
+
+/**
+ * 导入冲突策略：遇到已存在的文件怎么处理
+ * - "skip"      跳过（默认，最安全）
+ * - "duplicate" 创建副本（标题加 " (2)"）
+ */
+export type ImportConflictPolicy = "skip" | "duplicate";
+
+/** 导入结果 */
+export interface ImportResult {
+  imported: number;
+  skipped: number;
+  duplicated: number;
+  errors: string[];
+  /** T-009: 自动关联的 frontmatter tag 条数（笔记 × 标签 笛卡尔次数） */
+  tags_attached?: number;
+  /** T-009: 解析到 frontmatter 的笔记数 */
+  frontmatter_parsed?: number;
+  /** T-009 Commit 2: 复制到 kb_assets/images 的图片张数 */
+  attachments_copied?: number;
+  /** T-009 Commit 2: 缺失的图片清单（"笔记标题: 原始引用"，已去重） */
+  attachments_missing?: string[];
+  /** 本次新建的笔记 ID（按文件参数顺序，含 Duplicate 副本） */
+  noteIds?: number[];
+  /** 命中已有笔记并按 Skip 策略跳过时记录的现有笔记 ID */
+  existingNoteIds?: number[];
+  /** 按「日期文件夹」识别并标记为日记的篇数（dailyMode 开启时才非 0） */
+  daily_marked?: number;
+  /** 同一天有多篇、只有第一篇成了日记，其余仍是普通笔记的篇数 */
+  daily_extra_notes?: number;
+}
+
+/** 导入进度 */
+export interface ImportProgress {
+  current: number;
+  total: number;
+  file_name: string;
+}
+
+/** "打开单个 md 文件"返回结果 */
+export interface OpenMarkdownResult {
+  noteId: number;
+  /** 检测到源文件有变化并已同步回笔记 */
+  wasSynced: boolean;
+  /**
+   * 这条笔记当前是否为"临时编辑"状态。
+   * 不等于打开时传的 asScratch —— 复用一条已有正式笔记时不会被降级成临时。
+   */
+  isScratch: boolean;
+}
+
+/** 孤儿素材类型 */
+export type OrphanKind = "image" | "video" | "attachment" | "pdf" | "source";
+
+/** 孤儿原因 */
+export type OrphanReason = "notePurged" | "unreferenced";
+
+/** 单条孤儿素材 */
+export interface OrphanItem {
+  kind: OrphanKind;
+  /** 绝对路径 */
+  path: string;
+  /** 按 note_id 分目录的素材有；纯平铺的 images 没有 */
+  noteId: number | null;
+  size: number;
+  reason: OrphanReason;
+}
+
+/** 单类素材的孤儿组（UI Tab 内） */
+export interface OrphanGroup {
+  count: number;
+  totalBytes: number;
+  /** 实际明细（最多 500 条）*/
+  items: OrphanItem[];
+  truncated: boolean;
+}
+
+/** 全量孤儿扫描结果 */
+export interface OrphanAssetScan {
+  images: OrphanGroup;
+  videos: OrphanGroup;
+  attachments: OrphanGroup;
+  pdfs: OrphanGroup;
+  sources: OrphanGroup;
+}
+
+/** 孤儿素材清理结果 */
+export interface OrphanAssetClean {
+  deleted: number;
+  freedBytes: number;
+  failed: string[];
+}
+
+/** 附件信息（save_note_attachment 返回） */
+export interface AttachmentInfo {
+  /** 绝对路径（前端用来构造 file:// 链接给 opener 打开） */
+  path: string;
+  /** 原始文件名（展示用） */
+  fileName: string;
+  /** 字节数（用于显示 "1.2 MB"） */
+  size: number;
+  /** MIME 类型 */
+  mime: string;
+}
+
+// ─── 外部 .md 双向同步（写回原文件） ─────────────
+
+/**
+ * 笔记保存后写回原 .md 文件的结果。
+ *
+ * - `ok`：写回成功；`assets_copied` = 用户在编辑器里新插入的图被复制到 `<basename>.assets/` 的张数
+ * - `skipped`：笔记不是从外部 .md 打开的，没什么可写回（默认情况）
+ * - `conflict`：原文件 mtime 与上次写回时不一致 = 外部编辑器（VSCode 等）改过文件，
+ *   前端应弹 Modal 让用户选「覆盖外部 / 取消」（"覆盖外部" 后端再调一次 `force=true`）
+ * - `missing`：原文件被删/移走/挂网盘断开
+ */
+export type WriteBackResult =
+  | { kind: "ok"; assets_copied: number; file_path: string }
+  | { kind: "skipped"; reason: string }
+  | { kind: "conflict"; external_mtime: number; last_known_mtime: number | null; file_path: string }
+  | { kind: "missing"; file_path: string };
+
+// ─── 导出 ─────────────────────────────────────
+
+/** 导出结果 */
+export interface ExportResult {
+  exported: number;
+  errors: string[];
+  /** 用户选择的父目录 */
+  output_dir: string;
+  /** 实际创建的导出根目录（在 output_dir 下自动包一层 知识库导出_YYYYMMDD_HHmmss） */
+  root_dir: string;
+  /** 拷贝到 .assets/ 的资产文件总数（图片+附件，按物理文件去重） */
+  assets_copied: number;
+}
+
+/** 单篇导出结果 */
+export interface SingleExportResult {
+  /** 实际创建的笔记根目录（含 .md 与 assets/） */
+  root_dir: string;
+  /** .md 文件绝对路径 */
+  file_path: string;
+  /** 拷贝到 assets/ 的资产文件数 */
+  assets_copied: number;
+}
+
+/** T-020 Word 导出结果 */
+export interface WordExportResult {
+  filePath: string;
+  imagesEmbedded: number;
+  imagesMissing: number;
+  /** 拷贝到 `<docx 同名>.attachments/` 旁挂目录里的非图片附件数 */
+  attachmentsCopied: number;
+}
+
+/** T-020 HTML 导出结果（单文件，图片 + 非图片附件均内嵌） */
+export interface HtmlExportResult {
+  filePath: string;
+  imagesInlined: number;
+  imagesMissing: number;
+  /** 内嵌为 data: 下载链接的非图片附件数 */
+  attachmentsInlined: number;
+  /** 解析失败的附件链接数 */
+  attachmentsMissing: number;
+}
+
+/** 合并导出的目标格式（与 Rust 侧 MergeFormat 对齐） */
+export type MergeFormat = "markdown" | "html" | "word";
+
+/** 合并导出结果：一个文件夹合成的单个文件 */
+export interface MergeExportResult {
+  filePath: string;
+  /** 实际合并进文档的笔记篇数 */
+  notesMerged: number;
+  imagesInlined: number;
+  imagesMissing: number;
+}
+
+/** 导出进度 */
+export interface ExportProgress {
+  current: number;
+  total: number;
+  file_name: string;
+}
+
+// ─── 首页统计 ─────────────────────────────────
+
+/** 首页统计数据 */
+export interface DashboardStats {
+  total_notes: number;
+  total_folders: number;
+  total_tags: number;
+  total_links: number;
+  today_updated: number;
+  total_words: number;
+  /** 最后一次「写作」时间（含日记，排除导入笔记）；无手写笔记时为 null */
+  last_written_at: string | null;
+}
+
+// ─── 日记中心 ─────────────────────────────────
+
+/** 日记列表项（前端按年月分组渲染用） */
+export interface DailyEntry {
+  id: number;
+  title: string;
+  /** YYYY-MM-DD */
+  daily_date: string;
+  updated_at: string;
+}
+
+// ─── 写作趋势 ─────────────────────────────────
+
+/** 每日写作统计 */
+export interface DailyWritingStat {
+  date: string;
+  note_count: number;
+  word_count: number;
+}
+
+// ─── 笔记模板 ─────────────────────────────────
+
+/** 笔记模板 */
+export interface NoteTemplate {
+  id: number;
+  name: string;
+  description: string;
+  content: string;
+  created_at: string;
+}
+
+/** 创建/更新模板入参 */
+export interface NoteTemplateInput {
+  name: string;
+  description: string;
+  content: string;
+}
+
+// ─── 通用 ─────────────────────────────────────
+
+/** 分页响应 */
+export interface PageResult<T> {
+  items: T[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+/**
+ * 批量恢复笔记的结果（与后端 RestoreBatchResult 对齐，serde camelCase）
+ *
+ * `toRoot` = 其中因原文件夹已被删除而落到根目录的条数
+ */
+export interface RestoreBatchResult {
+  restored: number;
+  toRoot: number;
+}
+
+// ─── 同步 ─────────────────────────────────────
+
+/** 同步范围：控制本次同步包含哪些数据 */
+export interface SyncScope {
+  notes: boolean;
+  images: boolean;
+  pdfs: boolean;
+  sources: boolean;
+  settings: boolean;
+}
+
+export const DEFAULT_SYNC_SCOPE: SyncScope = {
+  notes: true,
+  images: true,
+  pdfs: true,
+  sources: true,
+  settings: true,
+};
+
+/** 导入模式 */
+export type SyncImportMode = "merge" | "overwrite";
+
+/** WebDAV 配置 */
+export interface WebDavConfig {
+  url: string;
+  username: string;
+  /** 前端传入时使用；后端读取时从 keyring 取 */
+  password?: string;
+}
+
+/** 同步数据统计 */
+export interface SyncStats {
+  notesCount: number;
+  foldersCount: number;
+  tagsCount: number;
+  imagesCount: number;
+  pdfsCount: number;
+  sourcesCount: number;
+  /** 资产总大小（字节）*/
+  assetsSize: number;
+}
+
+/** 云端快照条目（多设备场景，一台一个 kb-sync-<device>.zip） */
+export interface RemoteSnapshot {
+  filename: string;
+  device: string;
+}
+
+/** 云端 manifest（快照元信息） */
+export interface SyncManifest {
+  /** 同步包**格式**版本（与数据库结构无关，恒为 1） */
+  schemaVersion: number;
+  device: string;
+  exportedAt: string;
+  appVersion: string;
+  scope: SyncScope;
+  stats: SyncStats;
+  /** 导出端是否为 dev build；导入端据此拒绝跨 dev/prod 导入。老包无此字段 */
+  isDev?: boolean;
+  /**
+   * 导出时 app.db 的 schema 版本（`PRAGMA user_version`）。
+   * 导入端用它做前置拦截：高于当前应用支持的版本直接拒绝，
+   * 否则导入后应用下次启动会打不开数据库。老包无此字段（改由实读库文件兜底校验）。
+   */
+  dbUserVersion?: number;
+}
+
+/** 同步操作结果 */
+export interface SyncResult {
+  stats: SyncStats;
+  finishedAt: string;
+}
+
+/** 同步历史记录 */
+export interface SyncHistoryItem {
+  id: number;
+  direction: string;
+  startedAt: string;
+  finishedAt: string | null;
+  success: boolean;
+  error: string | null;
+  statsJson: string;
+}
+
+// ─── 待办任务 ───────────────────────────────────
+
+export type TaskPriority = 0 | 1 | 2; // 0=urgent / 1=normal / 2=low
+/**
+ * 任务状态：0=未完成 / 1=已完成 / 2=已放弃
+ *
+ * 「放弃」区别于「删除」：留在库里可查可恢复，但不进待办列表、不提醒、
+ * 不计入完成率。事情黄了是常态——删掉会丢历史，标记完成会污染统计。
+ */
+export type TaskStatus = 0 | 1 | 2;
+/** 已放弃：判断时用这个常量，别散落魔法数字 2 */
+export const TASK_STATUS_ABANDONED = 2 as const;
+/** 任务是否已放弃 */
+export function isAbandoned(t: { status: TaskStatus }): boolean {
+  return t.status === TASK_STATUS_ABANDONED;
+}
+export type TaskLinkKind = "note" | "path" | "url";
+/** 循环规则：不循环 / 每天 / 每周 / 每月 */
+export type TaskRepeatKind = "none" | "daily" | "weekly" | "monthly";
+
+export interface TaskLink {
+  id: number;
+  task_id: number;
+  kind: TaskLinkKind;
+  target: string;
+  label: string | null;
+}
+
+export interface Task {
+  id: number;
+  title: string;
+  description: string | null;
+  priority: TaskPriority;
+  important: boolean;
+  status: TaskStatus;
+  /** 'YYYY-MM-DD' 或 'YYYY-MM-DD HH:MM:SS'；前者视作当天 23:59:59 */
+  due_date: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  /** 提前 N 分钟提醒；null=不提醒 */
+  remind_before_minutes: number | null;
+  /** 上次已触发提醒的时刻，去重用 */
+  reminded_at: string | null;
+  /** 循环规则 */
+  repeat_kind: TaskRepeatKind;
+  /** 每 N 个单位 */
+  repeat_interval: number;
+  /** ISO 1..7（Mon..Sun）逗号分隔；仅 weekly 有意义 */
+  repeat_weekdays: string | null;
+  /** 循环截止日期 'YYYY-MM-DD' */
+  repeat_until: string | null;
+  /** 总触发次数上限（含首次） */
+  repeat_count: number | null;
+  /** 已触发次数 */
+  repeat_done_count: number;
+  /** AI 智能规划批次 ID（手动创建为 null） */
+  source_batch_id: string | null;
+  /** 一级分类 ID；null = 未分类 */
+  category_id: number | null;
+  /** 父任务 ID；null = 主任务，非 null = 子任务 */
+  parent_task_id: number | null;
+  /** 已完成子任务数（仅主任务有意义；子任务恒为 0） */
+  subtask_done: number;
+  /** 总子任务数 */
+  subtask_total: number;
+  links: TaskLink[];
+  /** 工作流看板列归属：'todo' / 'doing' / 'done'（v40 引入） */
+  kanban_stage: KanbanStage;
+  /** 所属项目 ID（v41 引入）；null = 无项目 */
+  project_id: number | null;
+  /** 甘特图开始日期 'YYYY-MM-DD'（v41 引入）；null = 没指定开始时间 */
+  start_date: string | null;
+}
+
+/** 工作流看板的列归属 */
+export type KanbanStage = "todo" | "doing" | "done";
+
+// ─── 项目（v41） ──────────────────────────────────
+
+/** 项目（工作流容器，含时间维度和归档状态） */
+export interface Project {
+  id: number;
+  name: string;
+  description: string | null;
+  color: string;
+  /** 计划开始日期 'YYYY-MM-DD' */
+  startDate: string | null;
+  /** 计划结束日期 'YYYY-MM-DD' */
+  endDate: string | null;
+  archived: boolean;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+  /** 项目下未完成任务数（status=0，只计主任务） */
+  activeTaskCount: number;
+  /** 项目下已完成任务数（status=1，只计主任务） */
+  doneTaskCount: number;
+}
+
+export interface CreateProjectInput {
+  name: string;
+  description?: string | null;
+  color?: string | null;
+  startDate?: string | null;
+  endDate?: string | null;
+}
+
+// ─── Dataview 块（v1.12） ──────────────────────────
+
+/** Dataview 块内存储的配置（在 content 里以 JSON 形式编码到 data-dataview 属性） */
+export type DataviewKind =
+  | "recent-notes"
+  | "notes-by-tag"
+  | "notes-by-folder"
+  | "pending-tasks"
+  | "tasks-by-project";
+
+export interface DataviewConfig {
+  kind: DataviewKind;
+  /** 各模板自己用：tag / folderId / projectId */
+  tag?: string;
+  folderId?: number;
+  projectId?: number;
+  limit?: number;
+  /** 可选自定义标题；不填则按 kind 显示默认标题 */
+  title?: string;
+}
+
+/** 后端 DataviewRow 的前端表示（驼峰对齐 #[serde(rename_all = "camelCase")]） */
+export interface DataviewRow {
+  title: string;
+  subtitle: string | null;
+  linkKind: "note" | "task";
+  linkId: number;
+  updatedAt: string;
+  extra?: unknown;
+}
+
+export interface UpdateProjectInput {
+  name?: string;
+  description?: string;
+  clearDescription?: boolean;
+  color?: string;
+  startDate?: string;
+  clearStartDate?: boolean;
+  endDate?: string;
+  clearEndDate?: boolean;
+  archived?: boolean;
+  sortOrder?: number;
+}
+
+export interface TaskLinkInput {
+  kind: TaskLinkKind;
+  target: string;
+  label?: string | null;
+}
+
+export interface CreateTaskInput {
+  title: string;
+  description?: string | null;
+  priority?: TaskPriority;
+  important?: boolean;
+  due_date?: string | null;
+  remind_before_minutes?: number | null;
+  links?: TaskLinkInput[];
+  repeat_kind?: TaskRepeatKind;
+  repeat_interval?: number;
+  repeat_weekdays?: string | null;
+  repeat_until?: string | null;
+  repeat_count?: number | null;
+  /** AI 智能规划批次 ID（同次生成共享一个 UUID，可一键撤销整批） */
+  source_batch_id?: string | null;
+  /** 一级分类 ID；不传或 null = 未分类 */
+  category_id?: number | null;
+  /** 父任务 ID；传则创建为该任务的子任务，不传 = 创建主任务 */
+  parent_task_id?: number | null;
+  /** 所属项目 ID（v41 引入）；不传或 null = 无项目 */
+  project_id?: number | null;
+  /** 甘特图开始日期 'YYYY-MM-DD'（v41 引入） */
+  start_date?: string | null;
+}
+
+export interface UpdateTaskInput {
+  title?: string;
+  description?: string | null;
+  priority?: TaskPriority;
+  important?: boolean;
+  due_date?: string | null;
+  clear_due_date?: boolean;
+  remind_before_minutes?: number | null;
+  clear_remind_before_minutes?: boolean;
+  repeat_kind?: TaskRepeatKind;
+  repeat_interval?: number;
+  repeat_weekdays?: string | null;
+  clear_repeat_weekdays?: boolean;
+  repeat_until?: string | null;
+  clear_repeat_until?: boolean;
+  repeat_count?: number | null;
+  clear_repeat_count?: boolean;
+  /** 改分类；不传 = 不动 */
+  category_id?: number | null;
+  /** 传 true 显式清空，落到"未分类" */
+  clear_category_id?: boolean;
+  /** 改所属项目；不传 = 不动 */
+  project_id?: number | null;
+  /** 传 true 显式清空 project_id（落到"无项目"） */
+  clear_project_id?: boolean;
+  /** 甘特图开始日期 'YYYY-MM-DD'；不传 = 不动 */
+  start_date?: string | null;
+  /** 传 true 显式清空 start_date */
+  clear_start_date?: boolean;
+}
+
+export interface TaskQuery {
+  status?: TaskStatus;
+  keyword?: string;
+  priority?: TaskPriority;
+  /** 某个分类（与 uncategorized 互斥，category_id 优先） */
+  category_id?: number | null;
+  /** true 时只看 category_id IS NULL 的任务 */
+  uncategorized?: boolean;
+}
+
+// ─── 待办分类 ─────────────────────────────────
+
+export interface TaskCategory {
+  id: number;
+  name: string;
+  /** 圆点颜色，如 "#1677ff" */
+  color: string;
+  /** 可选 emoji 或 lucide 图标名 */
+  icon: string | null;
+  sort_order: number;
+  created_at: string;
+}
+
+export interface CreateTaskCategoryInput {
+  name: string;
+  color?: string | null;
+  icon?: string | null;
+  sort_order?: number | null;
+}
+
+export interface UpdateTaskCategoryInput {
+  name?: string;
+  color?: string;
+  icon?: string | null;
+  clear_icon?: boolean;
+  sort_order?: number;
+}
+
+export interface TaskStats {
+  totalTodo: number;
+  totalDone: number;
+  urgentTodo: number;
+  overdue: number;
+  dueToday: number;
+}
+
+/** 顶栏 Ctrl+K 搜索的待办命中（轻量结果，与 SearchResult 对齐风格） */
+export interface TaskSearchHit {
+  id: number;
+  title: string;
+  /** description 截断 */
+  snippet: string;
+  /** 0=todo / 1=done */
+  status: TaskStatus;
+  /** 0=urgent / 1=normal / 2=low */
+  priority: TaskPriority;
+  dueDate: string | null;
+}
+
+// ─── AI 提示词库 ───────────────────────────────
+
+/**
+ * AI 写作结果插入模式
+ * - `replace`：用结果替换选中的文本（默认；改写/扩展/翻译等）
+ * - `append`：在选区末尾追加（续写场景）
+ * - `popup`：只展示给用户看，不自动插入（总结场景）
+ */
+export type PromptOutputMode = "replace" | "append" | "popup";
+
+export interface PromptTemplate {
+  id: number;
+  title: string;
+  description: string;
+  prompt: string;
+  outputMode: PromptOutputMode;
+  icon: string | null;
+  isBuiltin: boolean;
+  builtinCode: string | null;
+  sortOrder: number;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PromptTemplateInput {
+  title: string;
+  description?: string | null;
+  prompt: string;
+  outputMode?: PromptOutputMode;
+  icon?: string | null;
+  sortOrder?: number | null;
+  enabled?: boolean | null;
+}
+
+// ─── T-024 同步 V1 ─────────────────────────────
+
+export type SyncBackendKind = "local" | "webdav" | "s3";
+
+export interface SyncBackend {
+  id: number;
+  kind: SyncBackendKind;
+  name: string;
+  configJson: string;
+  enabled: boolean;
+  autoSync: boolean;
+  syncIntervalMin: number;
+  lastPushTs: string | null;
+  lastPullTs: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SyncBackendInput {
+  kind: SyncBackendKind;
+  name: string;
+  configJson: string;
+  enabled?: boolean | null;
+  autoSync?: boolean | null;
+  syncIntervalMin?: number | null;
+}
+
+export interface ManifestEntry {
+  stableId: string;
+  title: string;
+  contentHash: string;
+  updatedAt: string;
+  remotePath: string;
+  tombstone: boolean;
+  folderPath: string;
+  /** 是否每日笔记（旧 manifest 无此字段；修复日记跨端重复 bug 时加入） */
+  isDaily?: boolean;
+  /** 每日笔记的日期 YYYY-MM-DD（isDaily=true 时有值） */
+  dailyDate?: string | null;
+  /** 是否隐藏笔记（旧 manifest 无此字段；修复隐藏笔记跨端变可见时加入） */
+  isHidden?: boolean;
+  /**
+   * Bug 12a: 笔记标签名列表（按 name 跨端，不带 id/color）。
+   * - undefined / null：旧客户端 manifest / 加密笔记 / tombstone → pull 端不动本地
+   * - []：该笔记当前无标签 → pull 端清空本地
+   * - ["a", "b"]：替换为该列表
+   */
+  tags?: string[] | null;
+}
+
+export interface SyncManifestV1 {
+  manifestVersion: number;
+  appVersion: string;
+  device: string;
+  generatedAt: string;
+  entries: ManifestEntry[];
+}
+
+export interface SyncPushResult {
+  uploaded: number;
+  deletedRemote: number;
+  skipped: number;
+  /** T-S024: 上传的附件数（远端原先没有，本机新传） */
+  attachmentsUploaded?: number;
+  /** T-S024: 跳过的附件数（has_attachment=true，远端已存在） */
+  attachmentsSkipped?: number;
+  errors: string[];
+}
+
+export interface SyncPullResult {
+  downloaded: number;
+  deletedLocal: number;
+  conflicts: number;
+  /** T-S024: 下载的附件数（远端 manifest 列了但本机没有的） */
+  attachmentsDownloaded?: number;
+  /**
+   * 因 vault meta 不匹配 / 缺失而被跳过的加密笔记数。
+   * >0 时前端弹提示告知用户（避免"加密笔记看着同步了实则被静默跳过"）。
+   * 旧后端无此字段 → undefined，按 0 处理。
+   */
+  encryptedSkipped?: number;
+  errors: string[];
+}
+
+/** T-S025: 孤儿附件 GC 结果 */
+export interface SyncGcResult {
+  /** 本次真删除的孤儿附件数（超过宽限期） */
+  deleted: number;
+  /** 本次新打标记的孤儿数（还在宽限期内，未删） */
+  newlyMarked: number;
+  /** 之前被标记但现在又被引用 → 移除标记的数量 */
+  unmarked: number;
+  /** 远端 attachments/ 下的附件总数 */
+  remoteTotal: number;
+  /** 单个文件删除失败的错误清单 */
+  errors: string[];
+}
+
+/** T-S051: 一条待解决的同步冲突（本地/远端各改各的那条笔记） */
+export interface SyncConflictItem {
+  /** 所属同步源 id */
+  backendId: number;
+  /** 同步源名字（"我的坚果云"等） */
+  backendName: string;
+  /** 笔记 stable_uuid */
+  stableId: string;
+  /** 本地笔记 id；本地已无此笔记 → null */
+  noteId: number | null;
+  /** 笔记标题 */
+  title: string;
+  /** 冲突文件绝对路径（resolve 时回传） */
+  conflictFilePath: string;
+  /** 冲突文件名（仅展示） */
+  conflictFileName: string;
+  /** 冲突文件创建时间（≈ 远端冲突版本被拉下来的时间），best-effort，可能为 null */
+  detectedAt: string | null;
+  /** 本地笔记当前正文（加密笔记 / 本地已无 → 空串） */
+  localContent: string;
+  /** 远端冲突版本正文（已去掉 # 标题前缀；加密笔记 → 空串） */
+  remoteContent: string;
+  /** 是否加密笔记（加密笔记不支持在此合并，UI 只给"忽略"） */
+  encrypted: boolean;
+  /** 本地是否已无此笔记（只能"用远端（重建）"或"忽略"） */
+  noteMissingLocally: boolean;
+}
+
+/** T-S051: 冲突解决方式 */
+export type SyncConflictResolution = "keep_local" | "use_remote" | "merged";
+
+export interface SyncV1ProgressEvent {
+  backendId: number;
+  /** "compute" | "diff" | "upload" | "download" | "manifest" | "apply" | "done" */
+  phase: string;
+  current: number;
+  total: number;
+  message: string;
+}
+
+// ─── T-013 自定义数据目录 ──────────────────────
+
+/** 数据目录来源
+ *
+ * - `env`：环境变量 `KB_DATA_DIR` 临时覆盖
+ * - `portable`：exe 同级 `portable.txt` 哨兵（便携模式 / portable.zip 发行包）
+ * - `pointer`：用户在 UI 改路径写入的指针文件 `data_dir.txt`
+ * - `default`：默认 framework_app_data_dir（C 盘 AppData）
+ */
+export type DataDirSource = "env" | "portable" | "pointer" | "default";
+
+/** 当前数据目录解析结果 */
+export interface ResolvedDataDir {
+  /** 框架默认 app_data_dir（OS 给的固定位置）*/
+  defaultDir: string;
+  /** 当前生效的数据根目录 */
+  currentDir: string;
+  /** 来源（env / portable / pointer / default）*/
+  source: DataDirSource;
+  /** 指针文件里写的路径（可能与 current 不一致：env 临时覆盖时；portable 模式下为 null） */
+  pendingDir: string | null;
+}
+
+/** 迁移 marker 状态 */
+export type MigrationStatus = "pending" | "in_progress" | "crashed" | "done";
+
+/** 迁移 marker（启动期检测） */
+export interface MigrationMarker {
+  from: string;
+  to: string;
+  status: MigrationStatus;
+  /** rust 是 snake_case，serde 默认序列化保持 snake；这里用相同字段名 */
+  started_at: string;
+  updated_at: string;
+  completed_items: string[];
+  /** 上次失败原因（status="crashed" 时有值） */
+  last_error?: string | null;
+}
+
+/** 迁移进度事件（splash 窗口监听用）*/
+export interface MigrationProgress {
+  /** "scan" | "copy_file" | "copy_dir" | "verify" | "done" | "error" */
+  phase: string;
+  currentFile: string;
+  itemIndex: number;
+  itemTotal: number;
+  bytesDone: number;
+  bytesTotal: number;
+  message: string;
+}
+
+// ─── M5-2: 外部 MCP Server ─────────────────────────────────────
+
+export interface McpServer {
+  id: number;
+  name: string;
+  transport: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface McpServerInput {
+  name: string;
+  transport?: string;
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  enabled?: boolean;
+}
+
+// ─── 语音识别（ASR）─────────────────────────────
+
+/** ASR 服务商。当前只支持阿里云 DashScope；后续接入新厂商时在这里加值。 */
+export type AsrProviderKind = "dashscope";
+
+/**
+ * ASR 配置（与 Rust `AsrConfig` 对齐，camelCase 序列化）。
+ *
+ * 配置存到后端 `app_config` 表 `asr.*` KV，不走独立表。
+ * `apiKey` 明文保存（与 ai_models.api_key 风格一致）。
+ */
+export interface AsrConfig {
+  provider: AsrProviderKind;
+  apiKey: string;
+  /** 模型 ID，如 `qwen3-asr-flash-filetrans` / `paraformer-v2` */
+  model: string;
+  /** 区域："beijing"（默认）/ "singapore" */
+  region: string;
+  enabled: boolean;
+}
+
+/** 转录请求：把录音 base64 + MIME 提交给后端 */
+export interface TranscribeRequest {
+  /** 音频 base64（不含 data:xxx;base64, 前缀） */
+  audioBase64: string;
+  /** 音频 MIME，如 "audio/wav" / "audio/webm;codecs=opus" */
+  mime: string;
+  /** 语言提示（zh / en / auto），缺省让模型自动检测 */
+  language?: string;
+}
+
+/** 转录结果 */
+export interface TranscribeResult {
+  text: string;
+  latencyMs: number;
+  model: string;
+}
+
+/** 「测试连接」结果 */
+export interface AsrTestResult {
+  ok: boolean;
+  latencyMs: number;
+  /** 失败时的简短中文原因；成功时为 null */
+  message: string | null;
+}
+
+// ─── 闪卡 + FSRS 复习 ────────────────────────────────────────
+
+/**
+ * 闪卡。
+ *
+ * FSRS state：0=New, 1=Learning, 2=Review, 3=Relearning
+ *   与 ts-fsrs 的 State 枚举值一致；写入/读出都用整数。
+ *
+ * Rust 侧字段名用 snake_case，serde 默认不改名，所以这里 TS 也保持 snake_case
+ * （与 Note 等老类型风格一致）。
+ */
+export interface Card {
+  id: number;
+  note_id: number | null;
+  front: string;
+  back: string;
+  deck: string;
+
+  // FSRS 调度状态
+  due: string;
+  stability: number;
+  difficulty: number;
+  elapsed_days: number;
+  scheduled_days: number;
+  reps: number;
+  lapses: number;
+  state: number;
+  last_review: string | null;
+
+  is_deleted: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateCardInput {
+  front: string;
+  back: string;
+  deck?: string;
+  noteId?: number | null;
+}
+
+/** ts-fsrs 算好的新调度状态 + 用户评分，提交给后端 review_card */
+export interface ReviewCardInput {
+  cardId: number;
+  /** 1=Again, 2=Hard, 3=Good, 4=Easy（与 ts-fsrs Rating 枚举一致） */
+  rating: number;
+  state: number;
+  due: string;
+  stability: number;
+  difficulty: number;
+  elapsedDays: number;
+  lastElapsedDays: number;
+  scheduledDays: number;
+}
+
+export interface CardReviewLog {
+  id: number;
+  cardId: number;
+  rating: number;
+  state: number;
+  due: string;
+  stability: number;
+  difficulty: number;
+  elapsedDays: number;
+  lastElapsedDays: number;
+  scheduledDays: number;
+  review: string;
+}
+
+export interface CardStats {
+  dueToday: number;
+  learning: number;
+  review: number;
+  newCards: number;
+  total: number;
+}
+
+/**
+ * 移动端"检查更新"结果（与 Rust `MobileUpdateInfo` 对齐）。
+ * 桌面端用 tauri-plugin-updater 自动热替换；移动端只能"检查 → 引导用户去下载新 APK"。
+ */
+export interface MobileUpdateInfo {
+  has_update: boolean;
+  current_version: string;
+  latest_version: string;
+  notes: string;
+  /** APK 直链（优先）或 release 发布页（回落） */
+  download_url: string;
+}
+
+/**
+ * APK 下载进度（与 Rust `DownloadProgress` 对齐）。
+ * 后端节流推送（每 ~300ms 或每 512KB 一帧），不是每个 chunk 都发。
+ */
+export interface MobileDownloadProgress {
+  downloaded: number;
+  /** 服务端没给 Content-Length 时为 0，此时 percent 恒为 0，前端应显示不确定进度 */
+  total: number;
+  percent: number;
+}
+
+/** APK 下载进度事件名（与 Rust `EVENT_DOWNLOAD_PROGRESS` 对齐） */
+export const MOBILE_UPDATE_PROGRESS_EVENT = "mobile-update://download-progress";
+
+// ─── 定时推送（v47） ──────────────────────────────
+// 独立子系统：用户维护多条「推送」，每条 = 提示词 +（可选）数据源 + 定时规则 + 推送方式。
+// 字段与 Rust models::PushJob 逐字对齐（snake_case）。
+
+/** 循环规则 */
+export type PushRepeatKind = "daily" | "weekly";
+
+/** 一条定时推送 */
+export interface PushJob {
+  id: number;
+  /** 展示名，如"每日励志" */
+  name: string;
+  /** ★核心：到点交给 AI 执行的提示词 */
+  prompt: string;
+  /** 用哪个 AI 模型；null = 默认模型 */
+  model_id: number | null;
+  /** 数据源类型：MVP 固定 "none"；预留 "rss" / "notes" */
+  source_kind: string;
+  /** 数据源配置 JSON 字符串；MVP "{}" */
+  source_config: string;
+  /** 触发时刻 "HH:MM" */
+  schedule_time: string;
+  /** 循环规则 */
+  repeat_kind: PushRepeatKind;
+  /** 每周哪几天，ISO 1=Mon..7=Sun 逗号分隔；仅 weekly 有意义 */
+  repeat_weekdays: string | null;
+  /** 推送方式 JSON 数组字符串，如 ["notification"] */
+  channels: string;
+  enabled: boolean;
+  /** 上次实际运行时刻；null = 从未运行 */
+  last_run_at: string | null;
+  /** 下次预计运行时刻；null = 未启用/无计划 */
+  next_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 新建推送入参（可选字段后端有默认值） */
+export interface CreatePushJobInput {
+  name: string;
+  prompt: string;
+  model_id?: number | null;
+  source_kind?: string | null;
+  source_config?: string | null;
+  schedule_time: string;
+  repeat_kind?: PushRepeatKind | null;
+  repeat_weekdays?: string | null;
+  channels?: string | null;
+  enabled?: boolean | null;
+}
+
+/** 更新推送入参（与新建同构） */
+export type UpdatePushJobInput = CreatePushJobInput;
+
+/** 一次推送执行记录 */
+export interface PushRunLog {
+  id: number;
+  job_id: number;
+  run_at: string;
+  /** "success" / "failed" / "empty" */
+  status: string;
+  item_count: number;
+  payload: string | null;
+  error: string | null;
+}
+
+/** 居中弹窗页所需数据（按 run_log id 取） */
+export interface PushPopupData {
+  /** 推送名（弹窗标题） */
+  name: string;
+  /** 展示内容：成功为 AI 输出，失败为错误提示 */
+  content: string;
+  /** "success" / "failed" / "empty" */
+  status: string;
+  run_at: string;
+}

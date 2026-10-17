@@ -1,0 +1,40 @@
+# Android target linker 配置
+# Tauri 移动端编译时 cargo 需要知道用 NDK 的 clang 当 linker（默认找 `cc` 找不到）
+#
+# 路径中的版本号 27.0.12077973 与 D:\software\dev\android-sdk\ndk\ 下的子目录对齐；
+# 如果升级 NDK 需要同步改这里 + ANDROID_NDK_ROOT 环境变量。
+#
+# minSdk = 21（Android 5.0 Lollipop+），覆盖率 99%。
+# 与 src-tauri/gen/android/buildSrc/src/main/java/.../Config.kt 中 minSdkVersion 一致。
+
+[target.aarch64-linux-android]
+linker = "D:/software/dev/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android21-clang.cmd"
+ar = "D:/software/dev/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe"
+
+[target.armv7-linux-androideabi]
+linker = "D:/software/dev/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/armv7a-linux-androideabi21-clang.cmd"
+ar = "D:/software/dev/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe"
+
+[target.i686-linux-android]
+linker = "D:/software/dev/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/i686-linux-android21-clang.cmd"
+ar = "D:/software/dev/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe"
+
+[target.x86_64-linux-android]
+linker = "D:/software/dev/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/x86_64-linux-android21-clang.cmd"
+ar = "D:/software/dev/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe"
+
+# 用 ASCII 路径作为 target 目录，绕开 Windows LLD 不能打开中文路径 .o 文件的 bug
+# （ld.lld 在 Windows 上对 GBK/MBCS 路径处理有缺陷）
+# 桌面端 cargo build 不受影响（不调 LLD 而是 link.exe，原生支持中文路径）
+# 注意：这会让两端 target 目录分开，桌面 cargo check 仍写到 src-tauri/target/
+[build]
+# target-dir 不在这里强制（移动端跑命令时设 CARGO_TARGET_DIR 环境变量，
+# 桌面端继续用项目内 target/，与 .gitignore 现状一致）
+
+# rustc 线程栈大小（字节）= 32 MB。
+# 背景：`tauri dev`（带 --cfg dev）编译 lib 时，`generate_handler!` 生成的命令分发类型图
+# 很大，命令数量增长到一定程度会让 rustc typeck 递归超过默认线程栈（8MB），
+# 在 Windows 上崩成 `STATUS_STACK_BUFFER_OVERRUN`（exit 0xc0000409）而非给出报错。
+# 调大到 32MB 一劳永逸；force=true 确保即使外部没设也强制生效。
+[env]
+RUST_MIN_STACK = { value = "33554432", force = true }

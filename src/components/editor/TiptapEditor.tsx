@@ -1,0 +1,2644 @@
+import { useEditor, EditorContent } from "@tiptap/react";
+import StarterKit from "@tiptap/starter-kit";
+import Placeholder from "@tiptap/extension-placeholder";
+import Highlight from "@tiptap/extension-highlight";
+import { Annotation } from "./Annotation";
+import TaskList from "@tiptap/extension-task-list";
+import TaskItem from "@tiptap/extension-task-item";
+import Link from "@tiptap/extension-link";
+import Underline from "@tiptap/extension-underline";
+import Code from "@tiptap/extension-code";
+import { CodeBlockEnhanced, normalizeCodeBlockFenceAttrs } from "./CodeBlockEnhanced";
+import { Mathematics } from "@tiptap/extension-mathematics";
+import Typography from "@tiptap/extension-typography";
+import { Table } from "@tiptap/extension-table";
+import { TableRow } from "@tiptap/extension-table-row";
+import { TableCell } from "@tiptap/extension-table-cell";
+import { TableHeader } from "@tiptap/extension-table-header";
+import { Fragment, type Node as PMNode } from "@tiptap/pm/model";
+import type { EditorView } from "@tiptap/pm/view";
+import type { EditorState } from "@tiptap/pm/state";
+import { history } from "@tiptap/pm/history";
+import { getHTMLFromFragment, mergeAttributes } from "@tiptap/core";
+import type { JSONContent } from "@tiptap/core";
+import { isWindowsPathText } from "@/lib/windowsPath";
+import { looksLikeCode } from "@/lib/pasteCodeHeuristic";
+import { findInlineMathRanges } from "@/lib/inlineMathRanges";
+import { TextAlign } from "@tiptap/extension-text-align";
+import { Color } from "@tiptap/extension-color";
+import Superscript from "@tiptap/extension-superscript";
+import Subscript from "@tiptap/extension-subscript";
+import { FigureImage } from "./FigureExtension";
+import { ImageLightbox } from "./ImageLightbox";
+import { HeadingFold, HEADING_FOLD_REFRESH, HEADING_FOLD_KEY } from "./HeadingFold";
+import {
+  HeadingNumber,
+  HEADING_NUMBER_KEY,
+  HEADING_NUMBER_REFRESH,
+  getHeadingNumberMap,
+} from "./HeadingNumber";
+import { SearchAndReplace } from "./SearchAndReplace";
+import { SearchReplaceBar } from "./SearchReplaceBar";
+import { calcEditorStats } from "@/lib/textStats";
+import {
+  FontSize,
+  LineHeight,
+  Indent,
+  ParagraphWithIndent,
+  HeadingWithIndent,
+} from "./TextStyleExtras";
+// tiptap-markdown 未提供 TS 声明，用 import 后以 any 访问
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+import { Markdown } from "tiptap-markdown";
+
+/** 从编辑器读出 Markdown 字符串（tiptap-markdown 注入的 storage 无类型） */
+function getEditorMarkdown(editor: { storage: unknown }): string {
+  const storage = editor.storage as { markdown?: { getMarkdown: () => string } };
+  return storage.markdown?.getMarkdown() ?? "";
+}
+
+/**
+ * 表格是否含手动调过的列宽
+ *
+ * Tiptap Table 的 `tableCell` / `tableHeader` 在用户拖动列宽分隔条后会写入
+ * `colwidth` 属性（数组，元素为 number 或 null）；只要任意单元格里有非 null
+ * 的值就视为"自定义列宽"。
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function tableHasCustomColWidth(tableNode: any): boolean {
+  let found = false;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tableNode.descendants((cell: any) => {
+    if (found) return false;
+    const name = cell.type.name;
+    if (name === "tableCell" || name === "tableHeader") {
+      const cw = cell.attrs.colwidth;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (Array.isArray(cw) && cw.some((w: any) => w != null)) {
+        found = true;
+        return false;
+      }
+    }
+    return undefined;
+  });
+  return found;
+}
+
+/**
+ * 复刻 tiptap-markdown/src/extensions/nodes/table.js 的同名判断：
+ * 表格能否用 GFM 管道语法表达。出现 rowspan/colspan、首行非全表头、cell 含
+ * 多段落等情况都不行 —— 这些情况下原版 tiptap-markdown 自己也会回退到 HTML。
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isTableMarkdownSerializable(node: any): boolean {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rows: any[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  node.forEach((row: any) => rows.push(row));
+  const firstRow = rows[0];
+  if (!firstRow) return true;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const cellsOf = (row: any): any[] => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const arr: any[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    row.forEach((c: any) => arr.push(c));
+    return arr;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const hasSpan = (c: any) => c.attrs.colspan > 1 || c.attrs.rowspan > 1;
+  // 单元格只有是「单个段落且不含管道符」时才能塞进 GFM 管道语法。
+  // - childCount > 1：多段落，管道语法表达不了（原版 tiptap-markdown 已判）。
+  // - childCount === 1 但首子非 paragraph：代码块 / 列表 / 引用 / 嵌套表格等块级内容。
+  //   尤其**代码块**的 ``` 围栏和换行会直接撑破 `| … |` 单行结构，存出的 markdown
+  //   表格损坏、重开后 markdown-it 还原不回来（表格错乱 / 代码丢失）。
+  // - 文本含管道符 `|`：GFM 里 `|` 是列分隔符，prosemirror-markdown 默认不转义它
+  //   （未配 escapeExtraCharacters），单元格里的 `|` 会被当成新列 → 表格错位。代码中的
+  //   `||`（逻辑或）/ 位运算 `|` 尤其常见。含 `|` 的 cell 一律走 HTML 回退。
+  // 这三类一律判为「不可 markdown 序列化」→ 回退 HTML 序列化（html:true 下可完整往返；
+  // 回退路径的空行截断问题已用 &#10; 修复，安全）。
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const cellNotInlineOnly = (c: any) =>
+    c.childCount > 1 ||
+    (c.firstChild != null && c.firstChild.type.name !== "paragraph") ||
+    (typeof c.textContent === "string" && c.textContent.includes("|"));
+  if (
+    cellsOf(firstRow).some(
+      (c) => c.type.name !== "tableHeader" || hasSpan(c) || cellNotInlineOnly(c),
+    )
+  ) {
+    return false;
+  }
+  for (let i = 1; i < rows.length; i++) {
+    if (
+      cellsOf(rows[i]).some(
+        (c) => c.type.name === "tableHeader" || hasSpan(c) || cellNotInlineOnly(c),
+      )
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * 自定义 Table：在 tiptap-markdown 默认 serializer 上叠加"含 colwidth → 退成 HTML"。
+ *
+ * 默认 tiptap-markdown 只检查"是否能用 GFM 管道语法表达"（spans/多段落/首行）；
+ * 一旦发现自定义列宽我们也要走 HTML，否则 colwidth 在 markdown 表格里无法保存。
+ *
+ * tiptap-markdown 的 getMarkdownSpec() 是 `{ ...default, ...userOverride }`，
+ * 我们 addStorage 后整段 serialize 会被替换 —— 所以不能"复用默认再补一刀"，
+ * 这里把默认的管道语法逻辑原样抄一份。
+ */
+const TableWithMarkdown = Table.extend({
+  addStorage() {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const parentStorage = ((this as any).parent?.() ?? {}) as Record<string, unknown>;
+    return {
+      ...parentStorage,
+      markdown: {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        serialize(state: any, node: any, _parent: any) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const editor = (this as any).editor;
+          const htmlAllowed = editor?.storage?.markdown?.options?.html;
+
+          // 含自定义列宽 / 不能 markdown 表达 → 走 HTML（前提是 markdown 配 html: true）
+          if (
+            (tableHasCustomColWidth(node) || !isTableMarkdownSerializable(node)) &&
+            htmlAllowed
+          ) {
+            const html = getHTMLFromFragment(Fragment.from(node), node.type.schema);
+            // 🔴 关键：把回退 HTML 里的字面换行全部换成 &#10;（HTML 数字字符引用），
+            // 使整段 <table> HTML 成为「单行、无空行」的一块。
+            //
+            // 为什么必须这么做：单元格里放代码块 / 多行内容时，<pre> 文本会带真实换行，
+            // 代码里只要有一个空行（如函数体前的空行），markdown-it 会按 CommonMark
+            // 「HTML 块(type 6，由 <table> 起始)遇空行即终止」的规则，在那个空行处**提前
+            // 结束** <table> 块，后半段被当普通 Markdown 重新解析 —— 4 空格缩进行变成缩进
+            // 代码块、横幅行变成段落，一段表格内容被拆成「代码+文本+代码」。实测复现无误。
+            //
+            // &#10; 在 <pre> 渲染时仍是换行，Tiptap 用 DOMParser 读回也解码回 \n，
+            // 因此代码/多行内容无损往返；而源码层面已无字面换行 → markdown-it 视为单个
+            // 完整 HTML 块，不再被拦腰截断。
+            const singleLineHtml = html.replace(/\r\n?|\n/g, "&#10;");
+            state.write(singleLineHtml);
+            state.closeBlock(node);
+            return;
+          }
+
+          // 默认 GFM 管道语法（与 tiptap-markdown 内置实现一致）
+          state.inTable = true;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          node.forEach((row: any, _p: number, i: number) => {
+            state.write("| ");
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            row.forEach((col: any, _p2: number, j: number) => {
+              if (j) state.write(" | ");
+              const cellContent = col.firstChild;
+              if (cellContent && cellContent.textContent.trim()) {
+                state.renderInline(cellContent);
+              }
+            });
+            state.write(" |");
+            state.ensureNewLine();
+            if (!i) {
+              const delimiterRow = Array.from({ length: row.childCount })
+                .map(() => "---")
+                .join(" | ");
+              state.write(`| ${delimiterRow} |`);
+              state.ensureNewLine();
+            }
+          });
+          state.closeBlock(node);
+          state.inTable = false;
+        },
+        parse: {
+          // 解析端 tiptap-markdown 走 markdown-it；HTML 表格作为 raw HTML 块直接保留
+        },
+      },
+    };
+  },
+});
+import { common, createLowlight } from "lowlight";
+import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { useEffect, useRef, useCallback, useState } from "react";
+import { message, Modal, Input } from "antd";
+import { theme as antdTheme } from "antd";
+import { SUPPORTED_PROVIDERS } from "./embedVideoProviders";
+import { attachmentApi, imageApi, systemApi, videoApi } from "@/lib/api";
+import {
+  parseKbAsset,
+  resolveAssetSrc,
+  toKbAsset,
+  toKbAssetHref,
+  needsLegacyPathResolve,
+  KB_ASSET_SCHEME,
+} from "@/lib/assetUrl";
+import { useAppStore } from "@/store";
+import { keyboardEventToAccel } from "@/lib/shortcuts/registry";
+import { fragmentToPlainText } from "@/lib/plainTextClipboard";
+import {
+  useAttachmentPreviewStore,
+  isPreviewableAttachment,
+} from "@/store/attachmentPreview";
+import { EditorToolbar } from "./EditorToolbar";
+import { TableBubbleMenu } from "./TableBubbleMenu";
+import { AiWriteMenu } from "./AiWriteMenu";
+import { alignSnapshotPlugins } from "./alignSnapshotPlugins";
+import {
+  WikiLinkDecoration,
+  type WikiLinkRange,
+} from "./WikiLinkDecoration";
+import { WikiLinkEditModal } from "./WikiLinkEditModal";
+import { WikiLinkSuggestion } from "./WikiLinkSuggestion";
+import { SlashCommand } from "./SlashCommand";
+import { useEditorContextMenu } from "./useEditorContextMenu";
+import { ContextMenuOverlay } from "@/components/ui/ContextMenuOverlay";
+import { Video as VideoNode } from "./VideoNode";
+import { VideoTimestamp } from "./VideoTimestamp";
+import { EmbedVideo } from "./EmbedVideoNode";
+import { AllowFileLink } from "./AllowFileLink";
+import { Callout } from "./Callout";
+import { DataviewBlock } from "./DataviewBlock";
+import { WhiteboardBlock } from "./WhiteboardBlock";
+import { Toggle, ToggleSummary, ToggleContent } from "./Toggle";
+import { Columns, Column } from "./Columns";
+import "tippy.js/dist/tippy.css";
+
+const lowlight = createLowlight(common);
+
+/**
+ * 用 lowlight.highlightAuto 猜代码语言；relevance 太低时返回 null（交给代码块 NodeView
+ * 的防抖自动识别去"建议"，避免写死一个错误语言导致高亮更乱）。
+ */
+function detectCodeLanguage(text: string): string | null {
+  try {
+    const res = lowlight.highlightAuto(text) as {
+      data?: { language?: string };
+      relevance?: number;
+    };
+    const lang = res.data?.language;
+    if (lang && (res.relevance ?? 0) >= 5 && lowlight.listLanguages().includes(lang)) {
+      return lang;
+    }
+  } catch {
+    // 检测失败静默
+  }
+  return null;
+}
+
+/**
+ * T-011 自定义 markdown → Math 节点迁移
+ *
+ * 官方 `migrateMathStrings` 只处理单行 `$..$` 行内公式，且 regex 会把 `$$expr$$`
+ * 错误捕获成内层 `$expr$`。本项目要兼容 OB markdown，行内 + 多行块级都要支持，
+ * 因此重写一遍：
+ *   1. 整段（textblock 的 textContent）匹配 `$$\n*expr\n*$$` → 替换整个段落为 blockMath
+ *   2. 否则扫文本节点，按 inline `$..$` 替换（避开 `$10` 货币、`$$` 双号边界）
+ *
+ * 倒序应用替换避免位置漂移；不写入 history（迁移不应被撤销到原始 markdown）。
+ *
+ * 安全保证：失败时不修改 doc（`tr.docChanged` 检查）；KaTeX 渲染若 throw，
+ * extension 配的 `throwOnError: false`（默认）会显示错误提示而非崩溃编辑器。
+ */
+function migrateOpenMathStrings(editor: import("@tiptap/react").Editor): void {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const schema: any = editor.schema;
+  const blockMath = schema.nodes.blockMath;
+  const inlineMath = schema.nodes.inlineMath;
+  if (!blockMath && !inlineMath) return;
+
+  /**
+   * 读一个 textblock 的文本。**不能**用 `node.textContent`：那里 hardBreak 贡献空串，
+   * 多行内容会被拼成一行（`$..$` 跨行乱配对），且字符下标与 doc 偏移错位 1/每个 leaf。
+   * 详见 lib/inlineMathRanges.ts 的说明。
+   */
+  const blockText = (node: import("@tiptap/pm/model").Node): string =>
+    node.textBetween(0, node.content.size, undefined, () => "\n");
+
+  const tr = editor.state.tr;
+  type Replace = { from: number; to: number; latex: string; kind: "block" | "inline" };
+  const replaces: Replace[] = [];
+
+  // ─── 规则 0：跨段落多行块级 — 顶层连续 paragraph 形如 $$ ... $$ ───
+  // tiptap-markdown 把 `$$\nmatrix\n$$` 拆成多个 <p>，单段落 regex 抓不到，
+  // 这里在 doc 顶层扫 children，找到 `^\s*$$` 起始段 → 直到下一个 `^$$\s*$` 段，
+  // 把这一段范围整体替换为 blockMath
+  if (blockMath) {
+    const docNode = tr.doc;
+    const topChildren: { node: import("@tiptap/pm/model").Node; from: number }[] = [];
+    docNode.forEach((child, offset) => {
+      topChildren.push({ node: child, from: offset });
+    });
+    const consumed = new Set<number>();
+    for (let i = 0; i < topChildren.length; i++) {
+      if (consumed.has(i)) continue;
+      const c = topChildren[i];
+      if (!c.node.isTextblock) continue;
+      // 代码块整段都是字面量：`$$` 在 shell 里是当前进程 PID，不是块级公式定界符
+      if (c.node.type.spec.code) continue;
+      const t = blockText(c.node).trim();
+      if (!t.startsWith("$$")) continue;
+
+      // 单段就闭合（如 `$$expr$$`）
+      const single = /^\$\$([\s\S]+?)\$\$$/.exec(t);
+      if (single) {
+        replaces.push({
+          from: c.from,
+          to: c.from + c.node.nodeSize,
+          latex: single[1].trim(),
+          kind: "block",
+        });
+        consumed.add(i);
+        continue;
+      }
+
+      // 段首是 `$$`（可能仅 `$$`，也可能 `$$expr...`）但不闭合 → 找闭合段
+      // 提取段首 `$$` 之后的内容（可能为空）
+      const firstChunk = t.replace(/^\$\$/, "");
+      const collected: string[] = [];
+      if (firstChunk) collected.push(firstChunk);
+      let endIdx = -1;
+      let lastChunk = "";
+      for (let j = i + 1; j < topChildren.length; j++) {
+        const next = topChildren[j];
+        if (!next.node.isTextblock) continue;
+        // 同上：代码块不能充当块级公式的闭合段，否则 `echo $$` 这种收尾的代码块
+        // 会连同上文一起被吞进 blockMath
+        if (next.node.type.spec.code) continue;
+        const nt = blockText(next.node).trim();
+        if (nt.endsWith("$$")) {
+          // 闭合段
+          const beforeClose = nt.replace(/\$\$$/, "");
+          if (beforeClose) lastChunk = beforeClose;
+          endIdx = j;
+          break;
+        }
+        collected.push(nt);
+        // 防止无限扫描：超过 50 段未闭合视为不是块级公式
+        if (j - i > 50) break;
+      }
+      if (endIdx < 0) continue; // 没找到闭合，放弃
+
+      if (lastChunk) collected.push(lastChunk);
+      const latex = collected.join("\n").trim();
+      if (!latex) continue;
+      const endChild = topChildren[endIdx];
+      replaces.push({
+        from: c.from,
+        to: endChild.from + endChild.node.nodeSize,
+        latex,
+        kind: "block",
+      });
+      for (let k = i; k <= endIdx; k++) consumed.add(k);
+    }
+  }
+
+  // ─── 规则 1 + 2：单段落内的块级 / 行内（与上面跨段落不重叠的部分） ───
+  // 用 set 记录跨段落规则吃掉的段范围，避免重复处理
+  const blockedRanges = replaces
+    .filter((r) => r.kind === "block")
+    .map((r) => [r.from, r.to] as [number, number]);
+
+  function isInBlockedRange(pos: number): boolean {
+    return blockedRanges.some(([f, t]) => pos >= f && pos < t);
+  }
+
+  /**
+   * 给定 doc 范围内是否压到了行内代码（`code` mark）。
+   *
+   * 规则 2 为了支持 `$..$` 跨多个文本节点（中间夹加粗等 mark），是按 textblock 的
+   * textContent 整体扫的，看不见 marks；所以匹配到范围后再回查一次，命中行内代码
+   * 就放弃这次替换 —— `` `$PATH` `` 里的 `$` 是字面量。
+   */
+  const hitsCodeMark = (from: number, to: number): boolean => {
+    let hit = false;
+    tr.doc.nodesBetween(from, to, (n) => {
+      if (hit) return false;
+      if (n.isText && n.marks.some((mk) => mk.type.spec.code)) hit = true;
+    });
+    return hit;
+  };
+
+  tr.doc.descendants((node, pos) => {
+    // 🔴 代码块里的 `$` 一律是字面量（shell 变量 `$PATH`、`$$`=PID、正则、模板占位符），
+    // 绝不能当公式。而 codeBlock 的 `isTextblock` 同样为 true，只判 isTextblock 拦不住它。
+    //
+    // 后果比"显示成公式"严重得多：codeBlock 的 content 是 `text*`，把 inlineMath 塞进去
+    // 是非法结构，ProseMirror 的 replace fitting 会把它连同后半段一起「顶出」代码块 ——
+    // 代码块被拦腰截断，剩余内容掉到外面变成普通段落，且随下一次保存序列化写回磁盘。
+    // 实例：代码块写 `echo "test $a $b"` → 正则吃掉 `$a $` → 代码块只剩 `echo "test`，
+    // `$b"` 变成段落里的 KaTeX 斜体。返回 false 连子节点一起跳过。
+    if (node.type.spec.code) return false;
+    if (!node.isTextblock) return;
+    if (isInBlockedRange(pos)) return;
+    if (!inlineMath) return;
+
+    // 规则 2：行内公式 — `$..$`，避开 `$N` 数字（货币）和 `$$` 双号。
+    // 🔴 blockText 而非 textContent：hardBreak 必须贡献一个 "\n"，否则多行段落被拼成
+    // 一行 → `$..$` 跨行配对吞掉整行正文，且字符下标与 doc 偏移错位。详见
+    // lib/inlineMathRanges.ts（那里有终端日志被吞的实例）。
+    const text = blockText(node);
+    if (!text || !text.includes("$")) return;
+
+    // 每个 inline leaf 在 text 里占 1 字符、在 doc 里也占 1 位，故字符下标 + textStartInDoc
+    // 就是 doc 位置，无需再做映射
+    const textStartInDoc = pos + 1;
+    for (const r of findInlineMathRanges(text)) {
+      const from = textStartInDoc + r.start;
+      const to = textStartInDoc + r.end;
+      if (hitsCodeMark(from, to)) continue;
+      replaces.push({ from, to, latex: r.latex, kind: "inline" });
+    }
+  });
+
+  if (replaces.length === 0) return;
+
+  // 倒序应用，避免前面的替换让后面的 from/to 错位
+  const sorted = replaces.sort((a, b) => b.from - a.from);
+  for (const r of sorted) {
+    try {
+      if (r.kind === "block") {
+        tr.replaceWith(r.from, r.to, blockMath.create({ latex: r.latex }));
+      } else {
+        // 双保险：即便上游筛选漏了，只要落点父节点是代码类（content 为 `text*`），
+        // 就宁可不转换 —— replaceWith 在这里不会抛异常，而是静默把节点顶出父节点、
+        // 拆散文档结构，catch 兜不住，只能提前拦。
+        if (tr.doc.resolve(r.from).parent.type.spec.code) {
+          console.warn("[math] 跳过代码块内的 $..$（字面量，非公式）:", r);
+          continue;
+        }
+        tr.replaceWith(r.from, r.to, inlineMath.create({ latex: r.latex }));
+      }
+    } catch (e) {
+      console.warn("[math] migrate replace skipped:", r, e);
+    }
+  }
+
+  if (tr.docChanged) {
+    tr.setMeta("addToHistory", false);
+    editor.view.dispatch(tr);
+  }
+}
+
+/**
+ * 给老文档里没有 id 的 video 节点 backfill 一个稳定 ID。
+ *
+ * Why: VideoTimestamp 节点通过 [data-video-id="<id>"] 选择器定位视频跳转。
+ *      之前插入的 video 节点没有 id attr，老笔记打开后无法做时间戳关联。
+ *      此处遍历 doc，对所有 video.attrs.id == null 的节点 setNodeAttribute 补齐。
+ *
+ * 不写入 history（迁移不应被撤销到原始状态）。
+ */
+function backfillVideoIds(editor: import("@tiptap/react").Editor): void {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const schema: any = editor.schema;
+  const videoType = schema.nodes.video;
+  if (!videoType) return;
+
+  const tr = editor.state.tr;
+  let changed = false;
+  editor.state.doc.descendants((node, pos) => {
+    if (node.type !== videoType) return true;
+    if (node.attrs.id) return true;
+    const newId = Math.random().toString(36).slice(2, 10);
+    tr.setNodeAttribute(pos, "id", newId);
+    changed = true;
+    return true;
+  });
+
+  if (changed) {
+    tr.setMeta("addToHistory", false);
+    editor.view.dispatch(tr);
+  }
+}
+
+/**
+ * 清空编辑器的撤销历史。
+ *
+ * Why：切笔记时编辑器实例是**复用**的（`notes/:id` 是同一个路由组件，`useEditor` 也没有
+ * deps），而 `setContent` 内部只是一条普通的 replace 事务 —— @tiptap/core 只给它设了
+ * `preventUpdate`，并没有设 `addToHistory: false`。于是「把 A 笔记换成 B 笔记」这一步本身
+ * 是可撤销的，上一篇的编辑步骤也原封不动留在栈里。用户在 B 笔记按 Ctrl+Z，正文会倒退成
+ * **A 笔记撤销前的内容**；撤销属于用户操作，紧接着 onUpdate → onChange → dirty →
+ * 自动保存，把 A 的正文覆盖写进 B 笔记 —— B 的内容就这么丢了。
+ *
+ * prosemirror-history 没有公开的 clear API，标准做法是把 history 插件摘掉再装回去，让它的
+ * state 重新 init 成空栈。只动 history 一个插件：查找替换 / 标题折叠 / 标题编号等其它插件的
+ * state 原样保留；再按原下标插回（而不是追加到末尾），插件顺序也保持不变。
+ */
+/**
+ * 编辑态快照最多留几篇。每份快照都持有一整篇 doc 加最多 100 步撤销历史，
+ * 不设上限等于按「本次会话访问过的笔记数」漏内存。
+ */
+const NOTE_STATE_CACHE_MAX = 5;
+
+function resetEditorHistory(editor: import("@tiptap/react").Editor): void {
+  // prosemirror-history 的 PluginKey 名是 "history"，实际 key 字符串带 `$` 后缀。
+  // Plugin.key 在 prosemirror-state 的 .d.ts 里被标了 @internal 没导出类型，但运行时一直
+  // 存在 —— Tiptap 自己的 editor.unregisterPlugin 也正是靠它匹配的，故此处断言读取。
+  const keyOf = (p: unknown): string => (p as { key?: string }).key ?? "";
+  const index = editor.state.plugins.findIndex((p) => keyOf(p).startsWith("history$"));
+  if (index < 0) return; // undoRedo 扩展被禁用（本项目没禁），没有历史可清
+  // 沿用扩展上配置的 depth / newGroupDelay，重建后的撤销行为与原来一致
+  const options = editor.extensionManager.extensions.find(
+    (e) => e.name === "undoRedo",
+  )?.options as { depth?: number; newGroupDelay?: number } | undefined;
+  editor.unregisterPlugin("history");
+  editor.registerPlugin(history(options ?? {}), (plugin, plugins) => {
+    const next = [...plugins];
+    next.splice(index, 0, plugin);
+    return next;
+  });
+}
+
+/**
+ * 从 Clipboard/DataTransfer 收集所有文件，按 predicate 筛选。
+ *
+ * Why "items 优先 + files 兜底"：
+ *   - 现代 WebView（Edge/Chromium/WebView2）`items[]` 总是齐全
+ *   - 部分老来源 / IM 工具只填 `files`，不填 `items`
+ *   - 早期实现是两边都读 + `Set<File>` 身份去重 —— 但 WebView2 粘贴截图时
+ *     `getAsFile()` 和 `dt.files[i]` 经常返回内容相同但身份不同的两个 File
+ *     对象，导致同一张截图被插入两次（issue: 截图粘贴出现两份）
+ *   - 改为：`items` 取到任何文件就不再读 `files`；只有 `items` 完全为空才兜底
+ */
+function collectFiles(
+  dt: DataTransfer | null | undefined,
+  predicate: (f: File) => boolean,
+): File[] {
+  if (!dt) return [];
+  const out: File[] = [];
+  const push = (f: File | null) => {
+    if (f && predicate(f)) out.push(f);
+  };
+  let itemsHadFile = false;
+  if (dt.items) {
+    for (let i = 0; i < dt.items.length; i++) {
+      const item = dt.items[i];
+      if (item.kind === "file") {
+        itemsHadFile = true;
+        push(item.getAsFile());
+      }
+    }
+  }
+  if (!itemsHadFile && dt.files) {
+    for (let i = 0; i < dt.files.length; i++) push(dt.files[i]);
+  }
+  return out;
+}
+
+function collectImageFiles(dt: DataTransfer | null | undefined): File[] {
+  return collectFiles(dt, (f) => f.type.startsWith("image/"));
+}
+
+/** 视频识别：MIME 或扩展名命中即视为视频 */
+const VIDEO_FILE_EXTS = new Set(["mp4", "webm", "mkv", "mov", "avi", "m4v", "ogv"]);
+function isVideoFile(f: File): boolean {
+  if (f.type.startsWith("video/")) return true;
+  const dot = f.name.lastIndexOf(".");
+  if (dot < 0) return false;
+  return VIDEO_FILE_EXTS.has(f.name.slice(dot + 1).toLowerCase());
+}
+function collectVideoFiles(dt: DataTransfer | null | undefined): File[] {
+  return collectFiles(dt, isVideoFile);
+}
+
+/** 单个视频体积上限（字节）—— 与后端 MAX_BYTES 协同：
+ *  - 粘贴：50MB（剪贴板视频极少见，主要给截屏录像用）
+ *  - 拖入：100MB（IPC binary 通道传 100MB 体感 1~2s 可接受）
+ *  - 超过 → 提示用文件选择器走 saveFromPath（零拷贝） */
+const VIDEO_MAX_PASTE_BYTES = 50 * 1024 * 1024;
+const VIDEO_MAX_DROP_BYTES = 100 * 1024 * 1024;
+
+/** 文本类拖入：.md/.markdown/.txt（按 MIME 或扩展名识别） */
+const TEXT_FILE_EXTS = new Set(["md", "markdown", "txt"]);
+function collectTextFiles(dt: DataTransfer | null | undefined): File[] {
+  return collectFiles(dt, (f) => {
+    if (f.type === "text/plain" || f.type === "text/markdown") return true;
+    const dot = f.name.lastIndexOf(".");
+    if (dot < 0) return false;
+    return TEXT_FILE_EXTS.has(f.name.slice(dot + 1).toLowerCase());
+  });
+}
+
+/**
+ * 通用附件拖入：所有非图片、非文本、非"可执行黑名单"的文件。
+ *
+ * 黑名单与 Rust 侧 `services/attachment.rs::BLOCKED_EXTS` 保持同步，前端提前拦截
+ * 给出友好提示；服务端仍会二次校验（纵深防御）。
+ */
+const ATTACHMENT_BLOCKED_EXTS = new Set([
+  "exe", "msi", "bat", "cmd", "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh",
+  "sh", "app", "dmg", "scr", "com", "pif", "dll", "sys", "drv", "cpl", "hta",
+  "jar", "apk", "ipa", "deb", "rpm",
+]);
+
+function getExt(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot < 0 ? "" : name.slice(dot + 1).toLowerCase();
+}
+
+function collectAttachmentFiles(dt: DataTransfer | null | undefined): {
+  files: File[];
+  blocked: string[];
+} {
+  const blocked: string[] = [];
+  const files = collectFiles(dt, (f) => {
+    if (f.type.startsWith("image/")) return false; // 图片走图片分支
+    if (isVideoFile(f)) return false; // 视频走视频分支（内联 <video> 节点）
+    const ext = getExt(f.name);
+    if (TEXT_FILE_EXTS.has(ext)) return false; // 文本走文本分支
+    if (ATTACHMENT_BLOCKED_EXTS.has(ext)) {
+      blocked.push(f.name);
+      return false;
+    }
+    return true;
+  });
+  return { files, blocked };
+}
+
+/** 人类可读的字节数（1234 → "1.2 KB"）；纯展示用，不参与持久化 */
+function humanSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  return `${(mb / 1024).toFixed(1)} GB`;
+}
+
+/** 反解 file:// URL 拿回绝对路径，供 opener 使用 */
+function fileUrlToPath(url: string): string {
+  const trimmed = url.replace(/^file:\/\/\/?/, "");
+  try {
+    return decodeURIComponent(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+
+/** 将 File 对象转为 base64（不含 data URL 前缀） */
+/**
+ * 判断 HTML 是否只是包裹图片（浏览器复制图片场景）。
+ *
+ * 浏览器复制图片时 HTML 通常长这样：`<meta charset='utf-8'><img src='https://...'>`，
+ * 所有可见内容只是 img；而 Excel/Word 复制表格 HTML 含 <table>/文本/样式。
+ *
+ * 启发式：strip 掉所有 <img> 后看 body 是否还有实质内容（非空白文本 / 表格 / 列表等）。
+ * 任何 strip 后仍有 textContent 或 <table>/<ul>/<ol>/<pre> 节点 → 视为富文本。
+ */
+/**
+ * 把任意 src（http/https/data:/blob:）转成 File。
+ * file:// 走另一条通路（Rust imageApi.saveFromPath），不会落到这里。
+ */
+async function srcToImageFile(src: string, fallbackName: string): Promise<File> {
+  if (
+    !src.startsWith("http://") &&
+    !src.startsWith("https://") &&
+    !src.startsWith("data:") &&
+    !src.startsWith("blob:")
+  ) {
+    throw new Error(`unsupported scheme: ${src.slice(0, 30)}`);
+  }
+  const resp = await fetch(src);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const blob = await resp.blob();
+  if (!blob.type.startsWith("image/")) {
+    throw new Error(`not image: ${blob.type || "unknown"}`);
+  }
+  // 从 URL 末尾推断扩展名；推断失败用 fallback
+  let name = fallbackName;
+  if (src.startsWith("http")) {
+    try {
+      const path = new URL(src).pathname;
+      const ext = path.split(".").pop()?.toLowerCase();
+      if (ext && /^(png|jpg|jpeg|webp|gif|svg|bmp)$/.test(ext)) {
+        name = `pasted-${Date.now()}.${ext}`;
+      }
+    } catch {
+      /* keep fallback */
+    }
+  }
+  return new File([blob], name, { type: blob.type });
+}
+
+/**
+ * 把 `file:///C:/Users/.../Temp/abc.png` 解码成 Rust 能直接读的本地路径。
+ * Windows 上典型形态是 `file:///C:/...`（三个斜杠 + 盘符），URL encode 字符在
+ * 中文/空格路径里会出现，需要 decodeURIComponent。
+ */
+function fileUriToLocalPath(src: string): string {
+  if (!src.startsWith("file:")) {
+    throw new Error("not a file URI");
+  }
+  // file:/// 或 file:// 前缀都剥掉
+  let path = src.replace(/^file:\/{2,3}/, "");
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+    /* 解码失败保持原样（多半是非法 URL，让 Rust 侧报具体错） */
+  }
+  return path;
+}
+
+function isImageOnlyHtml(html: string): boolean {
+  if (!html.trim()) return false;
+  try {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const body = doc.body;
+    if (!body) return false;
+    const imgs = body.querySelectorAll("img");
+    if (imgs.length === 0) return false;
+    imgs.forEach((img) => img.remove());
+    // 富文本结构标签存在 → 不是纯图片粘贴
+    if (body.querySelector("table, ul, ol, pre, blockquote, h1, h2, h3, h4, h5, h6")) {
+      return false;
+    }
+    // 剩余可见文本去空白后非空 → 富文本
+    const text = (body.textContent ?? "").replace(/\s+/g, "");
+    return text.length === 0;
+  } catch {
+    return false;
+  }
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      // 去掉 "data:image/png;base64," 前缀
+      const base64 = result.split(",")[1];
+      resolve(base64);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * 复制「纯文本」通道(text/plain)清洗：把只在编辑器内可视的样式从 slice 副本里摘掉，
+ * 再交给 markdown 序列化 —— 避免纯文本出现 `<span style="font-size:…">`、
+ * `<p data-indent="…">` 这类 raw HTML 源码（用户粘到记事本/终端只想要干净文字）。
+ *
+ * 为什么会有源码：字号(fontSize)/颜色挂在 textStyle mark 上，tiptap-markdown 对没有
+ * markdown 表示的 mark 在 html:true 下会回退成 raw <span> 标签；缩进/对齐则被
+ * ParagraphWithIndent 序列化成 <p data-indent>。这些在「复制纯文本」时就露成源码。
+ *
+ * 不影响：① text/html 通道（富文本粘贴仍保留完整样式）
+ *        ② getMarkdown() 存盘（.md 仍保留 span，字号等样式跨「保存→重开」持久）
+ */
+const PLAIN_TEXT_NODE_ATTR_RESETS: Record<string, unknown> = {
+  indent: 0,
+  textAlign: "left",
+  lineHeight: null,
+};
+/**
+ * 按文档顺序取出「当前选区覆盖到的标题」的自动编号。
+ *
+ * 标题编号是 Decoration（不在 doc 里），复制时 slice 里没有它，也没有 pos 可查；
+ * 所以从 view.state.selection 反查 —— 复制动作发生时选区就是被复制的范围，
+ * 两边的标题顺序天然一一对应。
+ *
+ * 返回空数组表示"无需注入编号"（编号功能关闭 / 选区里没有标题），
+ * 调用方据此走原来的纯文本路径，行为零变化。
+ */
+function collectSelectedHeadingLabels(view: EditorView): string[] {
+  try {
+    const byPos = getHeadingNumberMap(view.state);
+    if (byPos.size === 0) return [];
+    const { from, to } = view.state.selection;
+    const out: string[] = [];
+    view.state.doc.nodesBetween(from, to, (node: PMNode, pos: number) => {
+      if (node.type.name !== "heading") return true;
+      // 没编号的标题（层级范围外 / 已手写编号）占一个空位，保证顺序对齐
+      out.push(byPos.get(pos) ?? "");
+      return false;
+    });
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function stripVisualStylesForPlainText(fragment: Fragment): Fragment {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const children: any[] = [];
+  fragment.forEach((child) => {
+    if (child.isText) {
+      // 摘掉 textStyle（字号/颜色），其余 mark（粗体/斜体/链接/code…）原样保留
+      const marks = child.marks.filter((m) => m.type.name !== "textStyle");
+      children.push(
+        marks.length === child.marks.length ? child : child.mark(marks),
+      );
+      return;
+    }
+    // 递归清子内容
+    const newContent = stripVisualStylesForPlainText(child.content);
+    // 归位会让 markdown 退化成 raw HTML 块的节点属性（缩进 / 对齐 / 行高）
+    let attrs = child.attrs as Record<string, unknown>;
+    let changed = false;
+    for (const [k, v] of Object.entries(PLAIN_TEXT_NODE_ATTR_RESETS)) {
+      if (k in attrs && attrs[k] !== v) {
+        if (!changed) {
+          attrs = { ...attrs };
+          changed = true;
+        }
+        attrs[k] = v;
+      }
+    }
+    children.push(
+      changed
+        ? child.type.create(attrs, newContent, child.marks)
+        : child.copy(newContent),
+    );
+  });
+  return Fragment.fromArray(children);
+}
+
+interface TiptapEditorProps {
+  /** 笔记内容（Markdown 字符串） */
+  content: string;
+  /** 保存回调，参数为 Markdown 字符串 */
+  onChange: (markdown: string) => void;
+  placeholder?: string;
+  /** 当前笔记 ID，用于图片保存 */
+  noteId?: number;
+  /**
+   * 当 noteId 缺失时，图片插入前调用此回调拉出一个 noteId（例如每日笔记
+   * 首次写内容前还未 getOrCreate）。返回 Promise<number>；调用方负责
+   * 同步自己的 noteId 状态。
+   */
+  ensureNoteId?: () => Promise<number>;
+  /**
+   * Ctrl/Cmd + 点击 wiki 链接时触发（编辑器内跳转）。
+   * `id` 来自 `[[标题|123]]` 形式的稳定锚点（候选下拉选中后的产物），
+   * 有 `id` 时直接按 ID 跳；只有 `title` 时按标题模糊查（旧 / 手敲形式）。
+   */
+  onWikiLinkClick?: (title: string, id?: number) => void;
+  /**
+   * 选中文本后浮起的「问 AI」按钮回调。
+   * 传入选中的纯文本，调用方负责弹抽屉 / 预填问题。
+   * 不传则不显示该按钮。
+   */
+  onAskAi?: (selectedText: string) => void;
+  /**
+   * 阅读模式：true = 只读（隐藏 EditorToolbar / AiWriteMenu，setEditable(false)）。
+   * 默认 false（编辑模式）。仅外观和输入禁用，selection / 复制 / 滚动均正常。
+   */
+  readingMode?: boolean;
+  /**
+   * 编辑器实例就绪时回调（含 destroy 时传 null）。
+   * 用于父组件订阅 doc 变化，例如外挂大纲面板根据 heading 节点渲染。
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  onEditorReady?: (editor: any | null) => void;
+  /**
+   * 是否显示编辑器底部的简版统计（字数 / 字符 / 阅读时长）。
+   * 默认 true。笔记编辑器把字数挪到了顶部 MetaBar，且容器有 40vh padding-bottom，
+   * 底部 stats 会被推得离视觉底部很远 → 笔记页面应传 false 关闭它。
+   */
+  showFooterStats?: boolean;
+  /**
+   * 外部预填查询词（搜索结果点进笔记时携带的关键词）。设置后编辑器就绪即
+   * 自动展开查找浮条、定位到首个命中——省去用户进笔记后再 Ctrl+F 搜一遍。
+   */
+  initialSearch?: string;
+}
+
+export function TiptapEditor({
+  content,
+  onChange,
+  placeholder = "开始写点什么...",
+  noteId,
+  ensureNoteId,
+  onWikiLinkClick,
+  onAskAi,
+  readingMode = false,
+  onEditorReady,
+  showFooterStats = true,
+  initialSearch,
+}: TiptapEditorProps) {
+  const isExternalUpdate = useRef(false);
+
+  // 用 ref 保持 onWikiLinkClick 最新引用，避免 Tiptap 扩展闭包过期
+  const wikiClickRef = useRef(onWikiLinkClick);
+  // ensureNoteId 同样用 ref：它常是组件每次渲染新建的闭包，不能进依赖数组
+  const ensureNoteIdRef = useRef(ensureNoteId);
+  ensureNoteIdRef.current = ensureNoteId;
+  // noteId 也用 ref：编辑器实例只创建一次（useEditor 无 deps），
+  // SlashCommand 媒体项需要函数式取最新 noteId 才能在切笔记后正确插入。
+  const noteIdRef = useRef(noteId);
+  noteIdRef.current = noteId;
+  // 阅读态同样用 ref：WikiLinkDecoration 在编辑器实例创建时一次性配置，
+  // 靠函数式取值才能让"阅读态单击即跳转"的判断拿到实时 readingMode。
+  const readingModeRef = useRef(readingMode);
+  readingModeRef.current = readingMode;
+
+  // 斜杠菜单"嵌入网络视频"项需要在 React 树里弹 URL 输入框。
+  // 用一个 pending resolver 桥接异步流程：
+  //   slash command 调 requestEmbedUrl() → 创建 Promise 把 resolve 存到 ref →
+  //   显示 Modal → 用户确认/取消 → resolve(url|null) → Promise 在命令侧完成。
+  const [embedSlashOpen, setEmbedSlashOpen] = useState(false);
+  const [embedSlashUrl, setEmbedSlashUrl] = useState("");
+  const embedResolverRef = useRef<((url: string | null) => void) | null>(null);
+  const requestEmbedUrl = useCallback((): Promise<string | null> => {
+    return new Promise((resolve) => {
+      embedResolverRef.current = resolve;
+      setEmbedSlashUrl("");
+      setEmbedSlashOpen(true);
+    });
+  }, []);
+  const closeEmbedSlash = useCallback((url: string | null) => {
+    setEmbedSlashOpen(false);
+    const fn = embedResolverRef.current;
+    embedResolverRef.current = null;
+    fn?.(url);
+  }, []);
+  useEffect(() => {
+    wikiClickRef.current = onWikiLinkClick;
+  }, [onWikiLinkClick]);
+
+  // onUpdate 防抖：每次按键都序列化整篇文档（O(doc size)）代价不低，长笔记在 WKWebView 上肉眼可感。
+  // 用 ref 承载最新 onChange，避免依赖变化重建 editor；用 timer ref 做 300ms 尾触发，
+  // unmount / editor blur 时强制 flush，保证保存按钮永远能拿到最新 markdown。
+  const onChangeRef = useRef(onChange);
+  useEffect(() => {
+    onChangeRef.current = onChange;
+  }, [onChange]);
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingEditorRef = useRef<{ storage: unknown } | null>(null);
+  // 「上一次上报给父组件的 markdown」基线。用于过滤掉不改变 markdown 的 onUpdate：
+  //   1. 图片 NodeView（ImageResize）挂载后回写 containerStyle/wrapperStyle 等样式属性，
+  //      会触发 onUpdate，但这些属性不参与 markdown 序列化 → getMarkdown 不变。
+  //   2. DB 里存的内容若不是「序列化定点」（如历史遗留 `<p><br></p>` 空段落），加载后
+  //      编辑器持有的是归一化结果，与 DB 原文不同；若直接上报会被父组件判定为 dirty
+  //      （"打开就提示未保存"）。基线设为加载后编辑器的真实输出，可避免误判。
+  // 仅当输出相对基线真正变化（用户实际编辑）才上报 onChange → setDirty。
+  const lastEmittedRef = useRef<string | null>(null);
+  const emitIfChanged = useCallback((pending: { storage: unknown }) => {
+    const md = getEditorMarkdown(pending);
+    if (md === lastEmittedRef.current) return; // 内容未实质变化，不上报、不标 dirty
+    lastEmittedRef.current = md;
+    onChangeRef.current(md);
+  }, []);
+  const flushNow = useCallback(() => {
+    if (flushTimerRef.current) {
+      clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+    const pending = pendingEditorRef.current;
+    if (pending) {
+      pendingEditorRef.current = null;
+      emitIfChanged(pending);
+    }
+  }, [emitIfChanged]);
+
+  /** 处理图片文件：并发保存后一次性批量插入编辑器 */
+  const handleImageFiles = useCallback(
+    async (files: File[], editor: ReturnType<typeof useEditor>) => {
+      if (!editor) return;
+
+      // 优先用显式 noteId；不存在时尝试 ensureNoteId（例如每日笔记自动建档）
+      let effectiveNoteId = noteId;
+      if (!effectiveNoteId && ensureNoteIdRef.current) {
+        try {
+          effectiveNoteId = await ensureNoteIdRef.current();
+        } catch (e) {
+          message.error(`图片插入失败: ${e}`);
+          return;
+        }
+      }
+      if (!effectiveNoteId) {
+        message.warning("请先保存笔记后再插入图片");
+        return;
+      }
+
+      const images = files.filter((f) => f.type.startsWith("image/"));
+      console.log("[image-drop] received files:", images.length, images.map((f) => f.name));
+
+      // Why: 原版在 for-await 里每次 insertContent，会让 onUpdate 连环触发、debounce 反复刷新；
+      //      且 Tiptap 在同一批次中对同一 src 的 node 行为不稳定。改成全部保存完后一次性插入。
+      const results = await Promise.all(
+        images.map(async (file) => {
+          try {
+            const base64 = await fileToBase64(file);
+            // imageApi.save 返回相对 data_dir 的 POSIX 路径（如 kb_assets/images/1/x.png）
+            const relPath = await imageApi.save(effectiveNoteId!, file.name, base64);
+            return { ok: true as const, relPath, name: file.name };
+          } catch (e) {
+            return { ok: false as const, err: String(e), name: file.name };
+          }
+        }),
+      );
+
+      const nodes: { type: string; attrs: { src: string } }[] = [];
+      for (const r of results) {
+        if (r.ok) {
+          console.log("[image-drop] saved:", r.name, "=>", r.relPath);
+          nodes.push({
+            type: "imageResize",
+            // 写入 kb-asset:// 虚拟 URL；DOM 渲染时由 MutationObserver 解析为 asset URL / Blob URL
+            attrs: { src: toKbAsset(r.relPath) },
+          });
+        } else {
+          message.error(`图片插入失败(${r.name}): ${r.err}`);
+        }
+      }
+      if (nodes.length === 0) return;
+
+      // 去重：若 Rust 侧仍返回了相同 filePath（比如旧二进制没重编），至少提示用户
+      const uniqueSrc = new Set(nodes.map((n) => n.attrs.src));
+      if (uniqueSrc.size !== nodes.length) {
+        console.warn(
+          "[image-drop] 后端返回了重复路径（旧二进制？）",
+          nodes.map((n) => n.attrs.src),
+        );
+      }
+
+      // #14：光标在有序/无序/任务列表项内时，把（块级）图片插到该 listItem 末尾作为其子块，
+      // 避免块级图片在列表项中间劈裂 <ol> → 后段序号从 1 重算（“断层”）。
+      // listItem 的 content 是 `paragraph block*`，块级图片作为后续子块合法，单个 <ol> 得以保持。
+      const { $from } = editor.state.selection;
+      let liDepth = -1;
+      for (let d = $from.depth; d > 0; d--) {
+        const typeName = $from.node(d).type.name;
+        if (typeName === "listItem" || typeName === "taskItem") {
+          liDepth = d;
+          break;
+        }
+      }
+      if (liDepth >= 0) {
+        editor.chain().focus().insertContentAt($from.end(liDepth), nodes).run();
+      } else {
+        editor.chain().focus().insertContent(nodes).run();
+      }
+    },
+    [noteId],
+  );
+
+  /**
+   * 把 HTML 里所有可访问的 &lt;img src&gt; 抓下来保存到本地，src 替换为 kb-asset://。
+   * 不可访问（file:// / 跨域 fetch 失败 / 非图片资源）的节点直接剥离，避免裂图。
+   *
+   * 用于「场景 B」图文混合粘贴：用户从浏览器 / 文档里复制带多张图的段落，
+   * 剪贴板 HTML 中的 &lt;img src=https://...&gt; 在 Tauri WebView 不能直接渲染（CSP /
+   * 防盗链 / 临时文件），必须先抓回字节存到 kb_assets 后再让 ProseMirror 解析。
+   */
+  const localizeHtmlImages = useCallback(
+    async (
+      html: string,
+    ): Promise<{ html: string; ok: number; failed: number; total: number }> => {
+      let effectiveNoteId = noteId;
+      if (!effectiveNoteId && ensureNoteIdRef.current) {
+        try {
+          effectiveNoteId = await ensureNoteIdRef.current();
+        } catch (e) {
+          throw new Error(`无法建档：${e}`);
+        }
+      }
+      if (!effectiveNoteId) {
+        throw new Error("请先保存笔记后再粘贴图文");
+      }
+
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const imgs = Array.from(doc.body.querySelectorAll("img"));
+      let ok = 0;
+      let failed = 0;
+      await Promise.all(
+        imgs.map(async (img, idx) => {
+          const src = img.getAttribute("src") ?? "";
+          if (!src || src.startsWith("kb-asset://")) {
+            // 已是本地协议，无需处理
+            return;
+          }
+          try {
+            let rel: string;
+            if (src.startsWith("file:")) {
+              // Office Word / 截图工具 / 资源管理器复制带图：HTML 里是
+              // file:///C:/Users/.../AppData/Local/Temp/xxx.png 这种本地临时
+              // 路径，前端 fetch 不到（WebView 安全策略），但 Rust 侧可以直接读盘。
+              const localPath = fileUriToLocalPath(src);
+              rel = await imageApi.saveFromPath(effectiveNoteId!, localPath);
+            } else if (src.startsWith("http://") || src.startsWith("https://")) {
+              // 远程图：优先走 Rust reqwest（绕开 WebView Origin/Referer/CORS，
+              // 钉钉 / 微信 / 知乎 / CSDN 等防盗链图床基本只有这条路能成）。
+              // Rust 失败再回退前端 fetch（少数站点没限制反而前端能直连）。
+              try {
+                rel = await imageApi.downloadFromUrl(effectiveNoteId!, src);
+              } catch (rustErr) {
+                console.warn("[paste] rust download failed, fallback to fetch:", {
+                  srcSample: src.slice(0, 120),
+                  error: String(rustErr),
+                });
+                const file = await srcToImageFile(
+                  src,
+                  `pasted-${Date.now()}-${idx}.png`,
+                );
+                const base64 = await fileToBase64(file);
+                rel = await imageApi.save(effectiveNoteId!, file.name, base64);
+              }
+            } else {
+              // data: / blob: → WebView 内部资源，前端 fetch 直接拿即可
+              const file = await srcToImageFile(
+                src,
+                `pasted-${Date.now()}-${idx}.png`,
+              );
+              const base64 = await fileToBase64(file);
+              rel = await imageApi.save(
+                effectiveNoteId!,
+                file.name,
+                base64,
+              );
+            }
+            img.setAttribute("src", toKbAsset(rel));
+            // 清理可能的尺寸属性，让图片自然渲染（避免远程 width/height 太奇怪）
+            img.removeAttribute("width");
+            img.removeAttribute("height");
+            img.removeAttribute("style");
+            ok++;
+          } catch (e) {
+            console.warn(
+              "[paste] localize img failed:",
+              { srcSample: src.slice(0, 120), error: String(e) },
+            );
+            img.remove();
+            failed++;
+          }
+        }),
+      );
+      return { html: doc.body.innerHTML, ok, failed, total: imgs.length };
+    },
+    [noteId],
+  );
+
+  /**
+   * 把当前文档里所有 src 为 http(s):// 的远程图片抓回本地（kb_assets），src 改写为 kb-asset://。
+   *
+   * 场景：用户粘贴**纯文本 Markdown** `![](https://...)` —— tiptap-markdown 的
+   * transformPastedText 会先把它转成 `<img src=远程URL>` 再交给 ProseMirror，于是文档里
+   * 出现一个 src 还是远程地址的 imageResize 节点。Tauri WebView 因 CSP / 图床防盗链基本
+   * 加载不了 → 破图，而且笔记存盘后 markdown 里仍是远程链接（链接失效就彻底没了）。
+   * 这里在粘贴后扫一遍，远程图统一抓回本地保存，再把节点 src 换成 kb-asset://。
+   *
+   * editor 走参数传入（editorProps 每次 render 经 setOptions 刷新，闭包里的 editor 是最新的）。
+   */
+  const localizeRemoteImagesInEditor = useCallback(
+    async (editor: ReturnType<typeof useEditor>) => {
+      if (!editor || editor.isDestroyed) return;
+      // 收集需要本地化的图片 src：远程 http(s) + 内联 data:image base64。
+      // data URL 来源：粘贴 Notion / 飞书 / 网页剪藏的 markdown，图片内联成 base64。
+      // 留在文档里既撑大 DB content，又可能因串太长不被正常渲染 → 落盘换 kb-asset://。
+      const remoteSrcs = new Set<string>();
+      editor.state.doc.descendants((node) => {
+        const src = node.attrs?.src;
+        if (
+          node.type.name === "imageResize" &&
+          typeof src === "string" &&
+          /^(https?:\/\/|data:image\/)/i.test(src)
+        ) {
+          remoteSrcs.add(src);
+        }
+      });
+      if (remoteSrcs.size === 0) return;
+
+      let effectiveNoteId = noteIdRef.current;
+      if (!effectiveNoteId && ensureNoteIdRef.current) {
+        try {
+          effectiveNoteId = await ensureNoteIdRef.current();
+        } catch (e) {
+          message.error(`无法建档保存图片：${e}`);
+          return;
+        }
+      }
+      if (!effectiveNoteId) {
+        message.warning("请先保存笔记后再粘贴带图片的内容");
+        return;
+      }
+
+      const hide = message.loading(`正在保存 ${remoteSrcs.size} 张图片到本地…`, 0);
+      const map = new Map<string, string>();
+      let failed = 0;
+      await Promise.all(
+        Array.from(remoteSrcs).map(async (src, idx) => {
+          // 内联 data:image base64：payload 本身就是裸 base64，直接落盘，不必走网络
+          const dataUrlMatch = src.match(/^data:image\/([a-z0-9.+-]+);base64,(.*)$/i);
+          if (dataUrlMatch) {
+            try {
+              const subtype = dataUrlMatch[1].toLowerCase();
+              const ext =
+                subtype === "jpeg"
+                  ? "jpg"
+                  : subtype === "svg+xml"
+                    ? "svg"
+                    : subtype;
+              // base64 可能夹换行（部分导出器折行）；剔除空白再传
+              const base64 = dataUrlMatch[2].replace(/\s/g, "");
+              const rel = await imageApi.save(
+                effectiveNoteId!,
+                `inline-${Date.now()}-${idx}.${ext}`,
+                base64,
+              );
+              map.set(src, toKbAsset(rel));
+            } catch (e) {
+              failed += 1;
+              console.warn("[paste-md] 内联 data URL 图本地化失败:", String(e));
+            }
+            return;
+          }
+          try {
+            // 优先 Rust reqwest：绕开 WebView 的 Origin/Referer/CORS，防盗链图床基本只有这条路能成
+            const rel = await imageApi.downloadFromUrl(effectiveNoteId!, src);
+            map.set(src, toKbAsset(rel));
+          } catch (rustErr) {
+            try {
+              const file = await srcToImageFile(src, `pasted-${Date.now()}-${idx}.png`);
+              const base64 = await fileToBase64(file);
+              const rel = await imageApi.save(effectiveNoteId!, file.name, base64);
+              map.set(src, toKbAsset(rel));
+            } catch (e2) {
+              failed += 1;
+              console.warn("[paste-md] 远程图本地化失败:", {
+                srcSample: src.slice(0, 120),
+                error: String(e2),
+                rustError: String(rustErr),
+              });
+            }
+          }
+        }),
+      );
+      hide();
+
+      if (map.size === 0) {
+        message.warning(
+          `${remoteSrcs.size} 张图片都无法下载（防盗链 / 网络问题），已保留原始链接`,
+        );
+        return;
+      }
+      if (editor.isDestroyed) return; // 下载期间笔记被切走
+
+      // 一次 transaction 把所有命中的远程 src 换成本地 kb-asset://（按 src 值匹配，无需 position 数学）
+      const tr = editor.state.tr;
+      let changed = 0;
+      editor.state.doc.descendants((node, pos) => {
+        const src = node.attrs?.src;
+        if (
+          node.type.name === "imageResize" &&
+          typeof src === "string" &&
+          map.has(src)
+        ) {
+          tr.setNodeMarkup(pos, undefined, { ...node.attrs, src: map.get(src) });
+          changed += 1;
+        }
+      });
+      if (changed > 0) {
+        editor.view.dispatch(tr);
+        if (failed > 0) {
+          message.warning(
+            `已保存 ${map.size} 张图到本地，${failed} 张无法下载（保留原链接）`,
+          );
+        } else {
+          message.success(`已保存 ${map.size} 张图片到本地`);
+        }
+      }
+    },
+    [],
+  );
+
+  /**
+   * 处理粘贴/拖入的视频：Uint8Array 走 binary IPC 直传后端落盘，
+   * 返回 asset URL 后插入自定义 Video 节点（内联 <video controls preload="metadata">）。
+   *
+   * `maxBytesEach` 控制单文件上限（粘贴 50MB / 拖入 100MB），超限提示用工具栏。
+   */
+  const handleVideoFiles = useCallback(
+    async (files: File[], editor: ReturnType<typeof useEditor>, maxBytesEach: number) => {
+      if (!editor || files.length === 0) return;
+
+      let effectiveNoteId = noteId;
+      if (!effectiveNoteId && ensureNoteIdRef.current) {
+        try {
+          effectiveNoteId = await ensureNoteIdRef.current();
+        } catch (e) {
+          message.error(`视频插入失败: ${e}`);
+          return;
+        }
+      }
+      if (!effectiveNoteId) {
+        message.warning("请先保存笔记后再插入视频");
+        return;
+      }
+
+      // 单独筛超大文件 → 一次性提示
+      const ok: File[] = [];
+      const oversized: string[] = [];
+      for (const f of files) {
+        if (f.size > maxBytesEach) {
+          oversized.push(`${f.name} (${humanSize(f.size)})`);
+        } else {
+          ok.push(f);
+        }
+      }
+      if (oversized.length > 0) {
+        message.warning(
+          `${oversized.length} 个视频超过单文件 ${maxBytesEach / 1024 / 1024} MB 上限，请用工具栏的「插入视频」按钮选择文件：${oversized.join("、")}`,
+          6,
+        );
+      }
+      if (ok.length === 0) return;
+
+      const results = await Promise.all(
+        ok.map(async (file) => {
+          try {
+            const buf = await file.arrayBuffer();
+            const relPath = await videoApi.save(
+              effectiveNoteId!,
+              file.name,
+              new Uint8Array(buf),
+            );
+            return { ok: true as const, relPath, name: file.name };
+          } catch (e) {
+            return { ok: false as const, err: String(e), name: file.name };
+          }
+        }),
+      );
+
+      const nodes: { type: string; attrs: { src: string; id: string } }[] = [];
+      for (const r of results) {
+        if (r.ok) {
+          nodes.push({
+            type: "video",
+            // 给每个视频生成稳定 id，VideoTimestamp 通过此 id 锚定跳转
+            attrs: { src: toKbAsset(r.relPath), id: Math.random().toString(36).slice(2, 10) },
+          });
+        } else {
+          message.error(`视频插入失败(${r.name}): ${r.err}`);
+        }
+      }
+      if (nodes.length === 0) return;
+      editor.chain().focus().insertContent(nodes).run();
+    },
+    [noteId],
+  );
+
+  /**
+   * 处理拖入的通用附件：上传到 kb_assets/attachments/<note_id>/ 后，
+   * 以普通 markdown 链接插入到光标处 —— 链接文本形如 "📎 filename.pdf (1.2 MB)"，
+   * href 是 file:// 绝对路径；点击时由 DOM 级 click handler 拦截并调 opener。
+   *
+   * Why 不用自定义 Tiptap 节点：保持 markdown 序列化零改造（依赖现有 Link 扩展），
+   *      将来需要卡片化 UI 时，可升级为自定义 node + nodeView，不影响存储格式。
+   */
+  const handleAttachmentFiles = useCallback(
+    async (files: File[], editor: ReturnType<typeof useEditor>) => {
+      if (!editor || files.length === 0) return;
+
+      // 与图片同一套 noteId 获取流程（daily note 首次写入时自动建档）
+      let effectiveNoteId = noteId;
+      if (!effectiveNoteId && ensureNoteIdRef.current) {
+        try {
+          effectiveNoteId = await ensureNoteIdRef.current();
+        } catch (e) {
+          message.error(`附件保存失败: ${e}`);
+          return;
+        }
+      }
+      if (!effectiveNoteId) {
+        message.warning("请先保存笔记后再拖入附件");
+        return;
+      }
+
+      const results = await Promise.all(
+        files.map(async (file) => {
+          try {
+            const base64 = await fileToBase64(file);
+            const info = await attachmentApi.save(
+              effectiveNoteId!,
+              file.name,
+              base64,
+            );
+            return { ok: true as const, info };
+          } catch (e) {
+            return { ok: false as const, name: file.name, err: String(e) };
+          }
+        }),
+      );
+
+      // 批量构造要插入的 link nodes，最后一次性 insert（避免多次 onUpdate 连环刷新）
+      const nodes: Array<{
+        type: "text";
+        text: string;
+        marks: Array<{ type: "link"; attrs: { href: string } }>;
+      }> = [];
+      for (const r of results) {
+        if (r.ok) {
+          const label = `📎 ${r.info.fileName} (${humanSize(r.info.size)})`;
+          // info.path 已是相对 data_dir 的 POSIX 路径；存 kb-asset:// 让 content 跨数据目录可移植。
+          // 用 toKbAssetHref（percent-encode）而非 toKbAsset：附件是 link mark，序列化不编码 URL，
+          // 文件名含空格会破坏 markdown 链接（重开降级成纯文本 + 漏同步）。见 assetUrl.ts 注释。
+          const href = toKbAssetHref(r.info.path);
+          nodes.push({
+            type: "text",
+            text: label,
+            marks: [{ type: "link", attrs: { href } }],
+          });
+          // 在相邻附件之间加换行，避免挤在一起
+          nodes.push({ type: "text", text: "\n" } as unknown as (typeof nodes)[number]);
+        } else {
+          message.error(`附件保存失败(${r.name}): ${r.err}`);
+        }
+      }
+      if (nodes.length === 0) return;
+
+      editor.chain().focus().insertContent(nodes).run();
+    },
+    [noteId],
+  );
+
+  /**
+   * 处理拖入的 .md/.txt：读文本后附加到文末，走 setContent 经 tiptap-markdown 解析渲染。
+   * Why: ProseMirror 的 insertContent 不走 markdown 解析管线；replace 整篇才能让 md 语法正确渲染。
+   *      代价是光标会跳到末尾，但"拖入新文件 = 追加内容"的心智模型下可接受。
+   */
+  const handleTextFiles = useCallback(
+    async (files: File[], editor: ReturnType<typeof useEditor>) => {
+      if (!editor || files.length === 0) return;
+      try {
+        const texts = await Promise.all(files.map((f) => f.text()));
+        const currentMd = getEditorMarkdown(editor);
+        const separator = currentMd.trim() ? "\n\n" : "";
+        const appendMd = texts.join("\n\n");
+        editor.commands.setContent(currentMd + separator + appendMd);
+        editor.commands.focus("end");
+        message.success(`已插入 ${files.length} 个文本文件`);
+      } catch (e) {
+        message.error(`文件读取失败: ${e}`);
+      }
+    },
+    [],
+  );
+
+  /**
+   * 「这次粘贴是用户显式要求的纯文本粘贴」标记，供 handlePaste 里的代码块自动识别（场景 F）
+   * 让路。
+   *
+   * 背景：Chromium 对「粘贴为纯文本」只把 text/plain 放进 clipboardData，text/html 一律为空
+   * ——和"剪贴板本来就只有纯文本"的普通 Ctrl+V 在事件层面**完全无法区分**。于是用户明明选了
+   * 「粘贴为纯文本」，场景 F 照样把内容包成代码块，等于无视用户的明确意图。
+   *
+   * 既然事件里没有信号，就从**触发路径**上区分：
+   * · nativeMenuPasteRef —— 右键弹出了 WebView 原生菜单（我们没 preventDefault）。原生菜单项
+   *   是 OS 级窗口，点击不会给页面派发 keydown / mousedown，所以"contextmenu 之后、没有任何
+   *   键鼠事件、直接来了 paste"必然是从这个菜单里点的粘贴。
+   * · plainPasteShortcutRef —— Ctrl/⌘+Shift+V，浏览器约定的「粘贴为纯文本」快捷键。
+   *
+   * 两者都是**一次性**的：被一次 paste 消费掉，或被任意 keydown / mousedown 清掉，
+   * 不会影响后续的普通 Ctrl+V（Ctrl+V 自带 keydown，必然先把标记清空）。
+   */
+  const nativeMenuPasteRef = useRef(false);
+  const plainPasteShortcutRef = useRef(false);
+
+  const editor = useEditor({
+    // 初始可编辑状态由 readingMode 决定；后续切换通过下方 useEffect 调 editor.setEditable
+    editable: !readingMode,
+    extensions: [
+      StarterKit.configure({
+        codeBlock: false, // 用 CodeBlockLowlight 替代
+        // Tiptap 3.x StarterKit 自带 link/underline，这里禁用以避免和下方
+        // 手动 Link.configure / Underline 重复（控制台会打印 Duplicate extension names）
+        link: false,
+        underline: false,
+        // 行内 code 默认 excludes:"_" 会排斥所有其他 mark（包括 textStyle/fontSize），
+        // 导致选中行内代码后改字号失败。这里禁用 starter-kit 自带的 code，
+        // 下方手动引入 Code 并清空 excludes，让 fontSize/color/highlight 等可与
+        // code mark 同时存在
+        code: false,
+        // 用 ParagraphWithIndent / HeadingWithIndent 替换默认实现：
+        // 在 addStorage().markdown.serialize 里把 indent>0 的段落/标题输出为
+        // HTML（<p data-indent="N">…</p>），让缩进能存进 .md 并往返还原。
+        paragraph: false,
+        heading: false,
+      }),
+      ParagraphWithIndent,
+      HeadingWithIndent,
+      Code.configure({
+        HTMLAttributes: {},
+      }).extend({
+        // 清空 excludes 让 textStyle / highlight / link 等其他 mark 可与 code 共存
+        excludes: "",
+      }),
+      Placeholder.configure({ placeholder }),
+      // 高亮：禁用 Tiptap 内置的 Mod-Shift-h，键位改由下方 editorProps.handleKeyDown 读
+      // store.editorHighlightShortcut 实时触发，实现"高亮快捷键可自定义"。
+      // 若保留内置键位，用户没改键时会和 handleKeyDown 双触发 → toggleHighlight 跑两次互相抵消。
+      Highlight.extend({
+        // 高 priority → 在 schema marks 中排序靠前 → mark rank 最小 → markdown 序列化时
+        // <mark> 包在最外层（<mark>**X**</mark>）而非内层（**<mark>X</mark>**）。
+        // 后者在 CJK 场景下，闭合 ** 紧贴标点(</mark> 的 >)+中文，违反 CommonMark 强调
+        // 配对的 right-flanking 规则 → ** 失配退化成字面星号、粗体丢失（用户报「粗体+高亮
+        // 重开变成 <mark>+ 字面**」）。放到最外层后 **X** 两侧均为 CJK，正常配对。
+        priority: 1000,
+        addKeyboardShortcuts() {
+          return {};
+        },
+        // 自定义 markdown 序列化：highlight 没有标准 markdown 语法，tiptap-markdown 默认
+        // 退化成 HTMLMark（<mark>），但其 open/close 顺序受 mark rank 影响。这里显式声明
+        // 输出 <mark>（带色时保留 data-color/style），配合上面的 priority 确保稳定往返。
+        // 解析端无需特殊处理：html:true 下 markdown-it 原样保留 <mark>，Highlight 默认
+        // parseHTML 识别 mark 标签并从 style 还原 color。
+        addStorage() {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const parent = (this as any).parent?.() ?? {};
+          return {
+            ...parent,
+            markdown: {
+              serialize: {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                open(_state: any, mark: any) {
+                  const c = mark.attrs?.color;
+                  return c
+                    ? `<mark data-color="${c}" style="background-color: ${c}; color: inherit">`
+                    : "<mark>";
+                },
+                close: "</mark>",
+                mixable: false,
+                expelEnclosingWhitespace: true,
+              },
+              parse: {
+                // 由 markdown-it 处理：<mark> 作为 inline HTML 原样保留，Highlight.parseHTML 还原
+              },
+            },
+          };
+        },
+      }).configure({ multicolor: true }),
+      // 批注：选中文字加补充说明，data-comment 直接存在 mark 里，跟着笔记走
+      Annotation,
+      TaskList,
+      TaskItem.configure({ nested: true }),
+      // SafeLink：渲染成 <span data-href="..." role="link"> 而非 <a href>，
+      // 彻底避开 Tauri WebView 对 anchor 的 navigation 旁路（preventDefault 拦不住）。
+      // markdown 序列化由 prosemirror-markdown 直接读 mark.attrs.href，不读 DOM，
+      // 所以输出仍是 [label](url) 标准 markdown link，往返不丢失。
+      //
+      // ⚠ 必须同时改 parseHTML：从 DOM 反向解析时（复制粘贴/HMR 重挂载等路径）
+      //   要识别 span[data-href]，否则 label 会被当纯文本入 doc，下次保存就会
+      //   出现 "label[label](url)" 的双重 bug（已踩过坑）。
+      Link.extend({
+        parseHTML() {
+          return [
+            // 兼容外部 markdown 导入的标准 anchor
+            { tag: "a[href]:not([href *= 'javascript:' i])" },
+            // SafeLink 自己渲染的 span
+            {
+              tag: "span[data-href]",
+              getAttrs: (el) => ({
+                href: (el as HTMLElement).getAttribute("data-href"),
+              }),
+            },
+          ];
+        },
+        renderHTML({ HTMLAttributes }) {
+          const realHref = (HTMLAttributes as { href?: string }).href ?? "";
+          const { href: _ignored, target: _t, rel: _r, ...rest } =
+            HTMLAttributes as Record<string, unknown>;
+          void _ignored; void _t; void _r;
+          return [
+            "span",
+            mergeAttributes(this.options.HTMLAttributes, rest, {
+              "data-href": realHref,
+              role: "link",
+              tabindex: "0",
+            }),
+            0,
+          ];
+        },
+      }).configure({
+        openOnClick: false,
+        HTMLAttributes: { class: "tiptap-link" },
+      }),
+      Underline,
+      Superscript,
+      Subscript,
+      // FontSize 直接继承 TextStyle，复用 textStyle mark name；Color 扩展默认就用这个
+      FontSize,
+      Color,
+      LineHeight,
+      Indent,
+      CodeBlockEnhanced.configure({ lowlight }),
+      // T-011: LaTeX 公式渲染（行内 $...$、块级 $$...$$，KaTeX 后端）
+      Mathematics,
+      Typography,
+      TableWithMarkdown.configure({
+        resizable: true,
+        HTMLAttributes: { class: "tiptap-table" },
+      }),
+      TableRow,
+      TableCell,
+      TableHeader,
+      TextAlign.configure({
+        types: ["heading", "paragraph"],
+      }),
+      FigureImage.configure({
+        inline: false,
+        minWidth: 50,
+        maxWidth: 1200,
+      }),
+      VideoNode,
+      VideoTimestamp,
+      EmbedVideo,
+      Callout,
+      DataviewBlock,
+      // 内嵌白板块：getNoteId 必须函数式取（同 SlashCommand），
+      // 否则切笔记后白板资源会存进上一篇的目录
+      WhiteboardBlock.configure({
+        getNoteId: () => noteIdRef.current,
+      }),
+      Toggle,
+      ToggleSummary,
+      ToggleContent,
+      Columns,
+      Column,
+      WikiLinkDecoration.configure({
+        onClick: (title: string, id?: number) => wikiClickRef.current?.(title, id),
+        isReadingMode: () => readingModeRef.current,
+      }),
+      WikiLinkSuggestion,
+      SlashCommand.configure({
+        getNoteId: () => noteIdRef.current,
+        ensureNoteId: () => ensureNoteIdRef.current?.(),
+        requestEmbedUrl,
+      }),
+      // 标题折叠（H1–H3 左侧 chevron 折叠到下一同级标题；走 noteId 维度持久化）
+      HeadingFold.configure({
+        // 必须走 noteIdRef.current，不能闭包捕获 noteId：useEditor 只在 mount 时
+        // 建一次（无依赖数组），<TiptapEditor> 也没有 key={noteId}，所以切换笔记时
+        // 组件实例复用、这两个回调里的 noteId 会永远停在第一次打开那篇的 id ——
+        // 表现就是"从第二篇起点折叠没反应"（折叠态写到了上一篇头上）。
+        // 隔壁 SlashCommand.getNoteId 用的就是 ref，这里当初漏改了。
+        getFolded: () => {
+          const id = noteIdRef.current;
+          if (id == null) return new Set<string>();
+          const arr = useAppStore.getState().notesHeadingFolded[id] ?? [];
+          return new Set(arr);
+        },
+        onToggle: (anchor) => {
+          const id = noteIdRef.current;
+          if (id == null) return;
+          useAppStore.getState().toggleNoteHeadingFold(id, anchor);
+        },
+        maxLevel: 3,
+      }),
+      // 标题自动编号（1 / 1.1 / 1.1.1）。纯显示层：走 Decoration，不写进 doc / .md。
+      // 必须放在 HeadingFold 之后：两者都在 heading 起始位挂 widget，靠 side 值分先后
+      // （chevron -1 挂最左，编号 -0.5 紧随其后）。
+      HeadingNumber.configure({
+        getEnabled: () => useAppStore.getState().editorHeadingNumber,
+        getOptions: () => {
+          const s = useAppStore.getState();
+          return {
+            format: s.editorHeadingNumberFormat,
+            startLevel: s.editorHeadingNumberStartLevel,
+            skipManual: s.editorHeadingNumberSkipManual,
+          };
+        },
+      }),
+      // Markdown 序列化/反序列化：setContent 吃 Markdown，editor.storage.markdown.getMarkdown() 吐 Markdown
+      Markdown.configure({
+        html: true,               // 允许内联 HTML 片段（表格等复杂结构）
+        tightLists: true,         // 紧凑列表
+        bulletListMarker: "-",
+        linkify: true,
+        // 单换行 → <br>。markdown 严格语义（false 时单换行 = 空格）对非技术用户
+        // 反直觉：导入 .md 段内多行内容 / 复制粘贴文本，都会因"换行被吃掉"困惑。
+        // 改 true 后所见即所得（与 Notion / Logseq / GitHub Issue 一致），写回原文件
+        // 时 hard break 序列化为 "  \n"（两空格+换行），下次读取还原相同视觉。
+        breaks: true,
+        transformPastedText: true,
+        // 复制纯文本(text/plain)：tiptap-markdown 的 transformCopiedText 会走 markdown
+        // 序列化（保留有序列表序号 / 紧凑列表），但它对 textStyle(字号/颜色)这类无 markdown
+        // 表示的 mark 在 html:true 下会回退成 raw `<span style=…>` 源码，缩进/对齐也会变
+        // `<p data-indent>` —— 粘到记事本/终端就露出 HTML 源码。这里改 false 交还控制权，
+        // 由下方 editorProps.clipboardTextSerializer 接管：先摘掉可视样式再走同一个 markdown
+        // 序列化器，既保留列表序号好处，纯文本又不含 <span>/<p data-indent> 源码。
+        transformCopiedText: false,
+      }),
+      // 必须放在 Markdown 之后：onBeforeCreate 时依赖 markdown.parser 已初始化
+      AllowFileLink,
+      // 编辑器内查找替换（Ctrl+F / Ctrl+H 浮条由父组件接管）
+      SearchAndReplace,
+    ],
+    content,
+    onCreate: ({ editor }) => {
+      // T-011: 初始内容里如果含 $..$ / $$..$$ 字面量，编辑器创建后立即升级为 math 节点
+      // 用自定义 migrate 而非官方 `migrateMathStrings`：官方只处理单行 $..$ 且会
+      // 错误捕获 $$..$$，参见 migrateOpenMathStrings 文档
+      try {
+        migrateOpenMathStrings(editor);
+      } catch (e) {
+        console.warn("[math] initial migrate failed:", e);
+      }
+      // 给老的没有 id 的 video 节点补 ID（时间戳跳转依赖此 ID 定位视频）
+      try {
+        backfillVideoIds(editor);
+      } catch (e) {
+        console.warn("[video] backfill ids failed:", e);
+      }
+      // 建立 dirty 基线：编辑器加载初始 content（+ math/video 迁移）后的真实序列化输出。
+      // 后续 onUpdate 以此为基准判断是否「实质变化」，避免 NodeView 属性回写 / DB 非定点
+      // 内容归一化被误判为用户编辑（"打开就提示未保存"）。
+      lastEmittedRef.current = getEditorMarkdown(editor);
+    },
+    onUpdate: ({ editor }) => {
+      if (isExternalUpdate.current) return;
+      pendingEditorRef.current = editor;
+      if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = setTimeout(() => {
+        flushTimerRef.current = null;
+        const pending = pendingEditorRef.current;
+        if (pending) {
+          pendingEditorRef.current = null;
+          emitIfChanged(pending);
+        }
+      }, 300);
+    },
+    onBlur: () => {
+      // 失焦立即 flush，避免用户切走 / 点击保存后读到 300ms 之内的旧内容
+      flushNow();
+    },
+    editorProps: {
+      // 自定义「高亮」快捷键：从 store 实时读 accelerator（用户可在设置页改键 / 禁用），
+      // 命中即 toggleHighlight。Tiptap Highlight 内置 Mod-Shift-h 已在扩展层禁用，避免双触发。
+      // getState() 取实时值，无需把 store 值塞进 useEditor 依赖（编辑器只创建一次）。
+      handleKeyDown: (_view, event) => {
+        // 任何键盘输入都意味着"不是从原生右键菜单点的粘贴"（菜单项点击不产生 keydown），
+        // 顺手清掉标记，保证紧随其后的 Ctrl+V 仍走正常的代码块自动识别。
+        nativeMenuPasteRef.current = false;
+        // Ctrl/⌘+Shift+V = 浏览器的「粘贴为纯文本」，同样属于用户显式表达的纯文本意图
+        if (
+          (event.ctrlKey || event.metaKey) &&
+          event.shiftKey &&
+          (event.key === "v" || event.key === "V")
+        ) {
+          plainPasteShortcutRef.current = true;
+        }
+        const accel = useAppStore.getState().editorHighlightShortcut;
+        if (!accel) return false; // 空串 = 用户已禁用高亮快捷键
+        const pressed = keyboardEventToAccel(event);
+        if (pressed && pressed === accel) {
+          editor.chain().focus().toggleHighlight().run();
+          return true;
+        }
+        return false;
+      },
+      // 复制纯文本(text/plain)：输出**真正的纯文字**，不带任何 Markdown 标记。
+      // 用户诉求——从编辑器复制加粗文字，粘到记事本应是「内容」而非「**内容**」。
+      // 之前误用 markdown serializer，导致粗体→`**x**`、斜体→`*x*`、标题→`# x` 露出源码。
+      // 改用 ProseMirror 的 textBetween 直接抽文字，标记全部剥离。
+      // 富文本格式（加粗等）由 text/html 通道承载——粘到 Word/飞书仍识别加粗，两不误。
+      // 仍先经 stripVisualStylesForPlainText 归位缩进/对齐（textBetween 只取文本内容，
+      // 不受节点属性影响，但保留清洗以防未来叶子节点文本表示依赖属性）。
+      //
+      // 🔴 块间分隔**不能**一律用 "\n\n"：3 项列表会变成 "alpha\n\nbravo\n\ncharlie"
+      //    （每项夹一个空行），连续段落也会凭空多出空行 —— 用户两轮反馈的
+      //    「复制粘贴后空行比较多」「笔记内只是换行，复制出来多一行空行」。
+      //    现在默认单换行，只有标题前和紧凑组（列表/表格）边界才空一行；空行主要
+      //    来自用户自己敲的空段落。分隔规则连同标题编号注入一起收敛到
+      //    lib/plainTextClipboard.ts，有一组单测锁着。
+      //
+      // 显式标注 `: string` 返回类型 —— 否则箭头体里读 editor.storage 会让 editor 的
+      // 类型推断陷入自引用环（TS7022/7023）。
+      clipboardTextSerializer: (slice, view): string => {
+        const cleaned = stripVisualStylesForPlainText(slice.content);
+        // leafText: 给图片/公式等叶子节点一个占位文本表示，避免整块丢失
+        const leafText = (leaf: PMNode) => (leaf.type.name === "hardBreak" ? "\n" : "");
+
+        // 标题自动编号是 Decoration，默认复制不走（用户反馈"编号不能随文本一起复制"）。
+        // 这里把编号补进 text/plain：粘到 Word / 记事本 / 微信时编号跟着走。
+        // ⚠️ 只补 text/plain，text/html 通道保持干净 —— 否则在本编辑器内复制粘贴时
+        //    编号会变成正文文字，再被自动编号叠一层（"1 1 标题"）。
+        const labels = collectSelectedHeadingLabels(view);
+        return fragmentToPlainText(cleaned, leafText, labels);
+      },
+      handlePaste: (_view, event) => {
+        // 三种主要场景：
+        //   A. 浏览器复制图片：剪贴板同时有 text/html (<meta><img src=https://...>)
+        //      和 image/png bytes。直接走默认 HTML 路径会渲染远程 src（Tauri WebView
+        //      加载失败 → 破图）；要优先保存 bytes 到本地。
+        //   B. Excel/Word/WPS 复制单元格：剪贴板同时有 HTML（<table>...）和 image/png
+        //      （表格位图截图）。要保留 HTML 让 Tiptap Table 接住，不能走图片分支。
+        //   C. 系统截图工具（如 Snipaste）：纯 image/png 无文本。直接图片分支。
+        //
+        // 区分 A vs B 的启发式：HTML strip 掉所有 <img> 后剩余文本/标签是否仍有"实质"内容
+        const dt = event.clipboardData;
+        const types = Array.from(dt?.types ?? []);
+        const hasText = types.includes("text/html") || types.includes("text/plain");
+        const html = dt?.getData("text/html") ?? "";
+
+        // 用户是否显式要了"纯文本粘贴"（右键菜单的「粘贴为纯文本」/ Ctrl+Shift+V）。
+        // 标记一次性消费：无论本次走哪个分支，用完即清，不残留到下一次粘贴。
+        const explicitPlainPaste =
+          nativeMenuPasteRef.current || plainPasteShortcutRef.current;
+        nativeMenuPasteRef.current = false;
+        plainPasteShortcutRef.current = false;
+
+        // 视频永远优先（视频文件不会和富文本混合）
+        const videos = collectVideoFiles(dt);
+        if (videos.length > 0) {
+          handleVideoFiles(videos, editor, VIDEO_MAX_PASTE_BYTES);
+          return true;
+        }
+
+        const images = collectImageFiles(dt);
+        if (images.length > 0) {
+          // 场景 C：纯图片
+          if (!hasText) {
+            handleImageFiles(images, editor);
+            return true;
+          }
+          // 场景 A：HTML 实际只是包裹一个/多个 img（浏览器复制图片）
+          if (isImageOnlyHtml(html)) {
+            handleImageFiles(images, editor);
+            return true;
+          }
+          // 场景 B：富文本 + 图片（Excel 表格等）→ 让 ProseMirror 走 HTML 路径
+        }
+
+        // 场景 D：图文混合（HTML 含 <img>，但不属于 A/B/C）。
+        // 典型来源：浏览器复制带多张图的整段、Notion / 飞书 / 钉钉富文本片段。
+        // ProseMirror 默认 HTML 路径会保留远程 src，Tauri WebView 大概率拉不到 →
+        // 用户体验"图片消失"。这里异步抓远程图存本地后再插入。
+        if (html && /<img[^>]/i.test(html)) {
+          void (async () => {
+            try {
+              const { html: localized, ok, failed, total } =
+                await localizeHtmlImages(html);
+              editor.chain().focus().insertContent(localized).run();
+              if (failed > 0) {
+                message.warning(
+                  `粘贴完成：${ok}/${total} 张图已保存到本地，${failed} 张无法访问已移除`,
+                );
+              } else if (ok > 0) {
+                message.success(`已粘贴并保存 ${ok} 张图到本地`);
+              }
+            } catch (e) {
+              message.error(`粘贴处理失败：${e}`);
+            }
+          })();
+          return true;
+        }
+
+        // 场景 E：纯文本 Markdown 里带远程图片 `![](http...)`。tiptap-markdown 会把它
+        // 转成 <img src=远程URL> 再交给 ProseMirror → 文档里出现 src 仍是远程地址的图片节点，
+        // Tauri WebView 加载不了（CSP / 防盗链）→ 破图且不落本地。这里不拦截（仍走默认插入），
+        // 下一拍把这些远程图抓回本地、改写 src 为 kb-asset://。
+        const plainText = dt?.getData("text/plain") ?? "";
+        const isMarkdownImageText = /!\[[^\]]*\]\(\s*(https?:\/\/|data:image\/)/i.test(
+          plainText,
+        );
+        if (isMarkdownImageText) {
+          setTimeout(() => {
+            void localizeRemoteImagesInEditor(editor);
+          }, 0);
+          // 注意：不 return，继续走 ProseMirror 默认逻辑把 markdown 解析插入
+        }
+
+        // 场景 F：纯文本代码 → 包成代码块，绕开 markdown 往返。
+        // 背景：笔记以 Markdown 存储，纯文本代码当普通文本粘贴时，4 空格缩进会被 CommonMark
+        // 当成缩进代码块、行首 `*` 当成列表 —— 保存往返后一段被拆成"代码+文本+代码"。
+        // 终端日志同理：`*x*` 变斜体、`\---/` 的反斜杠被当转义吃掉、ASCII 对齐的连续
+        // 空格渲染时折叠，粘完当场就坏（判定细节见 lib/pasteCodeHeuristic.ts）。
+        // 触发条件（保守，防误伤）：设置开启 + 剪贴板无富文本 HTML（有 HTML 说明是富文本粘贴，
+        // 尊重原格式）+ 不是 markdown 图片文本 + 启发式判定像代码 +
+        // 用户没有显式要求纯文本粘贴（显式意图永远压过启发式猜测，见 explicitPlainPaste 注释）。
+        if (
+          useAppStore.getState().pasteCodeAsBlock &&
+          !explicitPlainPaste &&
+          !html.trim() &&
+          !isMarkdownImageText &&
+          plainText.trim().length > 0 &&
+          looksLikeCode(plainText)
+        ) {
+          // 归一化换行 + 去掉整体尾部空白，避免代码块末尾多一空行
+          const code = plainText.replace(/\r\n?/g, "\n").replace(/\s+$/, "");
+          const language = detectCodeLanguage(code);
+          editor
+            .chain()
+            .focus()
+            .insertContent({
+              type: "codeBlock",
+              attrs: { language },
+              content: [{ type: "text", text: code }],
+            })
+            .run();
+          message.success({
+            content: "已识别为代码并粘贴为代码块（Ctrl+Z 撤销）",
+            duration: 2,
+          });
+          return true;
+        }
+
+        // 场景 G：Windows 本地/UNC 路径 → 字面插入，绕开 Markdown 解析。
+        // 不这么做的话 `transformPastedText` 会把路径当 Markdown 解析，`\` + ASCII 标点
+        // 被当转义序列吃掉（`D:\111\.vscode` → `D:\111.vscode`），详见 isWindowsPathText。
+        // 上面场景 F 的代码块兜底救不了它：looksLikeCode 对单行文本直接判否，多行路径
+        // 列表也既无缩进也无代码 token，同样判否。
+        if (!html.trim() && isWindowsPathText(plainText)) {
+          // 多行路径列表用 hardBreak 分行，与编辑器 breaks:true 下其它多行粘贴表现一致
+          const lines = plainText
+            .replace(/\r\n?/g, "\n")
+            .replace(/\s+$/, "")
+            .split("\n");
+          const content: JSONContent[] = [];
+          lines.forEach((line, i) => {
+            if (i > 0) content.push({ type: "hardBreak" });
+            if (line.length > 0) content.push({ type: "text", text: line });
+          });
+          editor.chain().focus().insertContent(content).run();
+          return true;
+        }
+
+        return false;
+      },
+      // Why 不用 editorProps.handleDrop：ProseMirror 内部 editHandlers.drop 在调用
+      // handleDrop 前会先 view.posAtCoords(...)，drop 落在编辑器空白/底部 padding 等
+      // 无法 resolve 出 doc position 的位置时直接 return，handleDrop 永远不被调用。
+      // 改走 handleDOMEvents.drop（plugin 层 DOM 监听，先于 editHandlers 触发，
+      // 不依赖 posAtCoords 的成功）。返回 true 即拦截，editHandlers 不再处理。
+      //
+      // 仅处理 OS 外部文件拖入（DataTransfer.types 含 "Files"），ProseMirror 节点内部
+      // 拖拽（view.dragging 非空）原样放行给 editHandlers，保持原有节点重排行为。
+      handleDOMEvents: {
+        // 右键：判断接下来会不会弹 WebView 原生菜单。
+        // useEditorContextMenu 挂在同一个 DOM 上的 capture 监听会对图片 / 双链 / 附件等节点
+        // preventDefault 并弹自定义菜单——那种情况不会有原生菜单，也就不会有菜单里的粘贴。
+        // 此处是冒泡阶段（PM 的 handleDOMEvents 非 capture），能读到 capture 阶段的处理结果。
+        contextmenu: (_view, event) => {
+          nativeMenuPasteRef.current = !event.defaultPrevented;
+          return false; // 只做标记，不干预菜单本身
+        },
+        // 左键点击（关掉菜单 / 移动光标）说明用户没在原生菜单里选粘贴，清标记
+        mousedown: () => {
+          nativeMenuPasteRef.current = false;
+          return false;
+        },
+        drop: (view, event) => {
+          const dt = (event as DragEvent).dataTransfer;
+          console.log("[pm-drop] handleDOMEvents.drop fired",
+            "types=", dt ? Array.from(dt.types) : null,
+            "files=", dt?.files?.length ?? 0,
+            "view.dragging=", !!view.dragging);
+          if (!dt) return false;
+          const types = Array.from(dt.types ?? []);
+
+          // ── 从左侧目录树（NotesPanel）拖入一篇笔记 → 在落点插入 wiki 链接 [[标题|ID]] ──
+          // 拖源在 onDragStart 写入自定义 mime "application/x-kb-note"；与 OS 文件拖入
+          // （types 含 "Files"）、ProseMirror 内部节点拖拽（view.dragging 非空）互不干扰。
+          // 用 [[标题|ID]] 锚点形式：保存时 extractWikiLinks 直接取 ID 建反链，改名不失效。
+          if (types.includes("application/x-kb-note") && !view.dragging) {
+            event.preventDefault();
+            try {
+              const raw = dt.getData("application/x-kb-note");
+              const { id, title } = JSON.parse(raw) as { id: number; title: string };
+              if (!Number.isFinite(id)) return true;
+              const safeTitle = (title || "未命名").trim();
+              // 落点像素坐标 → doc position；落在无法解析的空白/padding 处回退到当前选区
+              const de = event as DragEvent;
+              const coords = view.posAtCoords({ left: de.clientX, top: de.clientY });
+              const pos = coords ? coords.pos : view.state.selection.from;
+              editor
+                .chain()
+                .focus()
+                .insertContentAt(pos, `[[${safeTitle}|${id}]] `)
+                .run();
+            } catch (e) {
+              message.error(`插入链接失败：${e}`);
+            }
+            return true;
+          }
+
+          const isOsFileDrop = types.includes("Files");
+          if (!isOsFileDrop || view.dragging) return false;
+
+          const videos = collectVideoFiles(dt);
+          if (videos.length > 0) {
+            event.preventDefault();
+            handleVideoFiles(videos, editor, VIDEO_MAX_DROP_BYTES);
+            return true;
+          }
+          const images = collectImageFiles(dt);
+          if (images.length > 0) {
+            event.preventDefault();
+            handleImageFiles(images, editor);
+            return true;
+          }
+          const texts = collectTextFiles(dt);
+          if (texts.length > 0) {
+            event.preventDefault();
+            handleTextFiles(texts, editor);
+            return true;
+          }
+          const { files: attachments, blocked } = collectAttachmentFiles(dt);
+          if (blocked.length > 0) {
+            message.warning(
+              `已拦截 ${blocked.length} 个可执行/脚本文件（禁止作为附件）`,
+            );
+          }
+          if (attachments.length > 0) {
+            event.preventDefault();
+            handleAttachmentFiles(attachments, editor);
+            return true;
+          }
+          return false;
+        },
+      },
+    },
+  });
+
+  // 资产渲染拦截：笔记 content 里的 <img>/<video> src 是 `kb-asset://<rel>`，
+  // 浏览器看不懂这种协议，需要在 DOM 阶段替换为可显示 URL。
+  //
+  // 三条分支：
+  //   A. `kb-asset://<rel>` 且 rel 以 .enc 结尾   → 加密图，invoke get_image_blob → Blob URL
+  //   B. `kb-asset://<rel>` 普通明文            → resolveAssetSrc → http://asset.localhost/...
+  //   C. 旧 `asset://...xxx.png.enc`（迁移前历史） → 走加密分支兼容
+  //
+  // ProseMirror state 里 attrs.src 永远是 `kb-asset://...`，所以 getHTML/serialize
+  // 输出的 markdown 与 DB 里的一致；只有 DOM 上的 src 被替换成可视 URL。
+  // 阅读模式同步：readingMode 变化时调 editor.setEditable，避免重建实例
+  useEffect(() => {
+    if (!editor) return;
+    editor.setEditable(!readingMode);
+  }, [editor, readingMode]);
+
+  // 替换后 mutation 再次触发但识别不到 kb-asset:// → 自然终止，不会死循环。
+  const dataDir = useAppStore((s) => s.instanceInfo?.dataDir ?? null);
+  useEffect(() => {
+    if (!editor) return;
+    const dom = editor.view.dom as HTMLElement;
+    // 单 editor 实例内复用 Blob URL，避免重复 invoke + 重复创建
+    const blobCache = new Map<string, string>();
+    // 老形态本地路径的兜底解析缓存：原始 src → 可显示 URL（null = 解不了，别再问后端）。
+    // MutationObserver 每次 DOM 变动都会重扫，没有这层缓存会对同一张裂图反复发 IPC。
+    const foreignCache = new Map<string, string | null>();
+
+    /** 历史 asset URL → .enc 文件本地绝对路径（兼容未跑 Step 4 迁移的存量笔记） */
+    const extractLegacyEncPath = (src: string): string | null => {
+      if (!src) return null;
+      let encoded = src;
+      if (encoded.startsWith("http://asset.localhost/")) {
+        encoded = encoded.slice("http://asset.localhost/".length);
+      } else if (encoded.startsWith("asset://localhost/")) {
+        encoded = encoded.slice("asset://localhost/".length);
+      } else {
+        return null;
+      }
+      let decoded: string;
+      try {
+        decoded = decodeURIComponent(encoded);
+      } catch {
+        return null;
+      }
+      return decoded.endsWith(".enc") ? decoded : null;
+    };
+
+    /**
+     * 写 src 前先比对当前值，相同就不写。
+     *
+     * `setAttribute` 即使写入**相同的值**也会产生 MutationObserver record（规范如此，
+     * 不做值比较）。而本 observer 的回调里又会改 src —— 少了这道比对，
+     * 任何"解析结果 == 原值"的情况都会变成无限自我触发（v1.50.0 mac 卡死事故）。
+     */
+    const setSrcIfChanged = (el: HTMLElement, next: string) => {
+      if (el.getAttribute("src") !== next) el.setAttribute("src", next);
+    };
+
+    /** 走 Blob URL 通道（加密图共用）。`pathArg` 是后端能直接读的路径（相对 OR 绝对） */
+    const applyBlob = async (el: HTMLElement, pathArg: string) => {
+      const cached = blobCache.get(pathArg);
+      if (cached) {
+        if ((el as HTMLImageElement).src !== cached) (el as HTMLImageElement).src = cached;
+        return;
+      }
+      try {
+        const bytes = await imageApi.getBlob(pathArg);
+        const blob = new Blob([bytes as BlobPart]);
+        const url = URL.createObjectURL(blob);
+        blobCache.set(pathArg, url);
+        (el as HTMLImageElement).src = url;
+      } catch (e) {
+        console.warn("[asset-resolve] 解密失败:", pathArg, e);
+      }
+    };
+
+    /**
+     * 兜底解析：src 是老形态的**本地路径**（`file:///E:/…`、裸绝对路径、
+     * 迁移前的 asset 协议）时，问后端要一个本机可用的相对路径再按 kb-asset 流程渲染。
+     *
+     * 为什么需要：v54 迁移会把 content 里的老路径清洗成 `kb-asset://`，但这些内容仍会
+     * 从别处回流 —— 从旧版本客户端同步下来的笔记、外部导入的 Markdown、
+     * 用户手贴的 HTML。它们带的是**另一台机器**的绝对路径，直接交给 WebView 必定裂图。
+     *
+     * 后端只在本机确实存在该文件时才返回相对路径（否则 null），所以"文件真丢了"
+     * 不会被伪装成能显示的样子。
+     */
+    const applyForeignPath = async (el: HTMLElement, src: string) => {
+      const cached = foreignCache.get(src);
+      if (cached !== undefined) {
+        if (cached) setSrcIfChanged(el, cached);
+        return;
+      }
+      try {
+        const rel = await systemApi.resolveContentAssetRel(src);
+        if (!rel) {
+          foreignCache.set(src, null); // 记住"解不了"，避免每次 mutation 重复 IPC
+          return;
+        }
+        const next = rel.endsWith(".enc")
+          ? null // 加密资产走 Blob 通道，不能用 asset 协议直出
+          : resolveAssetSrc(toKbAsset(rel), dataDir);
+        if (next) {
+          foreignCache.set(src, next);
+          setSrcIfChanged(el, next);
+        } else {
+          foreignCache.set(src, null);
+          void applyBlob(el, rel);
+        }
+      } catch (e) {
+        foreignCache.set(src, null);
+        console.warn("[asset-resolve] 老路径兜底解析失败:", src, e);
+      }
+    };
+
+    const processEl = (el: HTMLElement) => {
+      const src = el.getAttribute("src") ?? "";
+      if (!src || src.startsWith("blob:")) return;
+
+      const rel = parseKbAsset(src);
+      if (rel) {
+        // 新格式 kb-asset://
+        if (rel.endsWith(".enc")) {
+          void applyBlob(el, rel); // 后端 get_image_blob 已能接受相对路径
+        } else if (dataDir) {
+          setSrcIfChanged(el, resolveAssetSrc(src, dataDir));
+        }
+        return;
+      }
+
+      // 兼容老格式：未跑迁移的笔记 src 仍是 asset://...xxx.enc
+      const legacy = extractLegacyEncPath(src);
+      if (legacy) {
+        void applyBlob(el, legacy);
+        return;
+      }
+
+      // 老形态本地路径（file:// / 裸绝对路径）→ 走后端兜底解析。
+      // 其余一切（各平台的运行期 asset URL、外链、data:/blob:）都不碰 ——
+      // 判定用白名单式的 needsLegacyPathResolve，绝不能改回「枚举要跳过的协议」的
+      // 黑名单写法：mac 的 asset URL 是 `asset://localhost/`、Windows 是
+      // `http://asset.localhost/`，漏掉任何一种都会让 observer 自我触发死循环。
+      if (needsLegacyPathResolve(src)) {
+        void applyForeignPath(el, src);
+      }
+    };
+
+    const scanAll = () => {
+      dom.querySelectorAll("img, video").forEach((el) => processEl(el as HTMLElement));
+    };
+
+    scanAll();
+
+    const observer = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        if (m.type === "childList") {
+          m.addedNodes.forEach((node) => {
+            if (node instanceof HTMLImageElement || node instanceof HTMLVideoElement) {
+              processEl(node);
+            } else if (node instanceof HTMLElement) {
+              node.querySelectorAll("img, video").forEach((el) => processEl(el as HTMLElement));
+            }
+          });
+        } else if (
+          m.type === "attributes" &&
+          m.attributeName === "src" &&
+          (m.target instanceof HTMLImageElement || m.target instanceof HTMLVideoElement)
+        ) {
+          processEl(m.target);
+        }
+      }
+    });
+    observer.observe(dom, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["src"],
+    });
+
+    return () => {
+      observer.disconnect();
+      blobCache.forEach((url) => URL.revokeObjectURL(url));
+      blobCache.clear();
+    };
+  }, [editor, dataDir]);
+
+  // 拦截编辑器内链接点击 → 分发给系统对应程序：
+  //   file:// / 本地绝对路径 → openPath（系统默认程序打开 PDF/DOC/视频等）
+  //   http(s) / mailto      → openUrl（系统默认浏览器/邮箱）
+  //
+  // SafeLink 把 link mark 渲染成 <span data-href="..." role="link"> 而非 <a>，
+  // 完全避开 Tauri WebView 对 anchor 的 navigation 旁路（tauri-apps/tauri#2791）。
+  // 这里通过 [data-href] 选择器拿到真实 URL 再分发。
+  useEffect(() => {
+    if (!editor) return;
+    const dom = editor.view.dom as HTMLElement;
+    const handler = (ev: MouseEvent) => {
+      if (ev.type === "auxclick" && ev.button !== 1) return;
+      const target = ev.target as HTMLElement | null;
+      // 优先 SafeLink 渲染的 [data-href]；兜底 anchor[href]（兼容旧节点 / wikilink）
+      const linkEl = target?.closest("[data-href], a[href]") as HTMLElement | null;
+      if (!linkEl) return;
+      const href =
+        linkEl.getAttribute("data-href") || linkEl.getAttribute("href") || "";
+      if (!href || href.startsWith("#") || href === "javascript:void(0)") return;
+
+      ev.preventDefault();
+      ev.stopPropagation();
+
+      if (href.startsWith(KB_ASSET_SCHEME)) {
+        // 新格式：kb-asset://<rel>
+        // 可预览类型（Word/Excel/PDF/文本/代码）→ 调出全局预览 Modal；
+        // 其它（zip/mp3/exe 等）→ 用 OS 系统程序打开。
+        const rel = parseKbAsset(href) ?? "";
+        if (isPreviewableAttachment(rel)) {
+          // 文件名优先用链接文本（用户可能改名），fallback 取 rel 最后一段
+          const linkText = linkEl.textContent?.trim() ?? "";
+          const fileName =
+            linkText || rel.split("/").pop() || rel.split("\\").pop() || rel;
+          useAttachmentPreviewStore.getState().open({ rel, fileName });
+        } else {
+          void systemApi
+            .resolveAssetAbsolute(rel)
+            .then((abs) => openPath(abs))
+            .catch((e) => {
+              message.error(`打开附件失败: ${e}`);
+            });
+        }
+      } else if (href.startsWith("file://")) {
+        // 旧格式：迁移 SQL 跑完后历史链接已被替换；这里保留兜底兼容未迁移的笔记
+        const path = fileUrlToPath(href);
+        void openPath(path).catch((e) => {
+          message.error(`打开附件失败: ${e}`);
+        });
+      } else if (/^https?:\/\//i.test(href) || href.startsWith("mailto:") || href.startsWith("tel:")) {
+        void openUrl(href).catch((e) => {
+          message.error(`打开链接失败: ${e}`);
+        });
+      } else {
+        void openPath(href).catch((e) => {
+          message.error(`打开失败: ${e}`);
+        });
+      }
+    };
+    dom.addEventListener("click", handler, true);
+    dom.addEventListener("auxclick", handler, true);
+    return () => {
+      dom.removeEventListener("click", handler, true);
+      dom.removeEventListener("auxclick", handler, true);
+    };
+  }, [editor]);
+
+  /**
+   * 每篇笔记的编辑态快照：切走时存下整份 EditorState（doc + 撤销历史 + 光标），切回来且
+   * 正文没被外部动过时原样还原 —— 撤销历史因此**跟着笔记走**，「在 A 改几笔 → 去 B →
+   * 回 A → Ctrl+Z」照样能撤销 A 里的编辑，而不会像共享一条历史那样把 B 的内容搅进来。
+   *
+   * 为什么要连 markdown 指纹一起存：切回来时正文是父组件重新从 DB / 草稿取的，若这期间
+   * 笔记被外部编辑、同步覆盖或加解密过，快照里的撤销步骤对应的是**另一份 doc**，套上去
+   * 位置全错、正文会乱 —— 那正是原 bug 的危害形式。指纹对不上就丢弃快照，降级成
+   * resetEditorHistory 的安全行为。
+   */
+  const noteStateCacheRef = useRef<
+    Map<number, { state: EditorState; markdown: string }>
+  >(new Map());
+
+  // 切换笔记：先把上一篇的编辑态存档，再把历史清干净等新正文进来。
+  //
+  // 为什么清历史不能只靠下面那个 content effect：noteId 来自路由参数、瞬时就变，content
+  // 要等 noteApi.get 回来才变，两者不同步；而且两篇笔记内容恰好相同时（例如都还空着）
+  // 根本不会走 setContent 分支，历史就没人清。这里按 ID 兜住，下面按内容再兜一次。
+  //
+  // 只处理「有效 ID → 另一个有效 ID」：日记首次建档是 undefined → id，那是同一篇文档，
+  // 此刻用户可能已经写了几行，既不该存档也不该清他的撤销历史。
+  const prevNoteIdRef = useRef(noteId);
+  useEffect(() => {
+    const prev = prevNoteIdRef.current;
+    prevNoteIdRef.current = noteId;
+    if (!editor || prev == null || noteId == null || prev === noteId) return;
+    const cache = noteStateCacheRef.current;
+    // 先删再设：让 Map 的插入顺序等于 LRU 顺序，淘汰时取 keys() 的第一个即最久未用
+    cache.delete(prev);
+    cache.set(prev, { state: editor.state, markdown: getEditorMarkdown(editor) });
+    while (cache.size > NOTE_STATE_CACHE_MAX) {
+      const oldest = cache.keys().next().value;
+      if (oldest === undefined) break;
+      cache.delete(oldest);
+    }
+    resetEditorHistory(editor);
+  }, [noteId, editor]);
+
+  // 外部 content 变化时同步（如初次加载 / 切换笔记 / 外部文件更新 / 加解密后重载）
+  useEffect(() => {
+    if (!editor) return;
+    // 传进来的正是我们最后上报出去的那份 → 这只是自己 onChange 的回声，不是外部替换，跳过。
+    // onChange 有 300ms 防抖，用户在「防抖到期 → 父组件回传」这一小段里继续打字时，回传的
+    // 旧 content 会与编辑器现状不等，若不拦就会 setContent 把刚敲的字回灌掉（内容闪回 +
+    // 光标跳位）。
+    if (content === lastEmittedRef.current) return;
+    const current = getEditorMarkdown(editor);
+    if (content !== current) {
+      if (noteId != null) {
+        // 切回一篇存过档、且正文与切走时逐字一致的笔记 → 整份 state 还原（连撤销历史和
+        // 光标一起回来），不必重新解析 markdown。用完即弃：下次切走会重新存一份新的。
+        const cached = noteStateCacheRef.current.get(noteId);
+        if (cached && cached.markdown === content) {
+          noteStateCacheRef.current.delete(noteId);
+          // updateState 不经 dispatchTransaction，不触发 onUpdate，无需 isExternalUpdate 保护
+          // 插件集合必须对齐当前存活的那套：快照里可能带着已随阅读模式卸载的伪选区插件，
+          // 原样还原会让它「复活」，之后切回编辑模式重复注册同 key 插件直接抛错
+          editor.view.updateState(
+            alignSnapshotPlugins(cached.state, editor.state.plugins),
+          );
+          lastEmittedRef.current = content;
+          return;
+        }
+      }
+      isExternalUpdate.current = true;
+      editor.commands.setContent(content, { emitUpdate: false });
+      // T-011: 把刚 setContent 进来的 markdown 里的 $..$ / $$..$$ 升级成 math 节点
+      // tiptap-markdown 解析后是普通文本，自定义 migrate 同时处理行内 + 多行块级
+      try {
+        migrateOpenMathStrings(editor);
+      } catch (e) {
+        console.warn("[math] migrate failed:", e);
+      }
+      // 代码块 fence info 拆分：``` python title="X" wrap``` → language="python" + title="X" + wrap
+      // tiptap-markdown 默认把整段 info 当 language 塞进来，这里恢复正确的 attr 分布
+      try {
+        normalizeCodeBlockFenceAttrs(editor);
+      } catch (e) {
+        console.warn("[codeBlock] normalize fence attrs failed:", e);
+      }
+      isExternalUpdate.current = false;
+      // 重置 dirty 基线为「本次外部内容加载后的真实序列化输出」（切换笔记 / 外部更新）。
+      // 与 onCreate 同理：DB 内容若非序列化定点，这里记录归一化结果，避免随后的
+      // NodeView 属性回写触发 onUpdate 时被误判为用户编辑。
+      lastEmittedRef.current = getEditorMarkdown(editor);
+      // 整篇正文刚被换掉：清空撤销历史，否则 Ctrl+Z 会撤销掉「这次替换」本身，
+      // 把上一篇的内容倒灌进当前笔记（见 resetEditorHistory）。必须放在 setContent 和
+      // 两个 migrate 之后 —— 它们各自也会产生事务。
+      resetEditorHistory(editor);
+    }
+  }, [content, editor]);
+
+  // unmount 时强制 flush 防抖中的最后一次编辑，避免切 tab / 跳转时丢失末尾未传给父组件的内容
+  useEffect(() => {
+    return () => {
+      flushNow();
+    };
+  }, [flushNow]);
+
+  const { token } = antdTheme.useToken();
+
+  // 右键双链 →「修改链接」：记住待改双链的范围，弹选择器换目标笔记
+  const [editingWikiLink, setEditingWikiLink] = useState<WikiLinkRange | null>(
+    null,
+  );
+
+  // 编辑器节点右键菜单：图片/视频/附件/wiki 链接的自定义右键操作；
+  // 普通文本继续走浏览器原生剪切/复制/粘贴菜单
+  const { ctx: nodeCtxMenu, menuItems: nodeMenuItems } = useEditorContextMenu(
+    editor,
+    noteId,
+    setEditingWikiLink,
+  );
+
+  /**
+   * 用选中的新目标替换整段 `[[旧标题]]`。
+   *
+   * 一律写成带 ID 锚点的 `[[标题|123]]`：手敲形式没有锚点，目标笔记改名就断链；
+   * 这里既然已经拿到了 id，就顺手把链接升级成稳定形式。
+   */
+  function applyWikiLinkEdit(title: string, id: number) {
+    const range = editingWikiLink;
+    setEditingWikiLink(null);
+    if (!editor || !range) return;
+    editor
+      .chain()
+      .focus()
+      .insertContentAt({ from: range.from, to: range.to }, `[[${title}|${id}]]`)
+      .run();
+    message.success(`已改为链接到「${title}」`);
+  }
+
+  // ─── 查找替换浮条状态（Ctrl+F / Ctrl+H 触发） ───
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchShowReplace, setSearchShowReplace] = useState(false);
+
+  // 外部预填查询词（搜索结果跳转进来）：编辑器就绪后自动展开查找浮条。
+  // 只依赖 [initialSearch, editor]——不挂 content，避免用户编辑导致 content 变化
+  // 重跑 effect、把用户已关掉的浮条又弹出来。命中定位由浮条内 pendingJump 负责
+  // 等内容灌入（stats.total>0）后再滚，时序天然安全。
+  useEffect(() => {
+    if (initialSearch && editor) {
+      setSearchShowReplace(false);
+      setSearchOpen(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialSearch, editor]);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  // 在 window 上挂 keydown：编辑器一旦 mount 就能响应 Ctrl+F / Ctrl+H，
+  // 不再要求光标先点进正文（修复"打开笔记后必须先点文档才能搜索"的体验问题）。
+  // 多 TiptapEditor 同时挂载的场景（如设置弹窗的模板编辑器）：
+  //   - 用 offsetParent 过滤掉隐藏/未挂入 DOM 的 wrapper
+  //   - 若事件焦点在「另一个 tiptap-wrapper」内，让它自己处理，不抢
+  // 浮条 input 自己处理 Esc / Enter / Shift+Enter，无需在这里再加。
+  useEffect(() => {
+    if (!editor) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      const wrap = wrapperRef.current;
+      if (!wrap || wrap.offsetParent === null) return;
+      const target = e.target as HTMLElement | null;
+      const otherWrap = target?.closest(".tiptap-wrapper");
+      if (otherWrap && otherWrap !== wrap) return;
+
+      if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) {
+        e.preventDefault();
+        e.stopPropagation();
+        setSearchShowReplace(false);
+        setSearchOpen(true);
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === "h" || e.key === "H")) {
+        e.preventDefault();
+        e.stopPropagation();
+        setSearchShowReplace(true);
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [editor]);
+
+  // 编辑器统计信息：打字时不实时算，停顿 300ms 后再遍历整篇。
+  // 算法与右上角 EditorStats 共用 src/lib/textStats.ts，确保两处数字永远一致。
+  const [stats, setStats] = useState({ chars: 0, words: 0, readingTime: "< 1 min" });
+  useEffect(() => {
+    if (!editor) {
+      setStats({ chars: 0, words: 0, readingTime: "< 1 min" });
+      return;
+    }
+    const timer = setTimeout(() => {
+      const s = calcEditorStats(editor);
+      setStats({
+        chars: s.chars,
+        words: s.words,
+        readingTime: `${s.readMinutes} min`,
+      });
+    }, 300);
+    return () => clearTimeout(timer);
+    // 依赖 content prop：父组件在 onChange 后会更新 content，
+    // 这反过来表示编辑器内容刚刚变过，此时触发一次 debounced 重算即可。
+  }, [editor, content]);
+
+  // 上抛 editor 实例给父组件（外挂大纲面板、调试用），unmount 时传 null 让父侧能解绑
+  useEffect(() => {
+    if (!onEditorReady) return;
+    onEditorReady(editor);
+    return () => onEditorReady(null);
+  }, [editor, onEditorReady]);
+
+  // HeadingFold：当用户点 chevron 改变折叠集合时，dispatch 一个 meta 让 plugin 重算装饰
+  // （editor 的扩展 options.getFolded 总是读最新 store，但 plugin state 不会自动重算
+  //   除非有 tx 经过；这里 subscribe zustand 让 store 变化主动驱动一次重算）
+  const foldedForThisNote = useAppStore((s) =>
+    noteId != null ? s.notesHeadingFolded[noteId] : undefined,
+  );
+  useEffect(() => {
+    if (!editor || noteId == null) return;
+    editor.view.dispatch(
+      editor.view.state.tr.setMeta(HEADING_FOLD_KEY, HEADING_FOLD_REFRESH),
+    );
+  }, [editor, noteId, foldedForThisNote]);
+
+  // HeadingNumber：同理——扩展 options 读的是最新 store，但 plugin state 要有 tx 才重算，
+  // 所以设置页改「编号开关 / 格式 / 起始层级 / 跳过手写编号」时主动推一条 meta。
+  const headingNumberOn = useAppStore((s) => s.editorHeadingNumber);
+  const headingNumberFormat = useAppStore((s) => s.editorHeadingNumberFormat);
+  const headingNumberStartLevel = useAppStore((s) => s.editorHeadingNumberStartLevel);
+  const headingNumberSkipManual = useAppStore((s) => s.editorHeadingNumberSkipManual);
+  useEffect(() => {
+    if (!editor) return;
+    editor.view.dispatch(
+      editor.view.state.tr.setMeta(HEADING_NUMBER_KEY, HEADING_NUMBER_REFRESH),
+    );
+  }, [
+    editor,
+    headingNumberOn,
+    headingNumberFormat,
+    headingNumberStartLevel,
+    headingNumberSkipManual,
+  ]);
+
+  if (!editor) return null;
+
+  return (
+    <div ref={wrapperRef} className="tiptap-wrapper" style={{ position: "relative" }}>
+      {/* 阅读模式下隐藏工具栏与 AI 划词条；selection / 复制 / 滚动均正常 */}
+      {!readingMode && (
+        <>
+          <EditorToolbar
+            editor={editor}
+            noteId={noteId}
+            ensureNoteId={ensureNoteId}
+            onOpenSearch={() => {
+              setSearchShowReplace(false);
+              setSearchOpen(true);
+            }}
+          />
+          {/* 「问 AI 这段」与续写/总结/改写等：钉在 EditorToolbar 正下方的次级 sticky bar。
+              位置完全静态，跟豆包/划词翻译这类系统级浮窗物理错开（它们贴选区，咱贴顶部）。
+              选区状态控制可见性，无选区时 max-height:0 折叠，有选区时滑下来。 */}
+          <AiWriteMenu editor={editor} onAskAi={onAskAi} />
+        </>
+      )}
+      {/* 查找替换浮条（Ctrl+F / Ctrl+H 触发；Esc 关闭）。
+          放在 EditorContent 之前：内部用 sticky 0 高度容器吸顶，
+          需位于滚动内容流顶部才能在长文档里始终停在视区右上角不被滚走。 */}
+      <SearchReplaceBar
+        editor={editor}
+        open={searchOpen}
+        showReplace={searchShowReplace}
+        onClose={() => setSearchOpen(false)}
+        initialQuery={initialSearch}
+      />
+      <EditorContent editor={editor} className="tiptap-content" />
+      {/* 图片双击放大：事件委托覆盖正文 / 表格 / figure 内所有图片 */}
+      <ImageLightbox containerRef={wrapperRef} />
+      {/* 表格浮动菜单：光标在 table 内时在表格上方显示加列/加行/删列/删行/合并/拆分/删表 */}
+      <TableBubbleMenu editor={editor} />
+      {/* 斜杠菜单"嵌入网络视频"项的 URL 输入弹窗。
+          确认走 closeEmbedSlash(url)，取消走 closeEmbedSlash(null)；
+          实际解析与节点插入由 slashCommandItems 内的 command 完成。 */}
+      <Modal
+        title="嵌入网络视频"
+        open={embedSlashOpen}
+        onOk={() => closeEmbedSlash(embedSlashUrl.trim() || null)}
+        onCancel={() => closeEmbedSlash(null)}
+        okText="嵌入"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <div className="space-y-2">
+          <Input
+            autoFocus
+            value={embedSlashUrl}
+            onChange={(e) => setEmbedSlashUrl(e.target.value)}
+            onPressEnter={() => closeEmbedSlash(embedSlashUrl.trim() || null)}
+            placeholder="粘贴 B 站 / YouTube / 腾讯 / 优酷 视频链接"
+          />
+          <div className="text-xs" style={{ color: token.colorTextTertiary }}>
+            支持：{SUPPORTED_PROVIDERS}
+          </div>
+        </div>
+      </Modal>
+      {showFooterStats && (
+        <div
+          className="flex items-center gap-4 px-3 pt-4 pb-3 text-xs"
+          style={{ color: token.colorTextTertiary }}
+        >
+          <span>{stats.words} 字</span>
+          <span>{stats.chars} 字符</span>
+          <span>{stats.readingTime} 阅读</span>
+        </div>
+      )}
+
+      {/* 节点级右键菜单（图片/视频/附件/wiki 链接） */}
+      <ContextMenuOverlay
+        open={!!nodeCtxMenu.state.payload}
+        x={nodeCtxMenu.state.x}
+        y={nodeCtxMenu.state.y}
+        items={nodeMenuItems}
+        onClose={nodeCtxMenu.close}
+      />
+
+      {/* 右键双链 →「修改链接」的目标选择器 */}
+      <WikiLinkEditModal
+        open={!!editingWikiLink}
+        currentTitle={editingWikiLink?.title ?? ""}
+        onSubmit={applyWikiLinkEdit}
+        onCancel={() => setEditingWikiLink(null)}
+      />
+    </div>
+  );
+}

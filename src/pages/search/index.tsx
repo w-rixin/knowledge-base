@@ -1,0 +1,688 @@
+import { useState, useRef, useEffect, useMemo } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import {
+  Input,
+  Button,
+  Typography,
+  Empty,
+  Spin,
+  Segmented,
+  TreeSelect,
+  Select,
+  DatePicker,
+  Checkbox,
+  theme as antdTheme,
+} from "antd";
+import {
+  Search as SearchIcon,
+  NotebookText,
+  CheckSquare,
+  AlertTriangle,
+  Check,
+  SlidersHorizontal,
+  X as XIcon,
+} from "lucide-react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { searchApi, taskApi, folderApi, tagApi } from "@/lib/api";
+import { MicButton } from "@/components/MicButton";
+import { useAppStore } from "@/store";
+import { highlightText, highlightSnippet } from "@/lib/highlight";
+import type {
+  SearchResult,
+  TaskSearchHit,
+  SearchFilters,
+  Folder,
+  Tag,
+  NoteType,
+} from "@/types";
+
+const { Text } = Typography;
+
+/** 笔记结果单行高度估算（含 title + snippet + 日期三行 + 上下 padding） */
+const ESTIMATED_ROW_HEIGHT = 92;
+/** "全部" 模式下笔记最多展示这么多条，再多就让用户切到「笔记」Tab 看全 */
+const ALL_MODE_NOTES_PREVIEW = 20;
+
+type Scope = "all" | "notes" | "tasks";
+
+/** 把文件夹树拍平成"该节点 + 全部子孙"的 id 列表 */
+function collectSubtreeIds(folders: Folder[], targetIds: number[]): number[] {
+  const out = new Set<number>();
+  const walk = (nodes: Folder[], inside: boolean) => {
+    for (const n of nodes) {
+      const hit = inside || targetIds.includes(n.id);
+      if (hit) out.add(n.id);
+      const children = (n as Folder & { children?: Folder[] }).children;
+      if (children?.length) walk(children, hit);
+    }
+  };
+  walk(folders, false);
+  return [...out];
+}
+
+/**
+ * RangePicker 给出的 [起, 止] 日期串 → 后端要的时间范围（任一端为空返回 null = 不筛选）。
+ *
+ * 后端比的是 notes 表的 `YYYY-MM-DD HH:MM:SS`，补上时分秒才能让"选到今天"
+ * 含当天全部笔记，而不是卡在 00:00:00。
+ */
+function toDayRange(strs: [string, string]): [string, string] | null {
+  return strs[0] && strs[1] ? [`${strs[0]} 00:00:00`, `${strs[1]} 23:59:59`] : null;
+}
+
+function DesktopSearchPage() {
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { token } = antdTheme.useToken();
+
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [taskResults, setTaskResults] = useState<TaskSearchHit[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [searched, setSearched] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  // ─── 筛选（P1-2）────────────────────────────────
+  const [showFilters, setShowFilters] = useState(false);
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [pickedFolders, setPickedFolders] = useState<number[]>([]);
+  const [pickedTags, setPickedTags] = useState<number[]>([]);
+  const [pickedTypes, setPickedTypes] = useState<NoteType[]>([]);
+  const [dateRange, setDateRange] = useState<[string, string] | null>(null);
+  const [createdRange, setCreatedRange] = useState<[string, string] | null>(null);
+  const [titleOnly, setTitleOnly] = useState(false);
+  // RangePicker 是非受控的：清空筛选时靠换 key 重挂载，才能把选择器上残留的日期也清掉
+  const [pickerResetKey, setPickerResetKey] = useState(0);
+
+  // 展开筛选面板时才拉数据 —— 大多数搜索用不上筛选，没必要每次进页面都拉两张表
+  useEffect(() => {
+    if (!showFilters || folders.length > 0 || tags.length > 0) return;
+    folderApi.list().then(setFolders).catch(() => {});
+    tagApi.list().then(setTags).catch(() => {});
+  }, [showFilters, folders.length, tags.length]);
+
+  /**
+   * 组装成后端要的 filters。
+   *
+   * 🔴 没勾的维度必须**省略字段**而不是传 `[]` —— 后端 fail-closed，
+   * 空数组表示"勾了但没选中"会直接返回零结果（见 types/SearchFilters 注释）。
+   */
+  const filters = useMemo<SearchFilters | undefined>(() => {
+    const f: SearchFilters = {};
+    if (pickedFolders.length > 0) {
+      // 选了「工作」应当含其下所有子文件夹，否则用户会觉得"明明在这个目录里却搜不到"
+      f.folderIds = collectSubtreeIds(folders, pickedFolders);
+    }
+    if (pickedTags.length > 0) f.tagIds = pickedTags;
+    if (pickedTypes.length > 0) f.noteTypes = pickedTypes;
+    if (dateRange) {
+      f.updatedAfter = dateRange[0];
+      f.updatedBefore = dateRange[1];
+    }
+    if (createdRange) {
+      f.createdAfter = createdRange[0];
+      f.createdBefore = createdRange[1];
+    }
+    // 只在勾选时才传：不勾 = 省略字段，保持与旧版请求完全一致
+    if (titleOnly) f.titleOnly = true;
+    return Object.keys(f).length > 0 ? f : undefined;
+  }, [pickedFolders, pickedTags, pickedTypes, dateRange, createdRange, titleOnly, folders]);
+
+  const activeFilterCount =
+    (pickedFolders.length > 0 ? 1 : 0) +
+    (pickedTags.length > 0 ? 1 : 0) +
+    (pickedTypes.length > 0 ? 1 : 0) +
+    (dateRange ? 1 : 0) +
+    (createdRange ? 1 : 0) +
+    (titleOnly ? 1 : 0);
+
+  function clearFilters() {
+    setPickedFolders([]);
+    setPickedTags([]);
+    setPickedTypes([]);
+    setDateRange(null);
+    setCreatedRange(null);
+    setTitleOnly(false);
+    setPickerResetKey((k) => k + 1);
+  }
+
+  // 筛选变化后立即用当前关键词重搜（用户改了条件却要再敲一次回车是很别扭的）
+  const filtersKey = JSON.stringify(filters ?? {});
+  useEffect(() => {
+    if (!searched || !query.trim()) return;
+    doSearch(query.trim());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtersKey]);
+
+  // URL ?type= 决定 Scope：缺省 "all"
+  const scope = ((searchParams.get("type") ?? "all") as Scope);
+
+  // 虚拟滚动只在「笔记」单 Tab 下启用（"全部" 时只展示前 20 条预览，无需虚拟化）
+  const scrollParentRef = useRef<HTMLDivElement | null>(null);
+  const virtualizer = useVirtualizer({
+    count: scope === "notes" ? results.length : 0,
+    getScrollElement: () => scrollParentRef.current,
+    estimateSize: () => ESTIMATED_ROW_HEIGHT,
+    overscan: 6,
+  });
+
+  // URL ?q= 驱动搜索：外部（SearchPanel 点历史 / 首页搜索框直达）改变 URL 时
+  // 同步输入框并触发重搜；用户在输入框 typing 走下方本地 debounce，不走这里
+  const urlQ = (searchParams.get("q") ?? "").trim();
+  useEffect(() => {
+    if (!urlQ) return;
+    setQuery(urlQ);
+    doSearch(urlQ);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlQ]);
+
+  /** 并发拉笔记 + 待办；任意一边失败不阻塞另一边 */
+  async function doSearch(keyword: string) {
+    setLoading(true);
+    setSearched(true);
+    const [notes, tasks] = await Promise.all([
+      searchApi.search(keyword, undefined, filters).catch((e) => {
+        console.error("笔记搜索失败:", e);
+        return [] as SearchResult[];
+      }),
+      taskApi.search(keyword, 50).catch((e) => {
+        console.error("待办搜索失败:", e);
+        return [] as TaskSearchHit[];
+      }),
+    ]);
+    setResults(notes);
+    setTaskResults(tasks);
+    // 历史只在拿到任一结果时才记（避免空查询污染）
+    if (notes.length + tasks.length > 0) {
+      useAppStore.getState().pushRecentSearch(keyword);
+    }
+    setLoading(false);
+  }
+
+  function handleInputChange(value: string) {
+    setQuery(value);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    if (!value.trim()) {
+      setResults([]);
+      setTaskResults([]);
+      setSearched(false);
+      return;
+    }
+    timerRef.current = setTimeout(() => {
+      doSearch(value.trim());
+    }, 300);
+  }
+
+  /** 切换 Tab：写回 URL，保持 ?q= 不变以维持历史/分享链接 */
+  function setScope(next: Scope) {
+    const sp = new URLSearchParams(searchParams);
+    if (next === "all") sp.delete("type");
+    else sp.set("type", next);
+    setSearchParams(sp, { replace: true });
+  }
+
+  const showNotes = scope === "all" || scope === "notes";
+  const showTasks = scope === "all" || scope === "tasks";
+  const totalHits = results.length + taskResults.length;
+  // "全部" 模式下笔记只展示 preview，超出由"查看全部"链接引导切到笔记 Tab
+  const notesToRender =
+    scope === "all" ? results.slice(0, ALL_MODE_NOTES_PREVIEW) : results;
+
+  return (
+    // 横向留白统一交给 AppLayout Content 的 padding，不再单独限内容宽度
+    <div>
+      {/* 搜索框：与首页 / 笔记列表搜索同款（普通 Input + 独立搜索按钮） */}
+      <div className="mb-4 flex items-stretch gap-1.5" style={{ width: "100%" }}>
+        <Input
+          size="large"
+          placeholder="搜索笔记内容 / 待办标题…"
+          prefix={<SearchIcon size={18} />}
+          suffix={
+            <MicButton
+              size="small"
+              stripTrailingPunctuation
+              onTranscribed={(text) =>
+                handleInputChange(query ? `${query} ${text}` : text)
+              }
+            />
+          }
+          value={query}
+          onChange={(e) => handleInputChange(e.target.value)}
+          onPressEnter={() => handleInputChange(query)}
+          allowClear
+          style={{ flex: 1, borderRadius: 8 }}
+        />
+        <Button
+          size="large"
+          type="primary"
+          onClick={() => handleInputChange(query)}
+        >
+          搜索
+        </Button>
+      </div>
+
+      {/* 范围切换：仅在已搜索时显示，免得空状态有个孤零零的切换器 */}
+      {searched && (
+        <div className="mb-4 flex items-center justify-between">
+          <Segmented
+            value={scope}
+            onChange={(v) => setScope(v as Scope)}
+            options={[
+              { value: "all", label: `全部 ${totalHits}` },
+              { value: "notes", label: `笔记 ${results.length}` },
+              { value: "tasks", label: `待办 ${taskResults.length}` },
+            ]}
+          />
+          <div className="flex items-center gap-3">
+            {!loading && totalHits > 0 && (
+              <Text type="secondary" className="text-xs">
+                共 {totalHits} 条结果
+              </Text>
+            )}
+            {/* 筛选只作用于笔记，待办 Tab 下没有意义，故隐藏 */}
+            {scope !== "tasks" && (
+              <Button
+                size="small"
+                type={activeFilterCount > 0 ? "primary" : "default"}
+                icon={<SlidersHorizontal size={14} />}
+                onClick={() => setShowFilters((v) => !v)}
+                title="按文件夹 / 标签 / 时间 / 类型筛选"
+              >
+                筛选{activeFilterCount > 0 ? ` ${activeFilterCount}` : ""}
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 筛选栏（P1-2）：仅笔记结果生效 */}
+      {searched && showFilters && scope !== "tasks" && (
+        <div
+          className="mb-4 flex flex-wrap items-center gap-2 rounded-lg p-3"
+          style={{ background: token.colorFillQuaternary }}
+        >
+          <TreeSelect
+            style={{ minWidth: 180, flex: "1 1 180px" }}
+            size="small"
+            multiple
+            treeCheckable
+            showCheckedStrategy={TreeSelect.SHOW_PARENT}
+            maxTagCount={1}
+            value={pickedFolders}
+            onChange={(v) => setPickedFolders(v as number[])}
+            treeData={folders as unknown as Record<string, unknown>[]}
+            fieldNames={{ label: "name", value: "id", children: "children" }}
+            placeholder="文件夹"
+            allowClear
+            treeNodeFilterProp="name"
+          />
+          <Select
+            style={{ minWidth: 160, flex: "1 1 160px" }}
+            size="small"
+            mode="multiple"
+            maxTagCount={1}
+            value={pickedTags}
+            onChange={setPickedTags}
+            options={tags.map((t) => ({ label: t.name, value: t.id }))}
+            placeholder="标签（需同时含有）"
+            allowClear
+            optionFilterProp="label"
+          />
+          <Select
+            style={{ minWidth: 120 }}
+            size="small"
+            mode="multiple"
+            maxTagCount={1}
+            value={pickedTypes}
+            onChange={setPickedTypes}
+            options={[
+              { label: "笔记", value: "markdown" },
+              { label: "白板", value: "whiteboard" },
+            ]}
+            placeholder="类型"
+            allowClear
+          />
+          <DatePicker.RangePicker
+            key={`updated-${pickerResetKey}`}
+            size="small"
+            style={{ minWidth: 220 }}
+            onChange={(_, strs) => setDateRange(toDayRange(strs))}
+            placeholder={["修改时间从", "至"]}
+          />
+          <DatePicker.RangePicker
+            key={`created-${pickerResetKey}`}
+            size="small"
+            style={{ minWidth: 220 }}
+            onChange={(_, strs) => setCreatedRange(toDayRange(strs))}
+            placeholder={["创建时间从", "至"]}
+          />
+          <Checkbox
+            checked={titleOnly}
+            onChange={(e) => setTitleOnly(e.target.checked)}
+          >
+            仅搜标题
+          </Checkbox>
+          {activeFilterCount > 0 && (
+            <Button
+              size="small"
+              type="text"
+              icon={<XIcon size={14} />}
+              onClick={clearFilters}
+              title="清空全部筛选条件"
+            >
+              清空
+            </Button>
+          )}
+        </div>
+      )}
+
+      {/* 结果区 */}
+      {loading ? (
+        <div className="flex justify-center py-12">
+          <Spin size="large" tip="搜索中..." />
+        </div>
+      ) : !searched ? (
+        <div className="flex flex-col items-center py-12">
+          <SearchIcon size={48} style={{ opacity: 0.15 }} />
+          <Text type="secondary" className="mt-4" style={{ fontSize: 14 }}>
+            输入关键词同时搜索笔记与待办
+          </Text>
+        </div>
+      ) : totalHits === 0 ? (
+        <Empty
+          description={`未找到与 "${query}" 相关的内容`}
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+        />
+      ) : (
+        // 单一滚动容器；笔记 Tab 下用虚拟化，其它 Tab 直接渲染
+        <div
+          ref={scrollParentRef}
+          style={{
+            height: "calc(100vh - 220px)",
+            overflowY: "auto",
+            contain: "strict",
+          }}
+        >
+          {/* 待办分组（"全部" 或 "待办" Tab 显示） */}
+          {showTasks && taskResults.length > 0 && (
+            <section className="mb-6">
+              <SectionHeader
+                icon={<CheckSquare size={14} />}
+                label="待办"
+                count={taskResults.length}
+                token={token}
+              />
+              <div>
+                {taskResults.map((task) => (
+                  <TaskRow
+                    key={task.id}
+                    task={task}
+                    token={token}
+                    keyword={query}
+                    onClick={() => navigate(`/tasks?taskId=${task.id}`)}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* 笔记分组 */}
+          {showNotes && results.length > 0 && (
+            <section>
+              <SectionHeader
+                icon={<NotebookText size={14} />}
+                label="笔记"
+                count={results.length}
+                token={token}
+              />
+              {scope === "notes" ? (
+                // 笔记 Tab：虚拟滚动（千级结果不卡）
+                <div
+                  style={{
+                    height: virtualizer.getTotalSize(),
+                    width: "100%",
+                    position: "relative",
+                  }}
+                >
+                  {virtualizer.getVirtualItems().map((vItem) => {
+                    const item = results[vItem.index];
+                    return (
+                      <div
+                        key={item.id}
+                        data-index={vItem.index}
+                        ref={virtualizer.measureElement}
+                        style={{
+                          position: "absolute",
+                          top: 0,
+                          left: 0,
+                          width: "100%",
+                          transform: `translateY(${vItem.start}px)`,
+                        }}
+                      >
+                        <NoteRow
+                          item={item}
+                          token={token}
+                          keyword={query}
+                          onClick={() =>
+                            navigate(
+                              `/notes/${item.id}?q=${encodeURIComponent(query)}`,
+                            )
+                          }
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                // 全部 Tab：只渲染预览前 N 条，多余的引导切 Tab
+                <>
+                  {notesToRender.map((item) => (
+                    <NoteRow
+                      key={item.id}
+                      item={item}
+                      token={token}
+                      keyword={query}
+                      onClick={() =>
+                        navigate(
+                          `/notes/${item.id}?q=${encodeURIComponent(query)}`,
+                        )
+                      }
+                    />
+                  ))}
+                  {results.length > ALL_MODE_NOTES_PREVIEW && (
+                    <div className="py-2 text-center">
+                      <a
+                        onClick={() => setScope("notes")}
+                        style={{ fontSize: 12, color: token.colorPrimary }}
+                      >
+                        查看全部 {results.length} 条笔记 →
+                      </a>
+                    </div>
+                  )}
+                </>
+              )}
+            </section>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 分组标题 */
+function SectionHeader({
+  icon,
+  label,
+  count,
+  token,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  count: number;
+  token: ReturnType<typeof antdTheme.useToken>["token"];
+}) {
+  return (
+    <div
+      className="flex items-center gap-2 mb-2"
+      style={{
+        fontSize: 12,
+        fontWeight: 600,
+        color: token.colorTextSecondary,
+        textTransform: "uppercase",
+        letterSpacing: 0.5,
+      }}
+    >
+      <span style={{ color: token.colorPrimary }}>{icon}</span>
+      <span>
+        {label} · {count}
+      </span>
+    </div>
+  );
+}
+
+/** 笔记结果行（与原虚拟滚动样式一致） */
+function NoteRow({
+  item,
+  token,
+  keyword,
+  onClick,
+}: {
+  item: SearchResult;
+  token: ReturnType<typeof antdTheme.useToken>["token"];
+  keyword: string;
+  onClick: () => void;
+}) {
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        padding: "12px 0",
+        borderBottom: `1px solid ${token.colorBorderSecondary}`,
+        cursor: "pointer",
+        display: "flex",
+        gap: 12,
+      }}
+    >
+      <NotebookText size={20} style={{ marginTop: 4, flexShrink: 0 }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <Text
+          ellipsis
+          style={{ display: "block", maxWidth: 500, fontWeight: 500 }}
+        >
+          {highlightText(item.title, keyword)}
+        </Text>
+        <div
+          style={{
+            fontSize: 13,
+            marginTop: 4,
+            marginBottom: 4,
+            // 2 行截断让高亮大概率落在可见区域，避免单行被截走
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical",
+            overflow: "hidden",
+            wordBreak: "break-word",
+            lineHeight: "1.5",
+          }}
+        >
+          {highlightSnippet(item.snippet, keyword)}
+        </div>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {item.updated_at.slice(0, 10)}
+        </Text>
+      </div>
+    </div>
+  );
+}
+
+/** 待办结果行（与 CommandPalette 风格一致） */
+function TaskRow({
+  task,
+  token,
+  keyword,
+  onClick,
+}: {
+  task: TaskSearchHit;
+  token: ReturnType<typeof antdTheme.useToken>["token"];
+  keyword: string;
+  onClick: () => void;
+}) {
+  const done = task.status === 1;
+  const urgent = task.priority === 0;
+  const due = task.dueDate?.slice(0, 10) ?? null;
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        padding: "10px 0",
+        borderBottom: `1px solid ${token.colorBorderSecondary}`,
+        cursor: "pointer",
+        display: "flex",
+        gap: 12,
+        alignItems: "flex-start",
+      }}
+    >
+      {done ? (
+        <Check size={18} style={{ color: token.colorSuccess, marginTop: 2, flexShrink: 0 }} />
+      ) : urgent ? (
+        <AlertTriangle
+          size={18}
+          style={{ color: token.colorError, marginTop: 2, flexShrink: 0 }}
+        />
+      ) : (
+        <CheckSquare
+          size={18}
+          style={{ color: token.colorTextSecondary, marginTop: 2, flexShrink: 0 }}
+        />
+      )}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <Text
+          ellipsis
+          style={{
+            display: "block",
+            maxWidth: 600,
+            fontWeight: 500,
+            textDecoration: done ? "line-through" : undefined,
+            color: done ? token.colorTextTertiary : undefined,
+          }}
+        >
+          {task.title ? highlightText(task.title, keyword) : "无标题"}
+        </Text>
+        {(due || task.snippet) && (
+          <div
+            style={{
+              fontSize: 12,
+              color: token.colorTextDescription,
+              marginTop: 2,
+            }}
+          >
+            {due && <span style={{ marginRight: 8 }}>📅 {due}</span>}
+            {task.snippet && (
+              <span
+                style={{
+                  display: "inline-block",
+                  maxWidth: 500,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  verticalAlign: "bottom",
+                }}
+              >
+                {task.snippet}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+import { useIsMobile } from "@/hooks/useIsMobile";
+import { MobileSearch } from "./MobileSearch";
+
+export default function SearchPage() {
+  const isMobile = useIsMobile();
+  return isMobile ? <MobileSearch /> : <DesktopSearchPage />;
+}

@@ -1,0 +1,3050 @@
+import { useState, useEffect, useRef, useMemo, startTransition } from "react";
+import { useNavigate, useLocation } from "react-router-dom";
+import {
+  Tree,
+  Button,
+  Skeleton,
+  theme as antdTheme,
+  Input,
+  message,
+  Modal,
+  TreeSelect,
+  Space,
+  Dropdown,
+} from "antd";
+import {
+  ContextMenuOverlay,
+  type ContextMenuEntry,
+} from "@/components/ui/ContextMenuOverlay";
+import {
+  NotebookText,
+  FolderPlus,
+  FolderX,
+  ChevronDown,
+  ChevronRight,
+  Edit3,
+  Trash,
+  Trash2,
+  Plus,
+  FolderOpen,
+  FileText,
+  ChevronsDownUp,
+  Folder as FolderIcon,
+  LayoutTemplate,
+  ExternalLink,
+  AppWindow,
+  Copy,
+  Pin,
+  PinOff,
+  Inbox,
+  GitCompare,
+  Sparkles,
+  Search,
+  Hash,
+  PenTool,
+  FolderOutput,
+  FileDown,
+} from "lucide-react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { FolderFilled } from "@ant-design/icons";
+import type { DataNode } from "antd/es/tree";
+import { useAppStore } from "@/store";
+import { MicButton } from "@/components/MicButton";
+import { useTabsStore } from "@/store/tabs";
+import { aiChatApi, folderApi, importApi, noteApi, searchApi, trashApi } from "@/lib/api";
+import { showExternalMdIntroOnce } from "@/lib/externalMdIntro";
+import { resolveOpenMdMode } from "@/lib/openMdChoice";
+import { ScratchFilesModal } from "@/components/notes/ScratchFilesModal";
+import {
+  ExportFolderModal,
+  type ExportFolderTarget,
+} from "@/components/notes/ExportFolderModal";
+import {
+  exportNoteAsHtml,
+  exportNoteAsMarkdown,
+  exportNoteAsWord,
+  exportNotesBatchAsMarkdown,
+} from "@/lib/exportActions";
+import { highlightText, highlightSnippet } from "@/lib/highlight";
+import type {
+  EmptyFolderInfo,
+  Folder,
+  Note,
+  ScannedFile,
+  SearchResult,
+} from "@/types";
+import { parseEmojiPrefix } from "@/lib/treeIcons";
+import { NewNoteButton } from "@/components/NewNoteButton";
+import { FileTypeIcon } from "@/components/FileTypeIcon";
+import { TemplatePickerModal } from "@/components/TemplatePickerModal";
+import { NoteComparePicker } from "@/components/editor/NoteComparePicker";
+import {
+  targetFromSidebarKey,
+  UNCATEGORIZED_KEY as SHARED_UNCATEGORIZED_KEY,
+} from "@/lib/newNoteTarget";
+import {
+  createBlankAndOpen,
+  importExcelFlow,
+  importPdfsFlow,
+  importTextFlow,
+  importWordFlow,
+} from "@/lib/noteCreator";
+import { beginTrackedImportJob } from "@/lib/importJob";
+import { folderKeysFromDepth, maxFolderDepth } from "@/lib/folderDepth";
+import { ImportPreviewModal } from "@/components/ImportPreviewModal";
+import { TagColorPicker } from "@/components/TagColorPicker";
+import { Palette } from "lucide-react";
+
+/**
+ * NotesPanel —— Activity Bar 模式下"笔记"视图的主面板内容。
+ *
+ * 负责：
+ *   · 顶部：视图标题 + 新建笔记 + 打开本机 md
+ *   · 主体：文件夹树（创建 / 重命名 / 删除 / 拖拽 / 右键菜单 / 导入）
+ *
+ * 实现基线：从原 Sidebar.tsx 的文件夹树部分拆出，交互零改动。
+ */
+
+/** 临时"新建子文件夹"节点的 key 前缀 */
+const NEW_NODE_PREFIX = "__new_under_";
+
+/** 笔记叶节点 key 前缀（与文件夹 id 区分） */
+const NOTE_KEY_PREFIX = "note:";
+
+/** 「未分类」虚拟根节点 key（folder_id IS NULL 的笔记挂在这里） */
+// 从 lib/newNoteTarget 引入，避免这边的 key 约定和那边的判定各写一份字面量后漂移
+const UNCATEGORIZED_KEY = SHARED_UNCATEGORIZED_KEY;
+
+/** 单个文件夹直属笔记的展示上限（超过引导用户去主区） */
+const NOTES_PER_FOLDER_LIMIT = 100;
+
+/** 拖拽悬停多久（ms）后自动展开折叠文件夹（spring-loaded）。
+ *  取 600ms：低于 ~400 仍易误触，高于 ~800 等得不耐烦；与 Finder / VS Code 体感一致。 */
+const HOVER_EXPAND_DELAY = 600;
+
+/** 「移动到…」TreeSelect 里代表"根目录（未分类）"的哨兵值。
+ *  TreeSelect 不接受 null 作为可选项 value，用 -1 占位，提交时映射回 null。 */
+const ROOT_FOLDER_VALUE = -1;
+
+function isNoteKey(key: string): boolean {
+  return key.startsWith(NOTE_KEY_PREFIX);
+}
+function noteIdFromKey(key: string): number {
+  return Number(key.slice(NOTE_KEY_PREFIX.length));
+}
+function noteKey(id: number): string {
+  return `${NOTE_KEY_PREFIX}${id}`;
+}
+
+/** 收集所有文件夹 id 字符串（用于 defaultExpandAll 场景） */
+function collectAllKeys(folders: Folder[]): string[] {
+  const keys: string[] = [];
+  const walk = (list: Folder[]) => {
+    for (const f of list) {
+      keys.push(String(f.id));
+      if (f.children.length) walk(f.children);
+    }
+  };
+  walk(folders);
+  return keys;
+}
+
+/** Tree DataNode 扩展：携带 isNote 标志和原始数据，便于 renderTitle 区分 */
+type TreeNoteData = { isNote: true; note: Note };
+/** isChild：是否为子文件夹（非根级），用于 renderTitle 加视觉小点区分层级 */
+type TreeFolderData = { isNote: false; isChild: boolean; color: string | null };
+type TreeNodeData = TreeNoteData | TreeFolderData;
+type EnrichedNode = DataNode & { data?: TreeNodeData };
+
+/** 将 Folder[] + 各文件夹直属笔记 转为 antd Tree 的 DataNode[]
+ *
+ * 子节点顺序：先所有子文件夹（保持原有顺序），后所有直属笔记（按 updated_at 倒序，
+ * 由后端排序）。单个文件夹笔记数 > NOTES_PER_FOLDER_LIMIT 时只展示前 N 条。
+ */
+function foldersToTreeData(
+  folders: Folder[],
+  creatingUnderKey: string | null,
+  notesByFolder: Map<number, Note[]>,
+  tabTitleByNoteId: Map<number, string>,
+  showOnlyFolders: boolean,
+  depth: number = 0,
+): EnrichedNode[] {
+  return folders.map((f) => {
+    const subFolders: EnrichedNode[] = f.children.length
+      ? foldersToTreeData(f.children, creatingUnderKey, notesByFolder, tabTitleByNoteId, showOnlyFolders, depth + 1)
+      : [];
+
+    // showOnlyFolders 开启时彻底跳过笔记叶节点，只保留子文件夹层级
+    const noteLeaves: EnrichedNode[] = showOnlyFolders
+      ? []
+      : (notesByFolder.get(f.id) ?? [])
+          .slice(0, NOTES_PER_FOLDER_LIMIT)
+          .map((n) => ({
+            key: noteKey(n.id),
+            // 当该笔记 tab 已打开时，优先用 tabs store 的实时 title（编辑器
+            // handleTitleChange 同步进去）→ 用户在编辑器键入即可看到侧边栏跟随。
+            // 没打开 tab 时回退到 DB 拉的 n.title。
+            title: tabTitleByNoteId.get(n.id) || n.title || "未命名",
+            isLeaf: true,
+            data: { isNote: true, note: n },
+          }));
+
+    const children: EnrichedNode[] = [...subFolders, ...noteLeaves];
+
+    if (creatingUnderKey === String(f.id)) {
+      children.unshift({
+        key: `${NEW_NODE_PREFIX}${f.id}`,
+        title: "",
+        isLeaf: true,
+      });
+    }
+
+    return {
+      key: String(f.id),
+      title: f.name,
+      // 显式 isLeaf:false：children 为 undefined 时 antd Tree 会推断成叶子，
+      // 拖拽落在叶子上会被当成"同级排序"，无法 drop-into 折叠的空文件夹。
+      isLeaf: false,
+      children: children.length ? children : undefined,
+      data: { isNote: false, isChild: depth > 0, color: f.color ?? null },
+    };
+  });
+}
+
+/** 在文件夹树中按 id 查找名称 */
+function findFolderName(folders: Folder[], id: number): string | null {
+  for (const f of folders) {
+    if (f.id === id) return f.name;
+    if (f.children.length) {
+      const found = findFolderName(f.children, id);
+      if (found !== null) return found;
+    }
+  }
+  return null;
+}
+
+/** 在文件夹树中按 id 查找当前 color（未设返回 null） */
+function findFolderColor(folders: Folder[], id: number): string | null {
+  for (const f of folders) {
+    if (f.id === id) return f.color ?? null;
+    if (f.children.length) {
+      const found = findFolderColor(f.children, id);
+      if (found !== null) return found;
+    }
+  }
+  return null;
+}
+
+/** 获取指定父节点下的所有直接子文件夹 id（parent_id == null 代表根级） */
+function getChildIds(folders: Folder[], parentId: number | null): number[] {
+  if (parentId === null) return folders.map((f) => f.id);
+  let result: number[] = [];
+  const walk = (list: Folder[]) => {
+    for (const f of list) {
+      if (f.id === parentId) {
+        result = f.children.map((c) => c.id);
+        return;
+      }
+      if (f.children.length) walk(f.children);
+    }
+  };
+  walk(folders);
+  return result;
+}
+
+/** 在文件夹树中按 id 查找父节点 id（根节点返回 null；未找到返回 null） */
+function findFolderParentId(folders: Folder[], id: number): number | null {
+  let result: number | null = null;
+  let found = false;
+  const walk = (list: Folder[]) => {
+    for (const f of list) {
+      if (found) return;
+      if (f.id === id) {
+        result = f.parent_id;
+        found = true;
+        return;
+      }
+      if (f.children.length) walk(f.children);
+    }
+  };
+  walk(folders);
+  return result;
+}
+
+/**
+ * 收集从根到 targetId（含）的所有祖先文件夹 id 路径
+ *
+ * 用于"跳到笔记 → 自动展开树"：把这条路径上的所有文件夹从 collapsed 集合中移除，
+ * 即可把目标笔记所在层级展开到可见。targetId 不在树里时返回空数组。
+ */
+function collectAncestorFolderIds(folders: Folder[], targetId: number): number[] {
+  let path: number[] = [];
+  const walk = (list: Folder[], stack: number[]): boolean => {
+    for (const f of list) {
+      const next = [...stack, f.id];
+      if (f.id === targetId) {
+        path = next;
+        return true;
+      }
+      if (f.children.length && walk(f.children, next)) return true;
+    }
+    return false;
+  };
+  walk(folders, []);
+  return path;
+}
+
+export function NotesPanel() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const isUncategorizedActive =
+    location.pathname === "/notes" &&
+    new URLSearchParams(location.search).get("folder") === "uncategorized";
+  const foldersRefreshTick = useAppStore((s) => s.foldersRefreshTick);
+  const notesRefreshTick = useAppStore((s) => s.notesRefreshTick);
+  // 订阅 tabs：编辑器 handleTitleChange 实时调 updateTabTitle，这里把 tab.title
+  // 当作 ephemeral overlay 覆盖渲染——用户在编辑器输入标题立刻能看到侧边栏跟随，
+  // 不必等保存。tab 关闭后 overlay 自然消失，回退到 DB 标题。
+  const tabs = useTabsStore((s) => s.tabs);
+  const tabTitleByNoteId = useMemo(
+    () => new Map(tabs.map((t) => [t.id, t.title])),
+    [tabs],
+  );
+  const { token } = antdTheme.useToken();
+
+  // 文件夹直属笔记缓存（按 folderId 索引）。
+  // 展开时按需加载；notesRefreshTick 变化时清空已加载的项触发重拉。
+  const [notesByFolder, setNotesByFolder] = useState<Map<number, Note[]>>(
+    () => new Map(),
+  );
+  // 正在请求的 folderId 集合，避免同一个文件夹并发请求
+  const loadingNotesRef = useRef<Set<number>>(new Set());
+
+  // 未分类笔记（folder_id IS NULL）：底部"未分类"虚拟节点展开时按需加载，
+  // 让用户在 NotesPanel 顶部"+ 新建笔记"建出来的 null-folder 笔记能立刻看到。
+  // 展开/收起态走 store 持久化（跨视图保留），笔记列表本地缓存（首次展开后秒开）。
+  const uncategorizedExpanded = useAppStore((s) => s.notesUncategorizedExpanded);
+  const setUncategorizedExpanded = useAppStore((s) => s.setNotesUncategorizedExpanded);
+  const showOnlyFolders = useAppStore((s) => s.notesShowOnlyFolders);
+  const setShowOnlyFolders = useAppStore((s) => s.setNotesShowOnlyFolders);
+  const [uncategorizedNotes, setUncategorizedNotes] = useState<Note[]>([]);
+  // 是否完成过至少一次拉取——区分"未加载（空数组占位）"和"加载完确实是空"，
+  // 后者才允许把"未分类"虚拟节点从树上隐藏。
+  const [uncategorizedLoaded, setUncategorizedLoaded] = useState(false);
+  const loadingUncategorizedRef = useRef(false);
+  // 「临时文件」弹层：临时笔记不进笔记树（不属于文件夹体系），按需拉起列表查看
+  const [scratchModalOpen, setScratchModalOpen] = useState(false);
+
+  /** 拉某个文件夹的直属笔记（include_descendants=false） */
+  async function loadNotesForFolder(folderId: number) {
+    if (loadingNotesRef.current.has(folderId)) return;
+    loadingNotesRef.current.add(folderId);
+    try {
+      const r = await noteApi.list({
+        folder_id: folderId,
+        include_descendants: false,
+        page: 1,
+        page_size: NOTES_PER_FOLDER_LIMIT,
+        // 树是组织视图，按用户自定义顺序展示（sort_order ASC）；
+        // 未拖排过的笔记 sort_order 由 v31 迁移按 updated_at DESC 初始化，
+        // 肉眼仍是时间序，拖排后立刻可见
+        sort_by: "custom",
+      });
+      setNotesByFolder((prev) => {
+        const next = new Map(prev);
+        next.set(folderId, r.items);
+        return next;
+      });
+    } catch (e) {
+      console.warn(`[notes-panel] 加载文件夹 ${folderId} 笔记失败:`, e);
+    } finally {
+      loadingNotesRef.current.delete(folderId);
+    }
+  }
+
+  /** 拉未分类笔记（folder_id IS NULL） */
+  async function loadUncategorizedNotes() {
+    if (loadingUncategorizedRef.current) return;
+    loadingUncategorizedRef.current = true;
+    try {
+      const r = await noteApi.list({
+        uncategorized: true,
+        page: 1,
+        page_size: NOTES_PER_FOLDER_LIMIT,
+        sort_by: "custom",
+      });
+      setUncategorizedNotes(r.items);
+      setUncategorizedLoaded(true);
+    } catch (e) {
+      console.warn("[notes-panel] 加载未分类笔记失败:", e);
+    } finally {
+      loadingUncategorizedRef.current = false;
+    }
+  }
+
+  // 用 store 里的预热缓存做种子，避免首次打开 Panel 时空白闪烁；
+  // useEffect 仍会后台 loadFolders 拿最新数据替换。
+  const [folders, setFolders] = useState<Folder[]>(
+    () => useAppStore.getState().prefetchedFolders ?? [],
+  );
+  // 仅当无预热缓存且尚未首次 loadFolders 时为 true → 显示 Skeleton 而不是"暂无文件夹"
+  const [initialLoading, setInitialLoading] = useState(
+    () => useAppStore.getState().prefetchedFolders === null,
+  );
+  const [folderExpanded, setFolderExpanded] = useState(true);
+
+  // 文件夹展开状态由 store 的"折叠集合"派生：collapsed 之外的所有文件夹 id 视为展开。
+  // 这样新建文件夹默认展开（因为不在 collapsed 集合里），符合直觉；
+  // 用户每次操作 → setNotesFolderCollapsed → 自动 persist → 跨视图/重启保留。
+  const collapsedFolderKeys = useAppStore((s) => s.notesCollapsedFolderKeys);
+  const allFolderKeys = useMemo(() => collectAllKeys(folders), [folders]);
+  const folderMaxDepth = useMemo(() => maxFolderDepth(folders), [folders]);
+  const treeGuideLines = useAppStore((s) => s.notesTreeGuideLines);
+  const expandedKeys = useMemo<React.Key[]>(() => {
+    const collapsed = new Set(collapsedFolderKeys);
+    const folderExpanded: React.Key[] = allFolderKeys.filter(
+      (k) => !collapsed.has(k),
+    );
+    if (uncategorizedExpanded) folderExpanded.push(UNCATEGORIZED_KEY);
+    return folderExpanded;
+  }, [allFolderKeys, collapsedFolderKeys, uncategorizedExpanded]);
+
+  // 首次进入（含老版本升级后第一次打开）：把全部文件夹默认折叠。
+  // 之后由用户操作驱动，flag 持久化后不再重置。
+  const initialCollapseDone = useAppStore(
+    (s) => s.notesFoldersInitialCollapseDone,
+  );
+  useEffect(() => {
+    if (initialCollapseDone) return;
+    if (folders.length === 0) return;
+    useAppStore.getState().setNotesAllFoldersCollapsed(allFolderKeys);
+    useAppStore.getState().markNotesFoldersInitialCollapseDone();
+  }, [initialCollapseDone, folders.length, allFolderKeys]);
+
+  // 「每次启动默认收起所有文件夹」：开关开启时，每次应用启动后首次拿到文件夹，
+  // 把全部文件夹折叠一次；之后由用户操作驱动展开/折叠（本次会话内记忆，重启再次收起）。
+  // notesStartupCollapseApplied 是会话级标志（不持久化），应用重启后归 false → 再收一次。
+  const collapseFoldersOnStartup = useAppStore(
+    (s) => s.notesCollapseFoldersOnStartup,
+  );
+  const startupCollapseApplied = useAppStore(
+    (s) => s.notesStartupCollapseApplied,
+  );
+  useEffect(() => {
+    if (!collapseFoldersOnStartup) return;
+    if (startupCollapseApplied) return;
+    if (folders.length === 0) return;
+    useAppStore.getState().setNotesAllFoldersCollapsed(allFolderKeys);
+    useAppStore.getState().markNotesStartupCollapseApplied();
+  }, [
+    collapseFoldersOnStartup,
+    startupCollapseApplied,
+    folders.length,
+    allFolderKeys,
+  ]);
+
+  const [creatingRoot, setCreatingRoot] = useState(false);
+  const [newRootName, setNewRootName] = useState("");
+
+  const [creatingUnderKey, setCreatingUnderKey] = useState<string | null>(null);
+  const [newChildName, setNewChildName] = useState("");
+
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState("");
+
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+
+  /** 选中态 → 新建笔记落点。判定规则见 lib/newNoteTarget.ts（有单测锁着）。 */
+  const newNoteTarget = useMemo(
+    () => targetFromSidebarKey(selectedKey),
+    [selectedKey],
+  );
+
+  // ─── 面板内就地搜索 ─────────────────────────────
+  // 输入关键词 → 防抖走后端 search_notes 全文搜索（标题+正文），结果以扁平列表
+  // 临时替换文件夹树；清空恢复树。树是懒加载的（展开才拉笔记），故不能只过滤已渲染
+  // 节点，必须走后端全量搜索。与活动栏「搜索」页/Ctrl+K 区别：这里是就近快速找+打开。
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const searchActive = searchQuery.trim().length > 0;
+
+  // 多选（仅笔记）：Ctrl/Cmd 点击切换、Shift 点击选区间。独立于 antd Tree 的单选
+  // selectedKey（那个表示"当前打开的笔记"），这里只做"标记一批笔记待批量操作"的视觉层。
+  // 选中后整批可一起拖到目标文件夹（handleDrop 里走 noteApi.moveBatch）。
+  const [selectedNoteKeys, setSelectedNoteKeys] = useState<Set<string>>(new Set());
+  // Shift 连选的锚点（上一次普通/Ctrl 点击的笔记 key）
+  const multiSelectAnchorRef = useRef<string | null>(null);
+  // 「移动到…」弹窗：TreeSelect 选目标文件夹后批量移动。
+  // moveModalIds 在打开弹窗时快照，避免弹窗开着时多选集合再变化导致移错。
+  const [moveModalOpen, setMoveModalOpen] = useState(false);
+  const [moveModalIds, setMoveModalIds] = useState<number[]>([]);
+  // TreeSelect 选中值：数字=目标文件夹 id；ROOT_FOLDER_VALUE 哨兵=移到根（未分类）
+  const [moveTargetValue, setMoveTargetValue] = useState<number | null>(null);
+
+  const [contextMenu, setContextMenu] = useState<{
+    key: string;
+    name: string;
+    x: number;
+    y: number;
+    ts: number;
+  } | null>(null);
+
+  /** OS 文件拖拽到面板时的高亮态（只对包含 Files 的 dataTransfer 生效，不干扰 Tree 内部拖拽） */
+  const [fileDragOver, setFileDragOver] = useState(false);
+
+  // 扫描文件夹导入的预览弹窗状态
+  const [importPreview, setImportPreview] = useState<{
+    files: ScannedFile[];
+    rootPath: string;
+    folderId: number;
+  } | null>(null);
+
+  // 右键"从模板…"弹窗状态：folderId=null 表示尚未打开
+  const [templatePickerFolder, setTemplatePickerFolder] = useState<number | null>(null);
+  const [exportTarget, setExportTarget] = useState<ExportFolderTarget | null>(null);
+
+  // 右键"与另一篇笔记对比…"：第一篇笔记 id；null = 未打开
+  const [compareFirstNoteId, setCompareFirstNoteId] = useState<number | null>(null);
+
+  // 外部点击 / Esc 关闭由 ContextMenuOverlay 内部自管，无需在此挂监听
+
+  // 双击判定：300ms 内同一节点视为双击（进入重命名）
+  const lastClickRef = useRef<{ key: string; time: number } | null>(null);
+  // Esc 取消编辑时置 true，后续 onBlur 跳过提交
+  const cancelEditRef = useRef(false);
+  // 拖拽悬停展开（spring-loaded folder）：记录"当前正在计时展开的目标 key"和定时器。
+  // 改自"一进入折叠文件夹就立即展开"——那样拖去深层目标时一路经过的文件夹会全炸开、
+  // 树结构狂跳导致目标位置乱移。改为悬停 ~0.6s 才展开，路过不展开（与 Finder / VS Code 一致）。
+  const hoverExpandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hoverExpandKeyRef = useRef<string | null>(null);
+  const cancelHoverExpand = () => {
+    if (hoverExpandTimerRef.current) {
+      clearTimeout(hoverExpandTimerRef.current);
+      hoverExpandTimerRef.current = null;
+    }
+    hoverExpandKeyRef.current = null;
+  };
+
+  useEffect(() => {
+    loadFolders();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [foldersRefreshTick]);
+
+  // 搜索防抖：query 变化后 300ms 才打后端，避免逐字符狂发请求。
+  // 空 query 立即清结果（不打后端）。notesRefreshTick 变化时也重搜，保证
+  // 搜索态下新建/删除笔记后结果跟随刷新。
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (!q) {
+      setSearchResults([]);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      searchApi
+        .search(q, 50)
+        .then((items) => {
+          if (!cancelled) setSearchResults(items);
+        })
+        .catch((e) => {
+          if (!cancelled) {
+            console.warn("[notes-panel] 搜索失败:", e);
+            setSearchResults([]);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setSearching(false);
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [searchQuery, notesRefreshTick]);
+
+  /** 打开搜索结果里的某篇笔记：跳转 + 高亮，并清空搜索恢复文件夹树视图 */
+  function openSearchResult(id: number) {
+    setSelectedKey(noteKey(id));
+    setSearchQuery("");
+    navigate(`/notes/${id}`);
+  }
+
+  /**
+   * URL → 树状态同步：当路由进入 /notes/:id（来自搜索面板、Ctrl+K、首页 dropdown 等）时，
+   *
+   *   1. 立刻把 selectedKey 设到该笔记，让侧栏高亮一致
+   *   2. 异步查 note.folder_id：
+   *        - null → 展开"未分类"虚拟节点 + 触发拉取
+   *        - 非 null → 收集从根到 folder 的所有祖先 id，
+   *          从 collapsed 集合中移除，让该层级在树上可见 + 拉笔记列表
+   *
+   * 不依赖任何缓存（直接 noteApi.get 拿权威 folder_id），避免缓存陈旧导致跳错位置。
+   * folders 加进 deps：首次 panel mount 时 folders 可能还在加载，等加载完会重跑这条 effect。
+   */
+  const noteIdFromUrl = useMemo<number | null>(() => {
+    const m = location.pathname.match(/^\/notes\/(\d+)$/);
+    return m ? Number(m[1]) : null;
+  }, [location.pathname]);
+
+  useEffect(() => {
+    if (noteIdFromUrl == null) return;
+
+    // ① 立即高亮（不等异步）—— 用户视觉立刻有反馈
+    setSelectedKey(noteKey(noteIdFromUrl));
+
+    // 路由进入具体笔记 → 自动关闭"只显示文件夹"，否则目标笔记被隐藏，
+    // 与"自动展开祖先文件夹"是同一意图：让用户能立刻看到目标。
+    if (useAppStore.getState().notesShowOnlyFolders) {
+      useAppStore.getState().setNotesShowOnlyFolders(false);
+    }
+
+    // ② 异步：查 folder_id 并展开到对应位置
+    let cancelled = false;
+    noteApi
+      .get(noteIdFromUrl)
+      .then((note) => {
+        if (cancelled) return;
+        const fid = note.folder_id;
+        if (fid === null) {
+          // 未分类：展开虚拟节点 + 拉笔记
+          const store = useAppStore.getState();
+          if (!store.notesUncategorizedExpanded) {
+            store.setNotesUncategorizedExpanded(true);
+          }
+          if (uncategorizedNotes.length === 0) {
+            void loadUncategorizedNotes();
+          }
+        } else {
+          // 在文件夹下：把祖先全展开
+          const path = collectAncestorFolderIds(folders, fid);
+          if (path.length > 0) {
+            const expandKeys = new Set(path.map(String));
+            const store = useAppStore.getState();
+            const newCollapsed = store.notesCollapsedFolderKeys.filter(
+              (k) => !expandKeys.has(k),
+            );
+            if (
+              newCollapsed.length !== store.notesCollapsedFolderKeys.length
+            ) {
+              store.setNotesAllFoldersCollapsed(newCollapsed);
+            }
+          }
+          // 拉这个文件夹的直属笔记（懒加载缓存）
+          if (!notesByFolder.has(fid)) {
+            void loadNotesForFolder(fid);
+          }
+        }
+      })
+      .catch(() => {
+        // 笔记不存在 / 已删，安静失败：保留高亮即可，不打扰用户
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [noteIdFromUrl, folders]);
+
+  // notes 数据变化时（新建/编辑/删除）：清空缓存 + 重拉所有已展开的文件夹。
+  // 避免遗留旧标题。expand 阶段没拉过的文件夹不需要预热。
+  useEffect(() => {
+    const expandedFolderIds: number[] = [];
+    for (const k of expandedKeys) {
+      const s = String(k);
+      if (!s.startsWith(NEW_NODE_PREFIX) && !isNoteKey(s)) {
+        const id = Number(s);
+        if (Number.isFinite(id)) expandedFolderIds.push(id);
+      }
+    }
+    setNotesByFolder(new Map());
+    expandedFolderIds.forEach((id) => void loadNotesForFolder(id));
+    // 始终重拉未分类：需要知道数量来决定"未分类"虚拟节点是否隐藏（空时隐藏）。
+    // 折叠态也拉一次（极轻量：page_size=NOTES_PER_FOLDER_LIMIT），首次 mount 同样命中。
+    void loadUncategorizedNotes();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notesRefreshTick]);
+
+  // 切换"未分类"展开：展开时第一次进入要拉数据；折叠不卸载缓存（下次展开秒开）
+  useEffect(() => {
+    if (uncategorizedExpanded && uncategorizedNotes.length === 0) {
+      void loadUncategorizedNotes();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uncategorizedExpanded]);
+
+  /**
+   * 展开/收起：把 antd 给的 keys 视作"用户期望展开的全集"，
+   * 反推折叠集合 = 所有现存文件夹 id - 期望展开的 → 写入 store 持久化。
+   * 同时对"新出现"的展开节点触发按需加载。
+   */
+  function handleExpand(keys: React.Key[]) {
+    const expandedFolderSet = new Set<string>();
+    let nextUncatExpanded = false;
+    for (const k of keys) {
+      const s = String(k);
+      if (s === UNCATEGORIZED_KEY) {
+        nextUncatExpanded = true;
+        continue;
+      }
+      if (s.startsWith(NEW_NODE_PREFIX) || isNoteKey(s)) continue;
+      if (Number.isFinite(Number(s))) expandedFolderSet.add(s);
+    }
+
+    // 同步未分类节点的展开态到 store（持久化跨视图保留）
+    if (nextUncatExpanded !== uncategorizedExpanded) {
+      setUncategorizedExpanded(nextUncatExpanded);
+      if (nextUncatExpanded && uncategorizedNotes.length === 0) {
+        void loadUncategorizedNotes();
+      }
+    }
+
+    const prevSet = new Set(expandedKeys.map(String));
+    const newCollapsed = allFolderKeys.filter((k) => !expandedFolderSet.has(k));
+    useAppStore.getState().setNotesAllFoldersCollapsed(newCollapsed);
+
+    for (const k of expandedFolderSet) {
+      if (prevSet.has(k)) continue;
+      const id = Number(k);
+      if (Number.isFinite(id) && !notesByFolder.has(id)) {
+        void loadNotesForFolder(id);
+      }
+    }
+  }
+
+  // 初次拿到文件夹后，对默认展开的文件夹批量预热笔记，避免一打开就要点一下才显示
+  useEffect(() => {
+    if (folders.length === 0 || expandedKeys.length === 0) return;
+    for (const k of expandedKeys) {
+      const s = String(k);
+      if (s.startsWith(NEW_NODE_PREFIX) || isNoteKey(s)) continue;
+      const id = Number(s);
+      if (Number.isFinite(id) && !notesByFolder.has(id)) {
+        void loadNotesForFolder(id);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [folders, expandedKeys]);
+
+  async function loadFolders() {
+    try {
+      const list = await folderApi.list();
+      setFolders(list);
+      // 顺手清理已删除文件夹在折叠集合里的孤儿 id，避免持久化无限沉淀
+      useAppStore.getState().pruneNotesCollapsedFolders(collectAllKeys(list));
+    } catch (e) {
+      console.error("加载文件夹失败:", e);
+    } finally {
+      setInitialLoading(false);
+    }
+  }
+
+  /** 打开本机 .md / .txt 文件 → 导入/复用笔记 → 跳转 */
+  async function handleOpenMarkdown() {
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        filters: [
+          { name: "文本", extensions: ["md", "markdown", "txt"] },
+        ],
+      });
+      const path = Array.isArray(picked) ? picked[0] : picked;
+      if (!path) return;
+      // 先问以什么方式打开（已记住偏好则直接返回，不弹窗）
+      const fileName = path.split(/[\\/]/).pop() || path;
+      const mode = await resolveOpenMdMode(fileName);
+      const result = await importApi.openMarkdownFile(path, mode === "scratch");
+      if (result.wasSynced) {
+        message.info("已根据最新 md 文件同步笔记内容");
+      }
+      // Q-003：首次打开外部 .md 弹一次说明，让用户知道"已加入本地库 + 编辑会写回原文件"
+      // 临时编辑不弹：那条说明讲的是"已加入知识库"，与临时模式的预期相反
+      if (!result.isScratch) showExternalMdIntroOnce();
+      useAppStore.getState().bumpNotesRefresh();
+      navigate(`/notes/${result.noteId}`);
+    } catch (e) {
+      message.error(`打开失败: ${e}`);
+    }
+  }
+
+  // ─── 创建（根级 / 子级） ───────────────────────
+
+  async function submitCreateRoot() {
+    if (cancelEditRef.current) {
+      cancelEditRef.current = false;
+      setCreatingRoot(false);
+      setNewRootName("");
+      return;
+    }
+    const name = newRootName.trim();
+    if (!name) {
+      setCreatingRoot(false);
+      setNewRootName("");
+      return;
+    }
+    try {
+      await folderApi.create(name);
+      setNewRootName("");
+      setCreatingRoot(false);
+      loadFolders();
+      useAppStore.getState().bumpFoldersRefresh();
+    } catch (e) {
+      message.error(String(e));
+    }
+  }
+
+  async function submitCreateChild() {
+    if (cancelEditRef.current) {
+      cancelEditRef.current = false;
+      setCreatingUnderKey(null);
+      setNewChildName("");
+      return;
+    }
+    const name = newChildName.trim();
+    const parentKey = creatingUnderKey;
+    if (!name || !parentKey) {
+      setCreatingUnderKey(null);
+      setNewChildName("");
+      return;
+    }
+    try {
+      await folderApi.create(name, Number(parentKey));
+      setNewChildName("");
+      setCreatingUnderKey(null);
+      useAppStore.getState().setNotesFolderCollapsed(parentKey, false);
+      loadFolders();
+      useAppStore.getState().bumpFoldersRefresh();
+    } catch (e) {
+      message.error(String(e));
+    }
+  }
+
+  function startCreateChild(parentKey: string) {
+    setCreatingUnderKey(parentKey);
+    setNewChildName("");
+    useAppStore.getState().setNotesFolderCollapsed(parentKey, false);
+  }
+
+  // ─── 重命名 ─────────────────────────────────
+
+  function startRename(key: string, currentName: string) {
+    setEditingKey(key);
+    setEditingName(currentName);
+  }
+
+  async function submitRename() {
+    if (cancelEditRef.current) {
+      cancelEditRef.current = false;
+      setEditingKey(null);
+      setEditingName("");
+      return;
+    }
+    if (!editingKey) return;
+    const key = editingKey;
+    const name = editingName.trim();
+
+    // 笔记重命名：复用 update_note Command（带原 content / folder_id 一起更新）
+    if (isNoteKey(key)) {
+      const id = noteIdFromKey(key);
+      const note = findNoteById(id);
+      if (!note) {
+        setEditingKey(null);
+        setEditingName("");
+        return;
+      }
+      if (!name || name === note.title) {
+        setEditingKey(null);
+        setEditingName("");
+        return;
+      }
+      // 加密笔记的 content 是占位符，直接 update_note 会把真实加密内容覆盖掉。
+      // 引导用户在编辑器里改标题（那里能拿到解密后内容）。
+      if (note.is_encrypted) {
+        message.info("加密笔记请在编辑器内修改标题");
+        setEditingKey(null);
+        setEditingName("");
+        return;
+      }
+      try {
+        await noteApi.update(id, {
+          title: name,
+          content: note.content,
+          folder_id: note.folder_id,
+        });
+        setEditingKey(null);
+        setEditingName("");
+        useAppStore.getState().bumpNotesRefresh();
+        // 同步 TabBar：编辑器只在自己改 title 时调 updateTabTitle，从这里
+        // 改名要主动通知 tabs store，否则顶部标签栏还在显示旧标题
+        useTabsStore.getState().updateTabTitle(id, name);
+      } catch (e) {
+        message.error(String(e));
+      }
+      return;
+    }
+
+    const original = findFolderName(folders, Number(key));
+    if (!name || name === original) {
+      setEditingKey(null);
+      setEditingName("");
+      return;
+    }
+    try {
+      await folderApi.rename(Number(key), name);
+      setEditingKey(null);
+      setEditingName("");
+      loadFolders();
+      useAppStore.getState().bumpFoldersRefresh();
+    } catch (e) {
+      message.error(String(e));
+    }
+  }
+
+  // ─── 删除 ─────────────────────────────────
+
+  async function confirmDelete(key: string, name: string) {
+    const id = Number(key);
+    // 删除收尾：清理选中态 + 刷新文件夹树 + 刷新笔记列表（笔记可能被移入回收站）
+    const finishCleanup = () => {
+      if (selectedKey === key) setSelectedKey(null);
+      loadFolders();
+      useAppStore.getState().bumpFoldersRefresh();
+      useAppStore.getState().bumpNotesRefresh();
+    };
+
+    // 先查子树统计，决定走"普通删除"还是"级联删除确认"
+    let stats = { folders: 0, notes: 0, dailies: 0 };
+    try {
+      stats = await folderApi.subtreeStats(id);
+    } catch {
+      // 统计查询失败不阻断：按空处理走普通删除，后端非空会兜底报错
+    }
+    // 日记不算"占用"：它在笔记列表里不显示，删文件夹也不会删它（只会让它回到未分类），
+    // 所以有日记的文件夹在用户眼里就是空的，照空文件夹流程走，只是文案里说明白。
+    const isEmpty = stats.folders === 0 && stats.notes === 0;
+
+    if (isEmpty) {
+      Modal.confirm({
+        title: `删除文件夹"${name}"`,
+        content:
+          stats.dailies > 0
+            ? `该文件夹为空，但关联着 ${stats.dailies} 篇日记（日记不在笔记列表里显示）。删除后这些日记会回到「未分类」，内容和日期都不受影响，仍可在每日笔记里查看。`
+            : "该文件夹为空。删除后文件夹本身不可恢复。",
+        width: stats.dailies > 0 ? 460 : undefined,
+        okText: "删除",
+        okType: "danger",
+        cancelText: "取消",
+        async onOk() {
+          try {
+            await folderApi.delete(id);
+            finishCleanup();
+          } catch (e) {
+            message.error(String(e));
+            throw e;
+          }
+        },
+      });
+      return;
+    }
+
+    // 非空 → 级联删除确认：明确列出将删内容，笔记进回收站可恢复
+    const parts: string[] = [];
+    if (stats.folders > 0) parts.push(`${stats.folders} 个子文件夹`);
+    if (stats.notes > 0) parts.push(`${stats.notes} 篇笔记`);
+    Modal.confirm({
+      title: `删除文件夹"${name}"及其内容？`,
+      width: 460,
+      content: (
+        <div style={{ fontSize: 13, lineHeight: 1.7 }}>
+          <div>
+            该文件夹下还有 <b>{parts.join(" 和 ")}</b>，将一并处理：
+          </div>
+          <ul style={{ margin: "8px 0 0", paddingLeft: 20 }}>
+            {stats.notes > 0 && (
+              <li>
+                {stats.notes} 篇笔记<b>移入回收站</b>（可在回收站恢复）
+              </li>
+            )}
+            <li>本文件夹{stats.folders > 0 ? `及 ${stats.folders} 个子文件夹` : ""}一并删除</li>
+            {/* 日记在笔记列表里根本不显示，不写清楚用户会以为"文件夹是空的却说有内容" */}
+            {stats.dailies > 0 && (
+              <li>
+                {stats.dailies} 篇日记<b>不会被删除</b>，只是回到「未分类」，
+                仍可在每日笔记里查看
+              </li>
+            )}
+          </ul>
+        </div>
+      ),
+      okText: "全部删除",
+      okType: "danger",
+      cancelText: "取消",
+      async onOk() {
+        try {
+          const r = await folderApi.deleteCascade(id);
+          message.success(
+            r.notes_trashed > 0
+              ? `已删除文件夹，${r.notes_trashed} 篇笔记已移入回收站`
+              : "已删除文件夹",
+          );
+          finishCleanup();
+        } catch (e) {
+          message.error(String(e));
+          throw e;
+        }
+      },
+    });
+  }
+
+  /**
+   * 清理空文件夹：扫出「子树内没有任何未回收笔记」的文件夹，预览后批量删。
+   *
+   * 「导入历史日记」按 `日期文件夹/笔记.md` 建出成百上千个日期文件夹，日记摘走后
+   * 全成了空壳 —— 一个个右键删不现实，而且空壳多了侧栏树也变重。
+   * 判空口径比列表宽（日记 / 隐藏 / 加密笔记都算内容），宁可少删也不误删。
+   */
+  async function handleCleanupEmptyFolders() {
+    let list: EmptyFolderInfo[] = [];
+    try {
+      list = await folderApi.listEmpty();
+    } catch (e) {
+      message.error(String(e));
+      return;
+    }
+    if (list.length === 0) {
+      message.info("没有找到空文件夹");
+      return;
+    }
+    // 预览只列前 12 条：几百个路径全铺出来弹窗会长到没法看
+    const preview = list.slice(0, 12);
+    Modal.confirm({
+      title: "清理空文件夹",
+      width: 460,
+      content: (
+        <div style={{ fontSize: 13, lineHeight: 1.7 }}>
+          <div>
+            找到 <b>{list.length}</b> 个空文件夹（里面没有任何未回收的笔记，
+            日记也算内容）：
+          </div>
+          <div
+            style={{
+              maxHeight: 200,
+              overflow: "auto",
+              margin: "8px 0 0",
+              padding: "6px 10px",
+              background: token.colorFillQuaternary,
+              borderRadius: 6,
+              fontSize: 12,
+            }}
+          >
+            {preview.map((f) => (
+              <div key={f.id} className="truncate" title={f.path}>
+                {f.path}
+              </div>
+            ))}
+            {list.length > preview.length && (
+              <div style={{ color: token.colorTextTertiary }}>
+                …另有 {list.length - preview.length} 个
+              </div>
+            )}
+          </div>
+          <div style={{ marginTop: 8, color: token.colorTextTertiary }}>
+            文件夹删除后不可恢复；笔记不受影响。
+          </div>
+        </div>
+      ),
+      okText: `删除 ${list.length} 个`,
+      okType: "danger",
+      cancelText: "取消",
+      async onOk() {
+        try {
+          const r = await folderApi.cleanupEmpty(list.map((f) => f.id));
+          message.success(`已清理 ${r.deleted} 个空文件夹`);
+          loadFolders();
+          useAppStore.getState().bumpFoldersRefresh();
+        } catch (e) {
+          message.error(String(e));
+          throw e;
+        }
+      },
+    });
+  }
+
+  // ─── 拖拽移动 ───────────────────────────────
+
+  type DropInfo = {
+    node: { key: React.Key; pos: string };
+    dragNode: { key: React.Key };
+    dropPosition: number;
+    dropToGap: boolean;
+  };
+
+  async function handleDrop(info: DropInfo) {
+    // 拖拽落下：清掉可能仍在计时的悬停展开，避免松手后目标文件夹又被延迟展开
+    cancelHoverExpand();
+    // 防御：OS 文件拖入时 antd Tree 的 onDrop 理论上不会触发（内部无 dragNode），
+    // 但不同版本行为有差异，保底校验避免 undefined.key 抛错
+    if (!info.dragNode || info.dragNode.key == null) return;
+    const dragKey = String(info.dragNode.key);
+    const dropKey = String(info.node.key);
+    if (dragKey.startsWith(NEW_NODE_PREFIX) || dropKey.startsWith(NEW_NODE_PREFIX)) return;
+
+    // ── 笔记拖动 → 跨 folder 改 folder_id；同 folder 内调 reorder 改 sort_order ──
+    // Why: 跨 folder 时改 sort_order 没意义（用户肯定还要再拖到目标位置），保持原行为；
+    //      同 folder 时拖到另一笔记上/旁 → 重排，注意：仅在列表页"自定义排序"模式下可见
+    if (isNoteKey(dragKey)) {
+      const noteId = noteIdFromKey(dragKey);
+      const note = findNoteById(noteId);
+      if (!note) return;
+
+      // 计算目标 folderId：
+      //   - 落在文件夹节点上（!dropToGap） → 目标 = 该文件夹
+      //   - 落在文件夹之间的 gap → 目标 = 该文件夹的父
+      //   - 落在另一篇笔记上/旁 → 目标 = 那篇笔记所在的文件夹
+      let targetFolderId: number | null;
+      let dropNoteId: number | null = null;
+      if (isNoteKey(dropKey)) {
+        dropNoteId = noteIdFromKey(dropKey);
+        const dropNote = findNoteById(dropNoteId);
+        targetFolderId = dropNote ? dropNote.folder_id : note.folder_id;
+      } else if (dropKey === UNCATEGORIZED_KEY) {
+        // 拖到「未分类」虚拟根 → 目标 = null（folder_id IS NULL）
+        targetFolderId = null;
+      } else {
+        const dropFolderId = Number(dropKey);
+        if (!Number.isFinite(dropFolderId)) return;
+        targetFolderId = info.dropToGap
+          ? findFolderParentId(folders, dropFolderId)
+          : dropFolderId;
+      }
+
+      // ── 多选批量拖动：拖的是已多选集合里的笔记，且选了不止一项 →
+      //    把整批一次性 moveBatch 到目标文件夹（忽略 gap 重排语义，批量只做归类）。
+      if (selectedNoteKeys.has(dragKey) && selectedNoteKeys.size > 1) {
+        const ids = Array.from(selectedNoteKeys)
+          .filter((k) => isNoteKey(k))
+          .map((k) => noteIdFromKey(k))
+          .filter((id) => Number.isFinite(id));
+        try {
+          const moved = await noteApi.moveBatch(ids, targetFolderId);
+          clearMultiSelect();
+          useAppStore.getState().bumpNotesRefresh();
+          message.success(`已移动 ${moved} 篇笔记`);
+        } catch (e) {
+          message.error(String(e));
+        }
+        return;
+      }
+
+      // 跨 folder：保持原"只换 folder_id"行为
+      if (targetFolderId !== note.folder_id) {
+        try {
+          await noteApi.moveToFolder(noteId, targetFolderId);
+          useAppStore.getState().bumpNotesRefresh();
+        } catch (e) {
+          message.error(String(e));
+        }
+        return;
+      }
+
+      // 同 folder + dropNode 是文件夹（不是笔记叶子）
+      // → 用户视觉是"拖到笔记列表头部上方的 gap"（子文件夹在前、笔记在后）
+      // → 把 dragNote 插到笔记列表最前
+      if (dropNoteId == null) {
+        const siblings: Note[] =
+          targetFolderId == null
+            ? uncategorizedNotes
+            : (notesByFolder.get(targetFolderId) ?? []);
+        const withoutDrag = siblings.filter((n) => n.id !== noteId);
+        const newOrder = [note, ...withoutDrag];
+        // 乐观更新：startTransition 让 antd Tree 先完成 onDrop 内部清理 paint，
+        // 下一帧再 commit 新 treeData，消除"拖完瞬间"的闪烁
+        startTransition(() => {
+          if (targetFolderId == null) {
+            setUncategorizedNotes(newOrder);
+          } else {
+            setNotesByFolder((prev) => {
+              const next = new Map(prev);
+              next.set(targetFolderId!, newOrder);
+              return next;
+            });
+          }
+        });
+        try {
+          await noteApi.reorder(newOrder.map((n) => n.id));
+          if (targetFolderId == null) {
+            loadingUncategorizedRef.current = false;
+            void loadUncategorizedNotes();
+          } else {
+            loadingNotesRef.current.delete(targetFolderId);
+            void loadNotesForFolder(targetFolderId);
+          }
+          useAppStore.getState().bumpNotesRefresh();
+        } catch (e) {
+          message.error(String(e));
+        }
+        return;
+      }
+      // 同 folder + 落在另一笔记叶子上/旁 → 计算精确插入位置
+      if (dropNoteId === noteId) return;
+      const dropNote = findNoteById(dropNoteId);
+      if (!dropNote) return;
+      const siblings: Note[] =
+        targetFolderId == null
+          ? uncategorizedNotes
+          : (notesByFolder.get(targetFolderId) ?? []);
+      const withoutDrag = siblings.filter((n) => n.id !== noteId);
+      // 列表恒按 is_pinned DESC 分档（置顶档在上、普通档在下），自定义排序的
+      // sort_order 只在各档内部生效（list_notes: "is_pinned DESC, sort_order ASC"）。
+      // 跨档拖动（拖普通笔记落在置顶笔记上/旁，或反之）不再拒绝，而是"吸附到本档边界"：
+      //   - 普通笔记跨档 → 落到普通档顶部（= 置顶档正下方），
+      //     正好满足"已置顶一篇，想把另一篇排到第二位"
+      //   - 置顶笔记跨档 → 落到置顶档底部
+      // 边界点 = 最后一个置顶笔记之后；插到这里后 reorder 写入的 sort_order 再经
+      // is_pinned 分档稳定排序，dragNote 恰好落在该处，乐观更新不会闪。
+      let insertIdx: number;
+      if (note.is_pinned !== dropNote.is_pinned) {
+        let lastPinnedIdx = -1;
+        withoutDrag.forEach((n, i) => {
+          if (n.is_pinned) lastPinnedIdx = i;
+        });
+        insertIdx = lastPinnedIdx + 1;
+      } else {
+        const dropIdx = withoutDrag.findIndex((n) => n.id === dropNoteId);
+        if (dropIdx < 0) return;
+        // antd Tree 的 dropPosition 相对父级位置；diff 出 dropOffset 判断"落在前/后"
+        const posArr = info.node.pos.split("-");
+        const dropOffset =
+          info.dropPosition - Number(posArr[posArr.length - 1]);
+        insertIdx = dropOffset > 0 ? dropIdx + 1 : dropIdx;
+      }
+      const newOrder = [...withoutDrag];
+      newOrder.splice(insertIdx, 0, note);
+      // 乐观更新：startTransition 让 antd Tree 先完成 onDrop 内部清理 paint，
+      // 下一帧再 commit 新 treeData，消除"拖完瞬间"的闪烁
+      startTransition(() => {
+        if (targetFolderId == null) {
+          setUncategorizedNotes(newOrder);
+        } else {
+          setNotesByFolder((prev) => {
+            const next = new Map(prev);
+            next.set(targetFolderId!, newOrder);
+            return next;
+          });
+        }
+      });
+      try {
+        await noteApi.reorder(newOrder.map((n) => n.id));
+        useAppStore.getState().bumpNotesRefresh();
+      } catch (e) {
+        message.error(String(e));
+        // 失败回滚：重拉
+        if (targetFolderId == null) {
+          loadingUncategorizedRef.current = false;
+          void loadUncategorizedNotes();
+        } else {
+          loadingNotesRef.current.delete(targetFolderId);
+          void loadNotesForFolder(targetFolderId);
+        }
+      }
+      return;
+    }
+
+    // 拖动文件夹时：目标若是笔记，忽略
+    if (isNoteKey(dropKey)) return;
+
+    const dragId = Number(dragKey);
+    const dropId = Number(dropKey);
+    const currentParentId = findFolderParentId(folders, dragId);
+
+    const posArr = info.node.pos.split("-");
+    const dropOffset = info.dropPosition - Number(posArr[posArr.length - 1]);
+
+    try {
+      if (!info.dropToGap) {
+        if (currentParentId === dropId) {
+          const siblings = getChildIds(folders, dropId);
+          const withoutDrag = siblings.filter((id) => id !== dragId);
+          await folderApi.reorder([dragId, ...withoutDrag]);
+        } else {
+          await folderApi.move(dragId, dropId);
+          const siblings = getChildIds(folders, dropId);
+          await folderApi.reorder([dragId, ...siblings]);
+        }
+        loadFolders();
+        useAppStore.getState().bumpFoldersRefresh();
+        return;
+      }
+
+      const newParentId = findFolderParentId(folders, dropId);
+      const rawSiblings = getChildIds(folders, newParentId);
+      const withoutDrag = rawSiblings.filter((id) => id !== dragId);
+      const targetIdx = withoutDrag.indexOf(dropId);
+      const insertIdx = dropOffset <= 0 ? targetIdx : targetIdx + 1;
+      const newOrder = [...withoutDrag];
+      newOrder.splice(insertIdx, 0, dragId);
+
+      if (currentParentId !== newParentId) {
+        await folderApi.move(dragId, newParentId);
+      }
+      await folderApi.reorder(newOrder);
+      loadFolders();
+      useAppStore.getState().bumpFoldersRefresh();
+    } catch (e) {
+      message.error(String(e));
+    }
+  }
+
+  // ─── 单击/双击 ─────────────────────────────
+
+  /** 在 notesByFolder 缓存 + 未分类列表 里按 id 查找笔记 */
+  function findNoteById(id: number): Note | null {
+    for (const list of notesByFolder.values()) {
+      const found = list.find((n) => n.id === id);
+      if (found) return found;
+    }
+    return uncategorizedNotes.find((n) => n.id === id) ?? null;
+  }
+
+  function handleTitleClick(key: string) {
+    if (key.startsWith(NEW_NODE_PREFIX)) return;
+    if (editingKey === key) return;
+
+    // 点文件夹 / 未分类 → 退出笔记多选（多选只在笔记之间维持）
+    if (!isNoteKey(key)) clearMultiSelect();
+
+    // 「未分类」虚拟根节点：单击 = 仅切换选中 + 跳转；展开/折叠改由双击触发
+    if (key === UNCATEGORIZED_KEY) {
+      if (selectedKey === UNCATEGORIZED_KEY) {
+        setSelectedKey(null);
+        navigate("/notes");
+      } else {
+        setSelectedKey(UNCATEGORIZED_KEY);
+        navigate("/notes?folder=uncategorized");
+      }
+      return;
+    }
+
+    // 笔记叶节点：单击打开编辑器；300ms 内同节点二次点击 → 进入重命名
+    if (isNoteKey(key)) {
+      const now = Date.now();
+      const last = lastClickRef.current;
+      if (last && last.key === key && now - last.time < 300) {
+        lastClickRef.current = null;
+        const note = findNoteById(noteIdFromKey(key));
+        if (note) startRename(key, note.title || "");
+        return;
+      }
+      lastClickRef.current = { key, time: now };
+      const id = noteIdFromKey(key);
+      if (Number.isFinite(id)) {
+        setSelectedKey(key);
+        navigate(`/notes/${id}`);
+      }
+      return;
+    }
+
+    // 文件夹单击 = 仅切换选中 + 跳转；展开/折叠改由双击触发，重命名走 F2/右键菜单
+    if (selectedKey === key) {
+      setSelectedKey(null);
+      navigate("/notes");
+    } else {
+      setSelectedKey(key);
+      navigate(`/notes?folder=${key}`);
+    }
+  }
+
+  /** 文件夹/未分类的双击 = 切换展开/折叠。笔记叶子不参与（无展开态）。 */
+  function handleTitleDoubleClick(key: string) {
+    if (key.startsWith(NEW_NODE_PREFIX) || isNoteKey(key)) return;
+    if (key === UNCATEGORIZED_KEY) {
+      const cur = uncategorizedExpanded;
+      setUncategorizedExpanded(!cur);
+      if (!cur && uncategorizedNotes.length === 0) {
+        void loadUncategorizedNotes();
+      }
+      return;
+    }
+    const wasExpanded = expandedKeys.some((k) => String(k) === key);
+    useAppStore.getState().setNotesFolderCollapsed(key, wasExpanded);
+    if (!wasExpanded) {
+      const id = Number(key);
+      if (Number.isFinite(id) && !notesByFolder.has(id)) {
+        void loadNotesForFolder(id);
+      }
+    }
+  }
+
+  // ─── 多选（仅笔记）─────────────────────────
+  // 笔记节点点击的统一入口：带修饰键 → 多选；否则走原 handleTitleClick（打开/重命名）。
+  // 返回 true 表示"已作为多选处理，调用方不要再走普通打开逻辑"。
+  function handleNoteClickWithModifiers(
+    key: string,
+    e: React.MouseEvent,
+  ): boolean {
+    // Ctrl/Cmd：切换该笔记的多选态，不打开、不导航
+    if (e.ctrlKey || e.metaKey) {
+      setSelectedNoteKeys((prev) => {
+        const next = new Set(prev);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        return next;
+      });
+      multiSelectAnchorRef.current = key;
+      return true;
+    }
+    // Shift：从锚点到当前，按展示顺序连选；无锚点则退化为单选该项
+    if (e.shiftKey) {
+      const anchor = multiSelectAnchorRef.current;
+      if (!anchor) {
+        setSelectedNoteKeys(new Set([key]));
+        multiSelectAnchorRef.current = key;
+        return true;
+      }
+      const ai = flatNoteKeys.indexOf(anchor);
+      const bi = flatNoteKeys.indexOf(key);
+      if (ai === -1 || bi === -1) {
+        setSelectedNoteKeys(new Set([key]));
+        multiSelectAnchorRef.current = key;
+        return true;
+      }
+      const [lo, hi] = ai <= bi ? [ai, bi] : [bi, ai];
+      setSelectedNoteKeys(new Set(flatNoteKeys.slice(lo, hi + 1)));
+      return true;
+    }
+    // 普通点击：清空多选，把锚点设到当前，交回普通打开逻辑
+    if (selectedNoteKeys.size > 0) setSelectedNoteKeys(new Set());
+    multiSelectAnchorRef.current = key;
+    return false;
+  }
+
+  /** 清空多选（点文件夹/空白/Esc 时调用） */
+  function clearMultiSelect() {
+    if (selectedNoteKeys.size > 0) setSelectedNoteKeys(new Set());
+    multiSelectAnchorRef.current = null;
+  }
+
+  // ─── F2 快捷键 ─────────────────────────────
+
+  function handleTreeKeyDown(e: React.KeyboardEvent) {
+    // Esc：退出笔记多选
+    if (e.key === "Escape" && selectedNoteKeys.size > 0 && !editingKey) {
+      e.preventDefault();
+      clearMultiSelect();
+      return;
+    }
+    if (e.key === "F2" && selectedKey && !editingKey) {
+      const name = findFolderName(selectedKey ? folders : [], Number(selectedKey));
+      if (name !== null) {
+        e.preventDefault();
+        startRename(selectedKey, name);
+      }
+    }
+  }
+
+  // ─── 右键菜单 ─────────────────────────────
+
+  function buildMenuItems(key: string, name: string): ContextMenuEntry[] {
+    const close = () => setContextMenu(null);
+
+    // ─── 笔记叶子菜单 ───
+    if (isNoteKey(key)) {
+      const noteId = noteIdFromKey(key);
+      const note = findNoteById(noteId);
+      const isPinned = note?.is_pinned ?? false;
+
+      // 右键的笔记在多选集合且选了不止一项 → 顶部给一组批量操作。
+      // （只对"已多选"展示；单篇右键仍走下方原菜单）
+      const inMultiSelect = selectedNoteKeys.has(key) && selectedNoteKeys.size > 1;
+      const batchEntries: ContextMenuEntry[] = inMultiSelect
+        ? [
+            {
+              key: "batch-move",
+              icon: <FolderOpen size={14} />,
+              label: `移动选中的 ${selectedNoteKeys.size} 篇到…`,
+              onClick: () => {
+                close();
+                openMoveModal();
+              },
+            },
+            {
+              key: "batch-export",
+              icon: <FileDown size={14} />,
+              label: `导出选中的 ${selectedNoteKeys.size} 篇…`,
+              onClick: () => {
+                close();
+                void exportNotesBatchAsMarkdown(
+                  [...selectedNoteKeys].map(noteIdFromKey),
+                );
+              },
+            },
+            {
+              key: "batch-trash",
+              icon: <Trash2 size={14} />,
+              label: `移到回收站（${selectedNoteKeys.size} 篇）`,
+              danger: true,
+              onClick: () => {
+                close();
+                trashSelectedNotes();
+              },
+            },
+            { type: "divider" },
+          ]
+        : [];
+
+      return [
+        ...batchEntries,
+        {
+          key: "open",
+          icon: <ExternalLink size={14} />,
+          label: "打开",
+          onClick: () => {
+            navigate(`/notes/${noteId}`);
+            close();
+          },
+        },
+        {
+          // 弹独立 OS 窗口：多篇笔记可同时弹出，用 Win+方向键 Snap 到左右半屏对照看。
+          // 能力早就有（services/popout_window.rs），但之前只有编辑器工具栏一个入口，
+          // 用户根本发现不了，这里补一个更顺手的。
+          key: "open-in-new-window",
+          icon: <AppWindow size={14} />,
+          label: "在新窗口打开",
+          onClick: () => {
+            void noteApi
+              .openInNewWindow(noteId)
+              .catch((err) => message.error(`打开新窗口失败：${err}`));
+            close();
+          },
+        },
+        {
+          key: "rename",
+          icon: <Edit3 size={14} />,
+          label: "重命名",
+          onClick: () => {
+            startRename(key, name);
+            close();
+          },
+        },
+        // 单篇「移动到…」：复用批量移动的 TreeSelect 弹窗。多选(>1)时顶部已有批量
+        // 「移动选中的 N 篇到…」入口，故这里仅在非多选时展示，避免两个移动项并存造成歧义。
+        ...(!inMultiSelect
+          ? [
+              {
+                key: "move-to",
+                icon: <FolderOpen size={14} />,
+                label: "移动到…",
+                onClick: () => {
+                  close();
+                  openMoveModalForNote(noteId);
+                },
+              } as ContextMenuEntry,
+            ]
+          : []),
+        {
+          key: "copy-wiki",
+          icon: <Copy size={14} />,
+          label: "复制 wiki 链接",
+          onClick: () => {
+            navigator.clipboard
+              .writeText(`[[${name}]]`)
+              .then(() => message.success("已复制"))
+              .catch((err) => message.error(String(err)));
+            close();
+          },
+        },
+        {
+          // 复制笔记数字 ID：给外部 agent / MCP 用，拿到 ID 后直接 get_note(id)，
+          // 省去"搜标题/搜内容"的耗 token 步骤。ID 即 notes 表自增主键。
+          key: "copy-note-id",
+          icon: <Hash size={14} />,
+          label: "复制笔记 ID",
+          onClick: () => {
+            navigator.clipboard
+              .writeText(String(noteId))
+              .then(() => message.success(`已复制 ID：${noteId}`))
+              .catch((err) => message.error(String(err)));
+            close();
+          },
+        },
+        { type: "divider" },
+        // 导出：与笔记列表页 / 编辑器同口径的三种格式，实现统一走 lib/exportActions
+        {
+          key: "export-md",
+          icon: <FileTypeIcon type="md" size={14} />,
+          label: "导出为 Markdown",
+          onClick: () => {
+            close();
+            void exportNoteAsMarkdown(noteId);
+          },
+        },
+        {
+          key: "export-word",
+          icon: <FileTypeIcon type="docx" size={14} />,
+          label: "导出为 Word (.docx)",
+          onClick: () => {
+            close();
+            void exportNoteAsWord(noteId, name);
+          },
+        },
+        {
+          key: "export-html",
+          icon: <FileDown size={14} />,
+          label: "导出为 HTML (单文件)",
+          onClick: () => {
+            close();
+            void exportNoteAsHtml(noteId, name);
+          },
+        },
+        { type: "divider" },
+        {
+          key: "compare-with-note",
+          icon: <GitCompare size={14} />,
+          label: "与另一篇笔记对比…",
+          onClick: () => {
+            setCompareFirstNoteId(noteId);
+            close();
+          },
+        },
+        {
+          key: "toggle-pin",
+          icon: isPinned ? <PinOff size={14} /> : <Pin size={14} />,
+          label: isPinned ? "取消置顶" : "置顶",
+          onClick: async () => {
+            close();
+            try {
+              const next = await noteApi.togglePin(noteId);
+              message.success(next ? "已置顶" : "已取消置顶");
+              useAppStore.getState().bumpNotesRefresh();
+            } catch (e) {
+              message.error(String(e));
+            }
+          },
+        },
+        { type: "divider" },
+        {
+          key: "soft-delete",
+          icon: <Trash2 size={14} />,
+          label: "移到回收站",
+          danger: true,
+          onClick: async () => {
+            close();
+            try {
+              await trashApi.softDelete(noteId);
+              useTabsStore.getState().closeTab(noteId);
+              message.success("已移到回收站");
+              useAppStore.getState().bumpNotesRefresh();
+            } catch (e) {
+              message.error(String(e));
+            }
+          },
+        },
+      ];
+    }
+
+    // ─── 文件夹菜单（原有逻辑） ───
+    const folderId = Number(key);
+    return [
+      // ─── 创建：高频操作放第一位 ───
+      {
+        key: "new-note",
+        icon: <NotebookText size={14} />,
+        label: "在此新建笔记",
+        onClick: () => {
+          createBlankAndOpen(folderId, navigate);
+          close();
+        },
+      },
+      {
+        key: "new-child",
+        icon: <Plus size={14} />,
+        label: "新建子文件夹",
+        onClick: () => {
+          startCreateChild(key);
+          close();
+        },
+      },
+      { type: "divider" },
+      // ─── 对此文件夹问 AI：新建一个 RAG 范围限定到本文件夹（含子孙）的会话并跳转 ───
+      {
+        key: "ask-ai-folder",
+        icon: <Sparkles size={14} />,
+        label: "对此文件夹问 AI",
+        onClick: async () => {
+          close();
+          try {
+            const conv = await aiChatApi.createConversation(
+              `📁 ${name}`,
+              undefined,
+              folderId,
+            );
+            navigate("/ai", { state: { activeConvId: conv.id } });
+          } catch (e) {
+            message.error(`发起文件夹问答失败: ${e}`);
+          }
+        },
+      },
+      { type: "divider" },
+      {
+        key: "new-from-template",
+        icon: <LayoutTemplate size={14} />,
+        label: "从模板新建…",
+        onClick: () => {
+          setTemplatePickerFolder(folderId);
+          close();
+        },
+      },
+      { type: "divider" },
+      // ─── 导入：与"+ 新建笔记"按钮口径一致（MD/TXT/PDF/Word），文件夹递归是侧边栏独占 ───
+      {
+        key: "import-text",
+        icon: <FileTypeIcon type="md" size={14} />,
+        label: "导入 Markdown / TXT 文件…",
+        onClick: () => {
+          void importTextFlow(folderId);
+          close();
+        },
+      },
+      {
+        key: "import-md-folder",
+        icon: <FolderOpen size={14} />,
+        label: "导入 Markdown 文件夹…",
+        onClick: () => {
+          void handleImportMdFolder(key);
+          close();
+        },
+      },
+      {
+        key: "import-pdf",
+        icon: <FileTypeIcon type="pdf" size={14} />,
+        label: "导入 PDF…",
+        onClick: () => {
+          void importPdfsFlow(folderId);
+          close();
+        },
+      },
+      {
+        key: "import-word",
+        icon: <FileTypeIcon type="docx" size={14} />,
+        label: "导入 Word…",
+        onClick: () => {
+          void importWordFlow(folderId);
+          close();
+        },
+      },
+      {
+        key: "import-excel",
+        icon: <FileTypeIcon type="xlsx" size={14} />,
+        label: "导入 Excel / CSV…",
+        onClick: () => {
+          void importExcelFlow(folderId);
+          close();
+        },
+      },
+      // 导出与上面的导入成对：侧边栏原先只有导入没有导出，这里补齐
+      {
+        key: "export-folder",
+        icon: <FolderOutput size={14} />,
+        label: "导出此文件夹…",
+        onClick: () => {
+          setExportTarget({ id: folderId, name });
+          close();
+        },
+      },
+      { type: "divider" },
+      {
+        key: "color-label",
+        label: (
+          <span
+            className="flex items-center gap-2"
+            style={{ color: token.colorTextSecondary, fontSize: 12 }}
+          >
+            <Palette size={12} />
+            图标颜色
+          </span>
+        ),
+        disabled: true,
+      },
+      {
+        type: "custom",
+        key: "color-picker",
+        render: () => (
+          <div className="px-2 pb-2 pt-1">
+            <TagColorPicker
+              value={findFolderColor(folders, folderId)}
+              allowClear
+              onChange={async (c) => {
+                close();
+                try {
+                  await folderApi.setColor(folderId, c);
+                  useAppStore.getState().bumpFoldersRefresh();
+                } catch (e) {
+                  message.error(String(e));
+                }
+              }}
+            />
+          </div>
+        ),
+      },
+      { type: "divider" },
+      {
+        key: "rename",
+        icon: <Edit3 size={14} />,
+        label: "重命名",
+        onClick: () => {
+          startRename(key, name);
+          close();
+        },
+      },
+      { type: "divider" },
+      {
+        key: "delete",
+        icon: <Trash size={14} />,
+        label: "删除",
+        danger: true,
+        onClick: () => {
+          confirmDelete(key, name);
+          close();
+        },
+      },
+    ];
+  }
+
+  // ─── 导入到当前文件夹 ─────────────────────
+  // 单文件导入（MD/TXT/PDF/Word）已统一走 noteCreator 里的 importTextFlow / importPdfsFlow / importWordFlow，
+  // 这里只保留侧边栏独有的"扫描文件夹递归导入"流程（带 ImportPreviewModal 选副本策略 + 保留层级）。
+
+  async function handleImportMdFolder(folderKey: string) {
+    const folderId = Number(folderKey);
+    try {
+      const picked = await openDialog({
+        directory: true,
+        title: "选择要导入的 Markdown 文件夹",
+      });
+      if (!picked || Array.isArray(picked)) return;
+      const rootPath = picked;
+      const hide = message.loading("扫描中…", 0);
+      let files: ScannedFile[];
+      try {
+        files = await importApi.scan(rootPath);
+      } catch (e) {
+        hide();
+        message.error(`扫描失败: ${e}`);
+        return;
+      }
+      hide();
+      if (files.length === 0) {
+        message.info("该文件夹下没有 .md 文件");
+        return;
+      }
+      setImportPreview({ files, rootPath, folderId });
+    } catch (e) {
+      message.error(`选择目录失败: ${e}`);
+    }
+  }
+
+  // ─── OS 文件拖入新建笔记 ───────────────────
+
+  /** 识别 .md/.markdown/.txt 文本文件（按扩展名；MIME 在 Windows 上常为空） */
+  function isDroppedTextFile(f: File): boolean {
+    const dot = f.name.lastIndexOf(".");
+    if (dot < 0) return false;
+    const ext = f.name.slice(dot + 1).toLowerCase();
+    return ext === "md" || ext === "markdown" || ext === "txt";
+  }
+
+  /** 只有 OS 文件拖入（dataTransfer.types 含 "Files"）才视为新建笔记场景，避免干扰 Tree 内部节点拖动 */
+  function hasOsFiles(dt: DataTransfer): boolean {
+    // dataTransfer.types 在 DOMStringList / ReadonlyArray 两种实现间兼容，统一转数组再判断
+    for (let i = 0; i < dt.types.length; i++) {
+      if (dt.types[i] === "Files") return true;
+    }
+    return false;
+  }
+
+  /**
+   * 尝试从 File 对象上读非标准的 `path` 属性（Tauri 2 + WebView2 在 dragDropEnabled=false
+   * 时会把 OS 绝对路径挂上来）。返回值为 null 表示至少一个文件没拿到路径。
+   *
+   * Why: 能拿到路径就能走 `importApi.importSelected` 全流程（去重 / source_file_path /
+   *      副本策略等），比"读内容 + noteApi.create"信息量大一个维度。
+   */
+  function collectOsPaths(files: File[]): string[] | null {
+    const paths: string[] = [];
+    for (const f of files) {
+      const p = (f as File & { path?: string }).path;
+      if (!p) return null;
+      paths.push(p);
+    }
+    return paths;
+  }
+
+  /**
+   * 把拖入的文件各自建成笔记。优先走 importApi.importSelected（能拿到 OS 路径时，
+   * 享受去重/副本/source_file 追踪）；否则回退到前端 File.text() + noteApi.create。
+   */
+  async function handleOsFilesDropped(files: File[]) {
+    const texts = files.filter(isDroppedTextFile);
+    const skipped = files.length - texts.length;
+    if (texts.length === 0) {
+      message.warning("仅支持 .md / .txt 拖入新建笔记（附件拖放请拖到编辑器内）");
+      return;
+    }
+
+    // ── 快路径：能拿到 OS 路径则走 importApi（仅对 .md/.markdown，.txt 走慢路径） ──
+    const mdOnly = texts.filter((f) => {
+      const ext = f.name.slice(f.name.lastIndexOf(".") + 1).toLowerCase();
+      return ext === "md" || ext === "markdown";
+    });
+    const paths = mdOnly.length === texts.length ? collectOsPaths(texts) : null;
+    // T-016: 当前侧栏选中了文件夹时，落到该文件夹下（OB 用户期望）；未选中则落根。
+    // 复用与「+ 新建笔记」同一份判定 —— 原来这里是裸 Number(selectedKey)，
+    // 选中的是「未分类」或某篇笔记时会算出 NaN 当文件夹 id 传下去。
+    const targetFolderId = newNoteTarget.folderId;
+    if (paths && paths.length > 0) {
+      const job = await beginTrackedImportJob(
+        "Markdown / 文本",
+        paths.length,
+        "import:progress",
+      );
+      try {
+        const result = await importApi.importSelected(paths, targetFolderId);
+        job.finish(result.imported, result.errors.length);
+        const parts: string[] = [];
+        if (result.imported > 0) parts.push(`新建 ${result.imported}`);
+        if (result.duplicated > 0) parts.push(`副本 ${result.duplicated}`);
+        if (result.skipped > 0) parts.push(`跳过 ${result.skipped}`);
+        message.success(parts.length ? `导入完成：${parts.join("，")}` : "无新增");
+        if (result.errors.length > 0) {
+          console.warn("[notes-panel drop] 导入失败:", result.errors);
+          message.warning(`${result.errors.length} 个文件失败`);
+        }
+        useAppStore.getState().bumpNotesRefresh();
+        useAppStore.getState().bumpFoldersRefresh();
+      } catch (e) {
+        job.cancel();
+        message.error(`导入失败: ${e}`);
+      }
+      return;
+    }
+
+    // ── 慢路径：File.text() + noteApi.create（含 .txt / 路径不可用场景） ──
+    let lastId: number | null = null;
+    let ok = 0;
+    const errors: string[] = [];
+    for (const f of texts) {
+      try {
+        const content = await f.text();
+        const title = f.name.replace(/\.(md|markdown|txt)$/i, "").trim() || "未命名";
+        // T-016: 与快路径保持一致，选中文件夹时落到该文件夹
+        const note = await noteApi.create({
+          title,
+          content,
+          folder_id: targetFolderId,
+        });
+        lastId = note.id;
+        ok++;
+      } catch (e) {
+        errors.push(`${f.name}: ${e}`);
+      }
+    }
+    if (ok > 0) {
+      message.success(
+        `已新建 ${ok} 篇笔记${skipped > 0 ? `（忽略 ${skipped} 个非文本文件）` : ""}`,
+      );
+      useAppStore.getState().bumpNotesRefresh();
+      useAppStore.getState().bumpFoldersRefresh();
+      if (lastId) navigate(`/notes/${lastId}`);
+    }
+    if (errors.length > 0) {
+      console.warn("[notes-panel drop] 导入失败:", errors);
+      message.warning(`${errors.length} 个文件失败`);
+    }
+  }
+
+  // ─── 自定义节点渲染 ─────────────────────────
+
+  function renderTitle(node: DataNode): React.ReactNode {
+    const key = String(node.key);
+
+    if (key.startsWith(NEW_NODE_PREFIX)) {
+      return (
+        <Input
+          size="small"
+          placeholder="子文件夹名称"
+          value={newChildName}
+          onChange={(e) => setNewChildName(e.target.value)}
+          onPressEnter={submitCreateChild}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              cancelEditRef.current = true;
+              setCreatingUnderKey(null);
+              setNewChildName("");
+            }
+          }}
+          onBlur={submitCreateChild}
+          autoFocus
+          allowClear
+          style={{ width: "100%", minWidth: 0 }}
+          onClick={(e) => e.stopPropagation()}
+          // 阻止 mousedown 冒泡到 Tree node：在输入框拖选文本时不让 HTML5 drag 启动
+          onMouseDown={(e) => e.stopPropagation()}
+          draggable={false}
+          suffix={
+            <MicButton
+              size="small"
+              stripTrailingPunctuation
+              onTranscribed={(text) =>
+                setNewChildName((prev) => (prev ? `${prev} ${text}` : text))
+              }
+            />
+          }
+        />
+      );
+    }
+
+    if (editingKey === key) {
+      return (
+        <Input
+          size="small"
+          value={editingName}
+          onChange={(e) => setEditingName(e.target.value)}
+          onPressEnter={submitRename}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              cancelEditRef.current = true;
+              setEditingKey(null);
+              setEditingName("");
+            }
+          }}
+          onBlur={submitRename}
+          autoFocus
+          onFocus={(e) => e.target.select()}
+          style={{ width: "100%", minWidth: 0 }}
+          onClick={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+          draggable={false}
+        />
+      );
+    }
+
+    const name = String(node.title ?? "");
+    const { emoji, rest } = parseEmojiPrefix(name);
+    const display = rest || name;
+    // 右键菜单当前指向本节点 → 灰底 + 1px 主色描边。
+    // 原来只有描边，细字号下几乎看不出来，未打开的笔记被右键时看着像"没反应"；
+    // 底色用中性灰而不是主色淡底 —— 主色淡底已经被"多选"和 antd 的"当前打开行"占着，
+    // 同色会分不清这行到底是被选中还是正被右键。
+    const contextActive = contextMenu?.key === key;
+    // 描边单独拆出来：多选中的节点右键时要保留多选的底色，只让描边覆盖上去
+    const ctxOutline: React.CSSProperties = contextActive
+      ? {
+          outline: `1px solid ${token.colorPrimary}`,
+          outlineOffset: 2,
+          borderRadius: 4,
+        }
+      : {};
+    const ctxStyle: React.CSSProperties = contextActive
+      ? { background: token.colorFillTertiary, ...ctxOutline }
+      : {};
+
+    if (isNoteKey(key)) {
+      const isMultiSelected = selectedNoteKeys.has(key);
+      // 白板换个图标：它点开进的是画布而不是编辑器，列表里长得跟普通笔记
+      // 一模一样的话，用户只能靠点进去才知道是哪种。
+      const nodeData = (node as EnrichedNode).data;
+      const isWhiteboard =
+        nodeData?.isNote === true && nodeData.note.note_type === "whiteboard";
+      // 多选高亮：用主色淡底，区别于 antd 的"当前打开"行高亮，又彼此和谐
+      const multiStyle: React.CSSProperties = isMultiSelected
+        ? {
+            background: token.colorPrimaryBg,
+            borderRadius: 4,
+            outline: `1px solid ${token.colorPrimaryBorder}`,
+          }
+        : {};
+      return (
+        <span
+          className="flex items-center gap-1.5 w-full min-w-0"
+          onClick={(e) => {
+            e.stopPropagation();
+            // 带 Ctrl/Cmd/Shift → 多选处理，吞掉点击不打开
+            if (handleNoteClickWithModifiers(key, e)) return;
+            handleTitleClick(key);
+          }}
+          title={name}
+          // multiStyle 后置：多选高亮压过右键灰底（选中状态不能因为右键就没了）；
+          // ctxOutline 再压最后，保证被右键的那个节点始终有一圈主色描边
+          style={{ ...ctxStyle, ...multiStyle, ...ctxOutline }}
+        >
+          {emoji ? (
+            <span style={{ fontSize: 14, flexShrink: 0, lineHeight: 1 }}>
+              {emoji}
+            </span>
+          ) : isWhiteboard ? (
+            <PenTool
+              size={13}
+              style={{ flexShrink: 0, color: token.colorPrimary }}
+            />
+          ) : (
+            <FileText
+              size={13}
+              style={{ flexShrink: 0, color: token.colorTextTertiary }}
+            />
+          )}
+          <span className="truncate">{display}</span>
+        </span>
+      );
+    }
+
+    // 「未分类」虚拟根：用 Inbox 图标 + 次要色，与普通文件夹的实心 Folder 主色区分
+    if (key === UNCATEGORIZED_KEY) {
+      return (
+        <span
+          className="flex items-center gap-1.5 w-full"
+          onClick={(e) => {
+            e.stopPropagation();
+            // 双击的第二次 click（detail===2）让 onDoubleClick 处理，跳过单击逻辑
+            if (e.detail > 1) return;
+            handleTitleClick(key);
+          }}
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            handleTitleDoubleClick(key);
+          }}
+          title={name}
+          style={ctxStyle}
+        >
+          <Inbox
+            size={14}
+            strokeWidth={2}
+            style={{ flexShrink: 0, color: token.colorTextSecondary }}
+          />
+          <span className="truncate" style={{ color: token.colorTextSecondary }}>
+            {display}
+          </span>
+        </span>
+      );
+    }
+
+    // 文件夹：emoji 优先；否则用 hash 配色的填充文件夹图标
+    // 子文件夹（非根级）在图标中央叠一个小白点，让用户一眼区分层级
+    const folderData = (node as EnrichedNode).data;
+    const isChildFolder =
+      folderData && folderData.isNote === false && folderData.isChild;
+    const folderColor =
+      folderData && folderData.isNote === false && folderData.color
+        ? folderData.color
+        : token.colorPrimary;
+    return (
+      <span
+        className="flex items-center gap-1.5 w-full"
+        onClick={(e) => {
+          e.stopPropagation();
+          // 双击的第二次 click（detail===2）让 onDoubleClick 处理，跳过单击逻辑
+          if (e.detail > 1) return;
+          handleTitleClick(key);
+        }}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          handleTitleDoubleClick(key);
+        }}
+        title={name}
+        style={ctxStyle}
+      >
+        {emoji ? (
+          <span style={{ fontSize: 14, flexShrink: 0, lineHeight: 1 }}>
+            {emoji}
+          </span>
+        ) : isChildFolder ? (
+          <span
+            style={{
+              position: "relative",
+              flexShrink: 0,
+              display: "inline-flex",
+              alignItems: "center",
+            }}
+          >
+            <FolderFilled style={{ color: folderColor }} />
+            <span
+              aria-hidden
+              style={{
+                position: "absolute",
+                left: "50%",
+                top: "calc(50% + 1px)",
+                width: 4,
+                height: 4,
+                borderRadius: "50%",
+                background: token.colorBgContainer,
+                transform: "translate(-50%, -50%)",
+                pointerEvents: "none",
+              }}
+            />
+          </span>
+        ) : (
+          <FolderFilled style={{ flexShrink: 0, color: folderColor }} />
+        )}
+        <span className="truncate">{display}</span>
+      </span>
+    );
+  }
+
+  // useMemo：避免无关 state（如 contextMenu / fileDragOver）变化时重算整棵树
+  const treeData = useMemo(() => {
+    const folderTree = foldersToTreeData(
+      folders,
+      creatingUnderKey,
+      notesByFolder,
+      tabTitleByNoteId,
+      showOnlyFolders,
+    );
+    // showOnlyFolders 开启时不挂"未分类"——它本质只装笔记，留着是空壳，会让纯文件夹视图变脏。
+    // 另外：已加载完且确实为空 → 也隐藏，让侧栏更清爽；只有"未加载"或"非空"才挂上去。
+    const hideEmptyUncat = uncategorizedLoaded && uncategorizedNotes.length === 0;
+    if (!showOnlyFolders && !hideEmptyUncat) {
+      // 末尾追加"未分类"虚拟根节点：folder_id IS NULL 的笔记直接挂在这里。
+      // 这样未分类笔记也能参与 antd Tree 的拖拽（拖到任意文件夹会触发 handleDrop
+      // 跨 folder 移动逻辑），不需要单独写一套 HTML5 drag 系统。
+      const uncatTitle =
+        uncategorizedNotes.length > 0
+          ? `未分类 ${uncategorizedNotes.length}`
+          : "未分类";
+      const uncatChildren: EnrichedNode[] = uncategorizedNotes
+        .slice(0, NOTES_PER_FOLDER_LIMIT)
+        .map((n) => ({
+          key: noteKey(n.id),
+          title: tabTitleByNoteId.get(n.id) || n.title || "未命名",
+          isLeaf: true,
+          data: { isNote: true, note: n },
+        }));
+      folderTree.push({
+        key: UNCATEGORIZED_KEY,
+        title: uncatTitle,
+        isLeaf: false,
+        children: uncatChildren.length ? uncatChildren : undefined,
+        data: { isNote: false, isChild: false, color: null },
+      });
+    }
+    return folderTree;
+  }, [folders, creatingUnderKey, notesByFolder, tabTitleByNoteId, uncategorizedNotes, uncategorizedLoaded, showOnlyFolders]);
+
+  // 当前 treeData 里所有笔记 key 的「展示顺序」扁平列表，供 Shift 连选按顺序取区间。
+  // 含折叠文件夹下未渲染的笔记也无妨：Shift 连选基于逻辑顺序，与是否展开无关。
+  const flatNoteKeys = useMemo<string[]>(() => {
+    const acc: string[] = [];
+    const walk = (nodes: EnrichedNode[]) => {
+      for (const node of nodes) {
+        const k = String(node.key);
+        if (isNoteKey(k)) acc.push(k);
+        if (node.children && node.children.length > 0) {
+          walk(node.children as EnrichedNode[]);
+        }
+      }
+    };
+    walk(treeData as EnrichedNode[]);
+    return acc;
+  }, [treeData]);
+
+  // 「移动到…」弹窗的 TreeSelect 数据：直接用 folders 的嵌套结构转成 {value,title,children}，
+  // 顶部插入"根目录（未分类）"项（哨兵 value）。
+  const moveTreeSelectData = useMemo(() => {
+    type MoveNode = { value: number; title: string; children?: MoveNode[] };
+    const toNode = (f: Folder): MoveNode => ({
+      value: f.id,
+      title: f.name,
+      children: f.children.length ? f.children.map(toNode) : undefined,
+    });
+    const data: MoveNode[] = [
+      { value: ROOT_FOLDER_VALUE, title: "根目录（未分类）" },
+      ...folders.map(toNode),
+    ];
+    return data;
+  }, [folders]);
+
+  /** 打开「移动到…」弹窗，快照当前多选的笔记 id */
+  function openMoveModal() {
+    const ids = Array.from(selectedNoteKeys)
+      .filter((k) => isNoteKey(k))
+      .map((k) => noteIdFromKey(k))
+      .filter((id) => Number.isFinite(id));
+    if (ids.length === 0) return;
+    setMoveModalIds(ids);
+    setMoveTargetValue(null);
+    setMoveModalOpen(true);
+  }
+
+  /** 打开「移动到…」弹窗，仅针对单篇笔记（单篇右键菜单用，复用同一弹窗 + submitMove） */
+  function openMoveModalForNote(noteId: number) {
+    if (!Number.isFinite(noteId)) return;
+    setMoveModalIds([noteId]);
+    setMoveTargetValue(null);
+    setMoveModalOpen(true);
+  }
+
+  /** 提交「移动到…」：把快照的笔记批量移到所选文件夹 */
+  async function submitMove() {
+    if (moveTargetValue === null) {
+      message.warning("请选择目标文件夹");
+      return;
+    }
+    const target = moveTargetValue === ROOT_FOLDER_VALUE ? null : moveTargetValue;
+    try {
+      const moved = await noteApi.moveBatch(moveModalIds, target);
+      setMoveModalOpen(false);
+      clearMultiSelect();
+      useAppStore.getState().bumpNotesRefresh();
+      message.success(`已移动 ${moved} 篇笔记`);
+    } catch (e) {
+      message.error(String(e));
+    }
+  }
+
+  /** 批量移到回收站（带二次确认） */
+  function trashSelectedNotes() {
+    const ids = Array.from(selectedNoteKeys)
+      .filter((k) => isNoteKey(k))
+      .map((k) => noteIdFromKey(k))
+      .filter((id) => Number.isFinite(id));
+    if (ids.length === 0) return;
+    Modal.confirm({
+      title: `移到回收站`,
+      content: `确定把选中的 ${ids.length} 篇笔记移到回收站吗？`,
+      okText: "移到回收站",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        try {
+          const n = await noteApi.trashBatch(ids);
+          ids.forEach((id) => useTabsStore.getState().closeTab(id));
+          clearMultiSelect();
+          useAppStore.getState().bumpNotesRefresh();
+          message.success(`已移到回收站 ${n} 篇`);
+        } catch (e) {
+          message.error(String(e));
+        }
+      },
+    });
+  }
+
+  // Q-004：节点超阈值时启用 antd Tree 的 virtual scroll，避免几千条笔记全量挂载导致拖拽 / 展开卡顿。
+  // 只数"当前展开后会渲染"的节点：折叠的 children 不算（antd 内部也只渲染展开的）。
+  const VIRTUAL_THRESHOLD = 200;
+  const visibleNodeCount = useMemo(() => {
+    function count(nodes: EnrichedNode[]): number {
+      let n = 0;
+      for (const node of nodes) {
+        n += 1;
+        const key = String(node.key);
+        const isExpanded = expandedKeys.includes(key);
+        if (isExpanded && node.children && node.children.length > 0) {
+          n += count(node.children as EnrichedNode[]);
+        }
+      }
+      return n;
+    }
+    return count(treeData as EnrichedNode[]);
+  }, [treeData, expandedKeys]);
+  const treeContainerRef = useRef<HTMLDivElement>(null);
+  const [treeHeight, setTreeHeight] = useState(0);
+  // 只在节点超阈值时才启用 virtual：少量节点下 virtual 模式自带的微滚动抖动反而是负优化。
+  //
+  // 🔴 带迟滞（>200 开、<120 才关），而且**开了就先粘住**。
+  // 原来是裸阈值 `count > 200`：几百个文件夹的库里，展开/折叠任意一个都会让可见节点数
+  // 在 200 上下横跳 → virtual 反复开关。而开关会换掉滚动容器（virtual 由 Tree 内部的
+  // 虚拟列表滚，非 virtual 由外层 div 滚），换一次 scrollTop 就归零 —— 这就是用户报的
+  // "点展开箭头随机跳回列表顶部"。中间那一帧还会全量渲染 200+ 节点，卡顿感也来自这里。
+  const [virtualLatched, setVirtualLatched] = useState(false);
+  useEffect(() => {
+    if (!virtualLatched && visibleNodeCount > VIRTUAL_THRESHOLD) {
+      setVirtualLatched(true);
+    } else if (virtualLatched && visibleNodeCount < VIRTUAL_THRESHOLD * 0.6) {
+      // 掉到阈值 60% 以下才关（比如用户真的删掉了大批文件夹），避免贴着阈值来回抖
+      setVirtualLatched(false);
+    }
+  }, [visibleNodeCount, virtualLatched]);
+  const enableVirtual = virtualLatched;
+  // 测高度**不依赖 enableVirtual**：原来只在 virtual 开启后才注册 ResizeObserver，
+  // 于是切到 virtual 的那一帧 treeHeight 还是 0 → Tree 拿不到 height（不虚拟、不内部滚动），
+  // 而外层容器已经按 enableVirtual 变成 overflow-hidden → 内容被截断且没有滚动条，
+  // 表现就是用户说的"卡住、滑块消失"。始终测量后，切换时高度已经就绪。
+  useEffect(() => {
+    const el = treeContainerRef.current;
+    if (!el) return;
+    // 初次测一下（ResizeObserver 首次回调一定在 layout 后，先用 clientHeight 兜底避免首帧白）
+    setTreeHeight(el.clientHeight);
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        // contentRect.height 排除了 padding；与 Tree 实际可用区域一致
+        setTreeHeight(entry.contentRect.height);
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [searchActive, folderExpanded]);
+  // 容器样式必须和"Tree 到底有没有接管滚动"完全同步：只要还没测到高度，
+  // 就保持外层可滚，绝不出现"外层不滚 + 内层也不滚"的死状态。
+  const treeVirtualActive = enableVirtual && treeHeight > 0;
+
+  return (
+    <div
+      className="flex flex-col h-full"
+      style={{ overflow: "hidden" }}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      {/* 视图标题栏 */}
+      <div
+        className="flex items-center gap-2 px-3 py-2.5 shrink-0"
+        style={{
+          borderBottom: `1px solid ${token.colorBorderSecondary}`,
+        }}
+      >
+        <NotebookText size={15} style={{ color: token.colorPrimary }} />
+        <span style={{ fontSize: 13, fontWeight: 600, color: token.colorText }}>
+          笔记
+        </span>
+        <div style={{ flex: 1 }} />
+        <Button
+          type="text"
+          size="small"
+          icon={<FolderIcon size={14} />}
+          onClick={() => setShowOnlyFolders(!showOnlyFolders)}
+          style={{
+            width: 24,
+            height: 24,
+            padding: 0,
+            // 激活态用主题色高亮：图标 + 浅底色，与折叠按钮形成视觉区分
+            color: showOnlyFolders ? token.colorPrimary : undefined,
+            background: showOnlyFolders ? token.colorPrimaryBg : undefined,
+          }}
+          title={showOnlyFolders ? "显示全部（含笔记）" : "只显示文件夹"}
+        />
+        <Button
+          type="text"
+          size="small"
+          icon={<ChevronsDownUp size={14} />}
+          onClick={() => {
+            // 折叠/展开全部文件夹（state 走 store，自动 persist）。
+            // 注意：判定基于"文件夹本身"是否全部折叠——expandedKeys 里
+            // 包含 UNCATEGORIZED_KEY（虚拟节点），如果一并算进去，用户
+            // 展开过未分类后这个按钮就永远走折叠分支，无法展开。
+            const store = useAppStore.getState();
+            const collapsedSet = new Set(collapsedFolderKeys);
+            const allFolded =
+              allFolderKeys.length > 0 &&
+              allFolderKeys.every((k) => collapsedSet.has(k));
+            if (allFolded) {
+              store.clearNotesCollapsedFolders();
+            } else {
+              store.setNotesAllFoldersCollapsed(allFolderKeys);
+            }
+          }}
+          style={{ width: 24, height: 24, padding: 0 }}
+          title="折叠/展开全部"
+        />
+        {/* 按层级展开：点主按钮是一键折叠/展开全部（习惯不变），这里补「只露出前 N 级目录」。
+            层数按实际树深度生成，最多列到 8 级，免得菜单拉得过长。 */}
+        <Dropdown
+          trigger={["click"]}
+          menu={{
+            items: [
+              {
+                key: "expand-all",
+                label: "全部展开",
+                onClick: () => useAppStore.getState().clearNotesCollapsedFolders(),
+              },
+              {
+                key: "collapse-all",
+                label: "全部折叠",
+                onClick: () =>
+                  useAppStore.getState().setNotesAllFoldersCollapsed(allFolderKeys),
+              },
+              ...(folderMaxDepth >= 2
+                ? [
+                    { type: "divider" as const },
+                    ...Array.from(
+                      { length: Math.min(folderMaxDepth, 8) - 1 },
+                      (_, i) => i + 2,
+                    ).map((n) => ({
+                      key: `level-${n}`,
+                      label: `显示 ${n} 级目录`,
+                      onClick: () =>
+                        useAppStore
+                          .getState()
+                          .setNotesAllFoldersCollapsed(folderKeysFromDepth(folders, n)),
+                    })),
+                  ]
+                : []),
+            ],
+          }}
+        >
+          <Button
+            type="text"
+            size="small"
+            icon={<ChevronDown size={10} />}
+            style={{ width: 14, height: 24, padding: 0 }}
+            title="按层级展开 / 折叠"
+          />
+        </Dropdown>
+      </div>
+
+      {/* 新建笔记 + 打开 md */}
+      <div
+        style={{
+          padding: "10px 12px",
+          display: "flex",
+          gap: 6,
+          flexShrink: 0,
+        }}
+      >
+        <div style={{ flex: 1, display: "flex" }}>
+          {/* 跟随树上的选中态：选中文件夹就建到它下面，与 OS 文件拖入（handleDropFiles
+              里的 targetFolderId）同一口径。以前这里永远传 null，用户明明选着文件夹
+              新建出来的笔记却掉到默认文件夹或未分类。 */}
+          <NewNoteButton
+            block
+            folderId={newNoteTarget.folderId}
+            useDefaults={newNoteTarget.useDefaults}
+          />
+        </div>
+        {/* 打开 md + 临时文件：两者是同一件事的两端（打开外部 .md / 回头找它），
+            合成一个组合按钮，不额外占用顶栏横向空间 */}
+        <Space.Compact>
+          <Button
+            icon={<FolderOpen size={14} />}
+            onClick={handleOpenMarkdown}
+            title="打开本机 .md 文件"
+          />
+          <Dropdown
+            trigger={["click"]}
+            menu={{
+              items: [
+                {
+                  key: "open",
+                  label: "打开本机 .md 文件…",
+                  icon: <FolderOpen size={14} />,
+                  onClick: () => void handleOpenMarkdown(),
+                },
+                { type: "divider" },
+                {
+                  key: "scratch",
+                  label: "临时文件…",
+                  icon: <FileText size={14} />,
+                  onClick: () => setScratchModalOpen(true),
+                },
+              ],
+            }}
+          >
+            <Button icon={<ChevronDown size={12} />} title="更多" />
+          </Dropdown>
+        </Space.Compact>
+      </div>
+
+      {/* 面板内搜索框：输入走后端全文搜索，结果替换下方文件夹树 */}
+      <div style={{ padding: "0 12px 8px", flexShrink: 0 }}>
+        <Input
+          size="small"
+          allowClear
+          prefix={<Search size={13} style={{ color: token.colorTextTertiary }} />}
+          placeholder="搜索笔记…"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setSearchQuery("");
+          }}
+        />
+      </div>
+
+      {/* 文件夹小节 —— 兼任 OS 文件拖入区（.md/.txt → 新建笔记）
+          Q-004：启用 virtual scroll 时本层必须 overflow-hidden + flex-col，让 Tree 占满剩余空间且自己接管滚动；
+          节点数少时退化回 overflow-auto，保持旧体验 */}
+      <div
+        className={
+          treeVirtualActive
+            ? "flex-1 overflow-hidden flex flex-col"
+            : "flex-1 overflow-auto"
+        }
+        style={{
+          minHeight: 0,
+          paddingTop: 4,
+          // 始终预留滚动条空间——展开未分类后内容超长出现滚动条时，
+          // 不会让上方文件夹/标题区的可用宽度突然收缩。WebView2 / Chromium 94+ 原生支持
+          scrollbarGutter: "stable",
+          outline: fileDragOver
+            ? `2px dashed ${token.colorPrimary}`
+            : "none",
+          outlineOffset: -2,
+          transition: "outline 0.15s",
+        }}
+        onDragOver={(e) => {
+          if (!hasOsFiles(e.dataTransfer)) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+          if (!fileDragOver) setFileDragOver(true);
+        }}
+        onDragLeave={(e) => {
+          // 仅当离开到本容器外时清理，避免在子元素间移动时闪烁
+          if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+          setFileDragOver(false);
+        }}
+        onDrop={(e) => {
+          setFileDragOver(false);
+          if (!hasOsFiles(e.dataTransfer)) return;
+          e.preventDefault();
+          e.stopPropagation();
+
+          // 同步检查 —— DataTransfer 在 await 之后就失效，必须在这里拿到 items
+          // 目的：文件夹拖入在 WebView 里拿不到 OS 路径（items 的 FileSystemDirectoryEntry
+          // 只给 fullPath 相对值），引导用户改走右键菜单那条已工作的路径
+          const hasDirectory = Array.from(e.dataTransfer.items ?? []).some((it) => {
+            if (it.kind !== "file") return false;
+            const entry = it.webkitGetAsEntry?.();
+            return entry?.isDirectory === true;
+          });
+          if (hasDirectory) {
+            message.info("拖文件夹请改用右键菜单『导入 Markdown 文件夹…』（能保留目录层级 + 扫描去重）");
+            return;
+          }
+
+          const files = Array.from(e.dataTransfer.files);
+          if (files.length === 0) return;
+          void handleOsFilesDropped(files);
+        }}
+      >
+        {/* 搜索激活：用扁平结果列表替换文件夹树 */}
+        {searchActive && (
+          <div className="flex-1 min-h-0 overflow-auto" style={{ padding: "8px 8px 12px" }}>
+            {searching && searchResults.length === 0 ? (
+              <div
+                className="text-center py-6"
+                style={{ color: token.colorTextQuaternary, fontSize: 12 }}
+              >
+                搜索中…
+              </div>
+            ) : searchResults.length === 0 ? (
+              <div
+                className="text-center py-6"
+                style={{ color: token.colorTextQuaternary, fontSize: 12 }}
+              >
+                未找到匹配的笔记
+              </div>
+            ) : (
+              searchResults.map((r) => (
+                <div
+                  key={r.id}
+                  onClick={() => openSearchResult(r.id)}
+                  className="cursor-pointer"
+                  style={{
+                    padding: "6px 10px",
+                    borderRadius: 6,
+                    marginBottom: 2,
+                    transition: "background .15s",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = `${token.colorPrimary}10`;
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = "transparent";
+                  }}
+                >
+                  <div
+                    className="flex items-center gap-1.5 truncate"
+                    style={{ fontSize: 13, color: token.colorText }}
+                  >
+                    {r.note_type === "whiteboard" ? (
+                      <PenTool size={13} style={{ color: token.colorPrimary, flexShrink: 0 }} />
+                    ) : (
+                      <FileText size={13} style={{ color: token.colorTextTertiary, flexShrink: 0 }} />
+                    )}
+                    <span className="truncate">{highlightText(r.title || "未命名", searchQuery)}</span>
+                  </div>
+                  {r.snippet && (
+                    <div
+                      className="truncate"
+                      style={{
+                        fontSize: 11,
+                        color: token.colorTextTertiary,
+                        paddingLeft: 19,
+                        marginTop: 1,
+                      }}
+                    >
+                      {highlightSnippet(r.snippet, searchQuery)}
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        )}
+
+        {!searchActive && (
+          <div
+            className="flex items-center justify-between cursor-pointer select-none shrink-0"
+            style={{
+              color: token.colorTextSecondary,
+              fontSize: 12,
+              paddingLeft: 16,
+              paddingRight: 16,
+              paddingTop: 12,
+              paddingBottom: 8,
+            }}
+            onClick={() => setFolderExpanded(!folderExpanded)}
+          >
+            <span className="flex items-center gap-1">
+              {folderExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+              文件夹
+            </span>
+            <span className="flex items-center gap-0.5">
+              <Button
+                type="text"
+                size="small"
+                title="清理空文件夹"
+                icon={<FolderX size={14} />}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleCleanupEmptyFolders();
+                }}
+                style={{ width: 24, height: 24, padding: 0 }}
+              />
+              <Button
+                type="text"
+                size="small"
+                title="新建文件夹"
+                icon={<FolderPlus size={14} />}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setCreatingRoot(true);
+                }}
+                style={{ width: 24, height: 24, padding: 0 }}
+              />
+            </span>
+          </div>
+        )}
+
+        {!searchActive && folderExpanded && (
+          <div
+            ref={treeContainerRef}
+            // Q-004：virtual 模式下让本层 flex-1 + 自己 overflow-hidden，Tree 才能拿到稳定可测的高度（外层不滚 → 内层撑满）
+            className={treeVirtualActive ? "flex-1 min-h-0 overflow-hidden" : undefined}
+            style={{ padding: "0 12px" }}
+            tabIndex={0}
+            onKeyDown={handleTreeKeyDown}
+          >
+            {creatingRoot && (
+              <Input
+                size="small"
+                placeholder="文件夹名称"
+                value={newRootName}
+                onChange={(e) => setNewRootName(e.target.value)}
+                onPressEnter={submitCreateRoot}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    cancelEditRef.current = true;
+                    setCreatingRoot(false);
+                    setNewRootName("");
+                  }
+                }}
+                onBlur={submitCreateRoot}
+                autoFocus
+                allowClear
+                style={{ marginBottom: 4 }}
+                suffix={
+                  <MicButton
+                    size="small"
+                    stripTrailingPunctuation
+                    onTranscribed={(text) =>
+                      setNewRootName((prev) => (prev ? `${prev} ${text}` : text))
+                    }
+                  />
+                }
+              />
+            )}
+            {initialLoading && treeData.length === 0 ? (
+              <div style={{ padding: "4px 8px" }}>
+                <Skeleton
+                  active
+                  paragraph={{ rows: 4, width: ["80%", "60%", "70%", "50%"] }}
+                  title={false}
+                />
+              </div>
+            ) : treeData.length > 0 ? (
+              <Tree
+                className={`sidebar-folder-tree${treeGuideLines ? " kb-tree-guides" : ""}`}
+                treeData={treeData}
+                blockNode
+                // Q-004：节点 > 阈值 + 容器已测得高度 → 启用 antd Tree 的 virtual scroll（默认 itemHeight=28）
+                {...(treeVirtualActive
+                  ? { virtual: true, height: treeHeight }
+                  : {})}
+                draggable={{
+                  icon: false,
+                  // 编辑态（重命名/新建子文件夹）的节点禁拖：在 input 里拖选文本
+                  // 时不应触发 antd Tree 的 HTML5 drag，否则光标改不动反而把节点拖走
+                  nodeDraggable: (node) => {
+                    const k = String(node.key);
+                    if (editingKey === k) return false;
+                    if (creatingUnderKey && k.startsWith(NEW_NODE_PREFIX)) return false;
+                    return true;
+                  },
+                }}
+                onDragStart={({ event, node }) => {
+                  // 笔记叶子拖出树外（如拖进编辑器正文）时，写入自定义 mime 负载，
+                  // 供 TiptapEditor 的 drop 处理识别 → 在落点插入 [[标题|ID]] wiki 链接。
+                  // 仅对笔记生效；文件夹拖拽仍是 Tree 内部移动（handleDrop），二者互不干扰。
+                  // antd Tree 内部重排靠 React state（dragNode）跟踪，不读 dataTransfer，
+                  // 故此处写入不影响树内拖动。
+                  const key = String(node.key);
+                  if (!isNoteKey(key)) return;
+                  const id = noteIdFromKey(key);
+                  const note = findNoteById(id);
+                  const title = note?.title || "未命名";
+                  try {
+                    event.dataTransfer.setData(
+                      "application/x-kb-note",
+                      JSON.stringify({ id, title }),
+                    );
+                    // 纯文本兜底：拖到外部 input / 其他可编辑区时退化为 [[标题]]
+                    event.dataTransfer.setData("text/plain", `[[${title}]]`);
+                    event.dataTransfer.effectAllowed = "copyLink";
+                  } catch {
+                    // 个别环境 dataTransfer 只读，安静失败，不影响树内拖动
+                  }
+                }}
+                onDrop={handleDrop}
+                onDragEnd={cancelHoverExpand}
+                onDragEnter={({ node }) => {
+                  // 拖拽 hover 到折叠文件夹时自动展开，避免用户拖到一半还要先点开。
+                  // 仅对真实文件夹节点生效；笔记叶子 / 新建占位 / 未分类逻辑各自独立处理。
+                  //
+                  // spring-loaded：不立即展开，而是悬停 HOVER_EXPAND_DELAY 才展开。
+                  // 进入新节点 → 重置计时；路过（很快又进别的节点）不会触发展开。
+                  const k = String(node.key);
+                  // 进入的是叶子/占位节点：取消任何待展开计时（路过即取消）
+                  if (k.startsWith(NEW_NODE_PREFIX) || isNoteKey(k)) {
+                    cancelHoverExpand();
+                    return;
+                  }
+                  // 已经在为同一个目标计时，无需重置
+                  if (hoverExpandKeyRef.current === k) return;
+                  // 切到了新目标：清掉上一个计时，重新计时
+                  cancelHoverExpand();
+                  hoverExpandKeyRef.current = k;
+                  hoverExpandTimerRef.current = setTimeout(() => {
+                    hoverExpandTimerRef.current = null;
+                    hoverExpandKeyRef.current = null;
+                    if (k === UNCATEGORIZED_KEY) {
+                      if (!uncategorizedExpanded) {
+                        setUncategorizedExpanded(true);
+                        if (uncategorizedNotes.length === 0) {
+                          void loadUncategorizedNotes();
+                        }
+                      }
+                      return;
+                    }
+                    const id = Number(k);
+                    if (!Number.isFinite(id)) return;
+                    const collapsed = collapsedFolderKeys.includes(k);
+                    if (collapsed) {
+                      useAppStore.getState().setNotesFolderCollapsed(k, false);
+                      if (!notesByFolder.has(id)) void loadNotesForFolder(id);
+                    }
+                  }, HOVER_EXPAND_DELAY);
+                }}
+                selectedKeys={
+                  isUncategorizedActive
+                    ? [UNCATEGORIZED_KEY]
+                    : selectedKey
+                      ? [selectedKey]
+                      : []
+                }
+                expandedKeys={expandedKeys}
+                onExpand={handleExpand}
+                titleRender={renderTitle}
+                switcherIcon={({ expanded }) =>
+                  expanded ? (
+                    <ChevronDown size={11} strokeWidth={2.2} />
+                  ) : (
+                    <ChevronRight size={11} strokeWidth={2.2} />
+                  )
+                }
+                onRightClick={({ event, node }) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  const key = String(node.key);
+                  if (key.startsWith(NEW_NODE_PREFIX)) return;
+                  // 笔记叶节点：用 note.title 作为 name 传给菜单
+                  let name: string | null;
+                  if (isNoteKey(key)) {
+                    const note = findNoteById(noteIdFromKey(key));
+                    if (!note) return;
+                    name = note.title;
+                  } else {
+                    name = findFolderName(folders, Number(key));
+                    if (name === null) return;
+                  }
+                  setContextMenu({
+                    key,
+                    name,
+                    x: (event as unknown as React.MouseEvent).clientX,
+                    y: (event as unknown as React.MouseEvent).clientY,
+                    ts: Date.now(),
+                  });
+                }}
+                style={{ background: "transparent" }}
+              />
+            ) : (
+              !creatingRoot && (
+                <div
+                  className="text-center py-3"
+                  style={{ color: token.colorTextQuaternary, fontSize: 12 }}
+                >
+                  暂无文件夹
+                  <br />
+                  <span
+                    className="cursor-pointer"
+                    style={{ color: token.colorPrimary, fontSize: 11 }}
+                    onClick={() => setCreatingRoot(true)}
+                  >
+                    + 新建文件夹
+                  </span>
+                </div>
+              )
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* 右键菜单（幻影锚点） */}
+      {contextMenu && (
+        <ContextMenuOverlay
+          open
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={buildMenuItems(contextMenu.key, contextMenu.name)}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
+
+      {/* 扫描文件夹 → 预览 → 导入 */}
+      {importPreview && (
+        <ImportPreviewModal
+          open
+          files={importPreview.files}
+          rootPath={importPreview.rootPath}
+          onCancel={() => setImportPreview(null)}
+          onConfirm={async ({ policy, preserveRoot, dailyMode }) => {
+            const { files, rootPath, folderId } = importPreview;
+            setImportPreview(null);
+            const paths = files.map((f) => f.path);
+            const job = await beginTrackedImportJob(
+              "Markdown / 文本",
+              paths.length,
+              "import:progress",
+            );
+            try {
+              const result = await importApi.importSelected(
+                paths,
+                folderId,
+                rootPath,
+                preserveRoot,
+                policy,
+                dailyMode,
+              );
+              job.finish(result.imported, result.errors.length);
+              const parts: string[] = [];
+              if (result.imported > 0) parts.push(`导入 ${result.imported} 篇`);
+              if (result.duplicated > 0) parts.push(`副本 ${result.duplicated} 篇`);
+              if (result.skipped > 0) parts.push(`跳过 ${result.skipped} 篇`);
+              if (result.tags_attached && result.tags_attached > 0) {
+                parts.push(`关联标签 ${result.tags_attached} 条`);
+              }
+              if (result.attachments_copied && result.attachments_copied > 0) {
+                parts.push(`复制图片 ${result.attachments_copied} 张`);
+              }
+              if (result.daily_marked && result.daily_marked > 0) {
+                parts.push(`日记 ${result.daily_marked} 天`);
+              }
+              if (parts.length > 0) message.success(parts.join("，"));
+              // 同一天多篇时只认领了第一篇，提示用户可以去合并
+              if (result.daily_extra_notes && result.daily_extra_notes > 0) {
+                message.info(
+                  `有 ${result.daily_extra_notes} 篇与已有日记同一天，仍是普通笔记；` +
+                    `可在日记页用「整理历史日记」合并进当天`,
+                  6,
+                );
+              }
+              const missCount = result.attachments_missing?.length ?? 0;
+              if (missCount > 0) {
+                message.warning(
+                  `${missCount} 张图片在 vault 里找不到，已保留原引用`,
+                );
+                console.warn(
+                  "[import] 缺失图片清单:",
+                  result.attachments_missing,
+                );
+              }
+              if (result.errors.length > 0) {
+                message.warning(
+                  `${result.errors.length} 个文件失败，详见控制台`,
+                );
+                console.warn("[import] 失败明细:", result.errors);
+              }
+              useAppStore.getState().bumpNotesRefresh();
+              useAppStore.getState().bumpFoldersRefresh();
+            } catch (e) {
+              job.cancel();
+              message.error(`导入失败: ${e}`);
+            }
+          }}
+        />
+      )}
+
+      {/* 右键"导出此文件夹…" */}
+      <ExportFolderModal target={exportTarget} onClose={() => setExportTarget(null)} />
+
+      {/* 右键"从模板新建…" */}
+      <TemplatePickerModal
+        open={templatePickerFolder !== null}
+        folderId={templatePickerFolder}
+        onClose={() => setTemplatePickerFolder(null)}
+      />
+
+      {/* 右键"与另一篇笔记对比…" */}
+      <NoteComparePicker
+        firstNoteId={compareFirstNoteId}
+        onClose={() => setCompareFirstNoteId(null)}
+      />
+
+      {/* 多选批量"移动到…"：TreeSelect 选目标文件夹 */}
+      <Modal
+        title={`移动 ${moveModalIds.length} 篇笔记到…`}
+        open={moveModalOpen}
+        onOk={() => void submitMove()}
+        onCancel={() => setMoveModalOpen(false)}
+        okText="移动"
+        cancelText="取消"
+        okButtonProps={{ disabled: moveTargetValue === null }}
+        destroyOnClose
+      >
+        <TreeSelect
+          style={{ width: "100%" }}
+          value={moveTargetValue ?? undefined}
+          onChange={(v) => setMoveTargetValue(v as number)}
+          treeData={moveTreeSelectData}
+          placeholder="选择目标文件夹"
+          treeDefaultExpandAll
+          showSearch
+          treeNodeFilterProp="title"
+          popupMatchSelectWidth={false}
+        />
+      </Modal>
+
+      {/* 「临时文件」列表：以临时方式打开的外部 .md（不进笔记树） */}
+      <ScratchFilesModal
+        open={scratchModalOpen}
+        onClose={() => setScratchModalOpen(false)}
+      />
+    </div>
+  );
+}

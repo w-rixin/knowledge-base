@@ -1,0 +1,1681 @@
+//! T-013 自定义数据目录
+//!
+//! ## 启动期解析优先级
+//!
+//! 1. 环境变量 `KB_DATA_DIR`（最高优先级；CI / 命令行 / 多版本测试用）
+//! 2. 便携模式：`<exe 同级>/portable.txt` 哨兵文件存在
+//!    - 内容空 → `<exe 同级>/data/`
+//!    - 内容是绝对路径 → 该路径
+//!    - 内容是相对路径 → `<exe 同级>/<相对路径>/`
+//!    （portable.zip 发行包用；带 portable.txt 一起解压即"绑死安装目录"）
+//! 3. 指针文件 `<framework_app_data_dir>/data_dir.txt`（用户在 UI 改路径时写入）
+//! 4. 默认 `<framework_app_data_dir>`（兼容旧用户）
+//!
+//! ## 设计要点
+//!
+//! - **指针文件本身永远在 framework 默认 app_data_dir**：因为这是 OS 提供的固定位置，
+//!   只有这样换数据目录后下次启动才知道去哪找用户的自定义路径
+//! - **单实例锁仍在 framework app_data_dir**：换数据目录不应突破单例约束
+//! - **用户的"自定义路径"是数据存储根**（db / 资产都基于此）
+//! - **重启生效**：set_pending 只写指针文件，不动当前进程的 db 连接，避免连接竞态
+//! - **可选自动迁移**（T-013 完整版）：set_pending_with_migration 同时写一个 marker，
+//!   下次启动时 lib.rs::setup 检测到 marker → 弹独立 splash 窗口跑迁移 → 完成后初始化 DB
+
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::error::AppError;
+
+/// 指针文件名（位于 framework app_data_dir 内）
+pub const POINTER_FILE: &str = "data_dir.txt";
+
+/// 判断一个绝对路径字符串是否属于**当前**操作系统的路径形态。
+///
+/// ## 为什么需要（修跨平台数据搬迁的裂图 Bug）
+///
+/// 指针文件 / 便携哨兵里存的是**裸绝对路径字符串**。用户把整个数据目录（含
+/// `data_dir.txt`）从 Windows 拷到 macOS 后，指针里是 `E:\my\kb` 这种 Windows 路径。
+///
+/// 致命之处在于**它不会报错**：macOS / Linux 的文件名里 `\` 和 `:` 都是合法字符，
+/// `create_dir_all("E:\\my\\kb")` 会在**当前工作目录下**老老实实创建一个名叫
+/// `E:\my\kb` 的目录，然后被当作数据根用。结果是：db 是空的、
+/// 所有 `kb-asset://` 都解析到这个畸形目录下 → 用户看到"图片地址还是 Windows 那个"、
+/// 全库裂图，而日志里一句错误都没有。
+///
+/// 反向（unix 绝对路径 `/Users/x/kb` 带到 Windows）同理：Windows 会把它当成
+/// "当前盘符根下的相对路径"，同样静默走偏。
+///
+/// 所以指针生效前必须先判形态；不匹配就忽略指针、回落默认目录并告警。
+fn is_native_absolute(path: &str) -> bool {
+    if cfg!(windows) {
+        looks_windows_absolute(path)
+    } else {
+        looks_posix_absolute(path)
+    }
+}
+
+/// 看起来是**另一个**平台的绝对路径（即：是绝对路径，但不是本机形态）。
+///
+/// 用来区分"跨平台搬迁残留"和"普通的相对路径"——后者仍按相对路径正常处理。
+fn is_foreign_absolute(path: &str) -> bool {
+    !is_native_absolute(path) && (looks_windows_absolute(path) || looks_posix_absolute(path))
+}
+
+/// Windows 绝对路径形态：盘符 `C:\...` / `C:/...`，或 UNC `\\server\share`
+fn looks_windows_absolute(path: &str) -> bool {
+    let p = path.trim();
+    let bytes = p.as_bytes();
+    let has_drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'/' || bytes[2] == b'\\');
+    has_drive || p.starts_with(r"\\")
+}
+
+/// POSIX 绝对路径形态：以 `/` 开头，且不含反斜杠
+/// （含 `\` 的极可能是被搬过来的 Windows 路径，不认）
+fn looks_posix_absolute(path: &str) -> bool {
+    let p = path.trim();
+    p.starts_with('/') && !p.contains('\\')
+}
+
+/// 判断两个路径是否指向**同一个位置**。
+///
+/// ## 为什么必须有（数据全毁级隐患）
+///
+/// 迁移的 fallback 复制走 [`copy_file_with_progress`]，其中
+/// `File::create(dst)` 的语义是「创建**或截断**」。当 `src == dst` 时，
+/// 它会先把源文件清零，接着从空文件里读到 0 字节 —— **整个文件被抹掉**。
+///
+/// 线上真实出现过 `marker: …/data → …/data`（用户把新数据目录选成了当前目录）。
+/// 那次侥幸没出事：`run_migration` 是 rename 优先，而 POSIX 规范保证
+/// `rename(x, x)` 是 no-op 且返回成功，于是没走到 fallback。但只要 rename
+/// 因任何原因失败（权限、文件被占用、目录跨设备挂载），数据就没了。
+///
+/// 判定策略：优先 `canonicalize`（解开符号链接、`.` / `..`、Windows 大小写与
+/// 8.3 短名）；任一路径不存在时退回规范化字符串比较（去尾部分隔符，
+/// Windows 上不区分大小写）。
+fn is_same_location(a: &Path, b: &Path) -> bool {
+    if let (Ok(ca), Ok(cb)) = (a.canonicalize(), b.canonicalize()) {
+        return ca == cb;
+    }
+    normalize_path_for_compare(a) == normalize_path_for_compare(b)
+}
+
+/// `is_same_location` 的字符串兜底：统一分隔符 + 去尾部分隔符 + Windows 折大小写
+fn normalize_path_for_compare(p: &Path) -> String {
+    let s = p.to_string_lossy().replace('\\', "/");
+    let s = s.trim_end_matches('/');
+    if cfg!(windows) {
+        s.to_lowercase()
+    } else {
+        s.to_string()
+    }
+}
+
+/// 迁移 marker 文件名（位于 framework app_data_dir 内）
+pub const MIGRATION_MARKER: &str = "migration.json";
+
+/// 单次迁移要复制的子项（按出现顺序，db 优先确保数据完整性）
+///
+/// 这些路径是**相对 source_root** 的相对路径；resolver 自动 join 拼到 source/target。
+const MIGRATION_ITEMS: &[&str] = &[
+    // db 主文件 + WAL + SHM；非 dev
+    "app.db",
+    "app.db-wal",
+    "app.db-shm",
+    // db dev 前缀（cfg!(debug_assertions) 启动时项目会加 dev- 前缀）
+    "dev-app.db",
+    "dev-app.db-wal",
+    "dev-app.db-shm",
+    // 资产目录
+    "kb_assets",
+    "attachments",
+    "pdfs",
+    "sources",
+    // dev 资产
+    "dev-kb_assets",
+    "dev-attachments",
+    "dev-pdfs",
+    "dev-sources",
+];
+
+/// 自定义路径来源
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DataDirSource {
+    /// 环境变量 KB_DATA_DIR 优先生效
+    Env,
+    /// exe 同级 portable.txt 哨兵（便携模式 / portable.zip 发行包）
+    Portable,
+    /// 指针文件 data_dir.txt 生效
+    Pointer,
+    /// 没有自定义；用框架默认 app_data_dir
+    Default,
+}
+
+/// 数据目录解析结果
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedDataDir {
+    /// 框架默认 app_data_dir（OS 给的固定位置）
+    pub default_dir: String,
+    /// 当前生效的数据根目录
+    pub current_dir: String,
+    /// 来源
+    pub source: DataDirSource,
+    /// 指针文件里写的路径（可能与 current_dir 不一致，比如被 env 覆盖；为空表示无指针）
+    pub pending_dir: Option<String>,
+}
+
+pub struct DataDirResolver;
+
+impl DataDirResolver {
+    /// 启动早期调用：把"逻辑数据根目录"算出来
+    ///
+    /// 注意 `default_app_data_dir` 必须是框架的 `app.path().app_data_dir()`，
+    /// 而**不是**已经被 instance-N 叠加过的实例目录。
+    pub fn resolve(default_app_data_dir: &Path) -> Result<ResolvedDataDir, AppError> {
+        let default_str = default_app_data_dir.to_string_lossy().to_string();
+
+        // 1. env var 最高优先级
+        if let Ok(p) = std::env::var("KB_DATA_DIR") {
+            let trimmed = p.trim();
+            if !trimmed.is_empty() {
+                let path = PathBuf::from(trimmed);
+                std::fs::create_dir_all(&path)?;
+                let current = path.to_string_lossy().to_string();
+                let pending = read_pointer(default_app_data_dir).ok().flatten();
+                return Ok(ResolvedDataDir {
+                    default_dir: default_str,
+                    current_dir: current,
+                    source: DataDirSource::Env,
+                    pending_dir: pending,
+                });
+            }
+        }
+
+        // 2. 便携模式：exe 同级 portable.txt 哨兵
+        //
+        // 不读 AppData 里的指针文件 —— 便携模式语义就是"绑死安装目录，不碰系统目录"；
+        // 把指针 surface 出来反而会让 portable.zip 用户看到陌生路径困惑。
+        if let Some(p) = detect_portable_data_dir()? {
+            return Ok(ResolvedDataDir {
+                default_dir: default_str,
+                current_dir: p.to_string_lossy().to_string(),
+                source: DataDirSource::Portable,
+                pending_dir: None,
+            });
+        }
+
+        // 3. 指针文件
+        if let Some(target) = read_pointer(default_app_data_dir)? {
+            // 跨平台守卫：指针路径形态与当前 OS 不符（把 Windows 的数据目录整个拷到
+            // macOS/Linux，或反过来）→ **忽略指针**，回落默认目录。
+            // 不加这道闸的话 create_dir_all 会静默造出一个名叫 `E:\my\kb` 的畸形目录
+            // 当数据根，全库资产解析到无效位置 → 用户表现为"图片地址还是 Windows 的"。
+            // 指针文件本身保留不删：用户可能只是临时换机器，回到原系统仍要生效。
+            if !is_native_absolute(&target) {
+                log::warn!(
+                    "[data_dir] 指针文件里的路径 {:?} 不是本系统（{}）的绝对路径形态，\
+                     判定为跨平台搬迁残留 —— 本次启动忽略该指针，回落默认数据目录 {:?}。\
+                     如需在本机使用自定义目录，请到「设置 → 数据目录」重新选择。",
+                    target,
+                    std::env::consts::OS,
+                    default_str
+                );
+                return Ok(ResolvedDataDir {
+                    default_dir: default_str.clone(),
+                    current_dir: default_str,
+                    source: DataDirSource::Default,
+                    // 不回传 pending_dir：这个值前端会当"重启后生效的目标"展示，
+                    // 回传一个本机永远用不了的路径只会让用户更困惑。
+                    pending_dir: None,
+                });
+            }
+            let path = PathBuf::from(&target);
+            std::fs::create_dir_all(&path)?;
+            return Ok(ResolvedDataDir {
+                default_dir: default_str.clone(),
+                current_dir: target.clone(),
+                source: DataDirSource::Pointer,
+                pending_dir: Some(target),
+            });
+        }
+
+        // 4. 默认
+        Ok(ResolvedDataDir {
+            default_dir: default_str.clone(),
+            current_dir: default_str,
+            source: DataDirSource::Default,
+            pending_dir: None,
+        })
+    }
+
+    /// 用户在 UI 里"修改数据目录"时调
+    /// - 仅写指针文件 + 创建目标目录
+    /// - 不动当前进程的 db / 资产，避免运行时切换的连接竞态
+    /// - 下次启动才生效（前端 UI 提示用户重启）
+    pub fn set_pending(default_app_data_dir: &Path, new_path: &str) -> Result<(), AppError> {
+        let trimmed = new_path.trim();
+        if trimmed.is_empty() {
+            return Err(AppError::InvalidInput("路径不能为空".into()));
+        }
+        let new_path_buf = PathBuf::from(trimmed);
+        if !new_path_buf.is_absolute() {
+            return Err(AppError::InvalidInput(
+                "请提供绝对路径（如 D:\\MyKB\\ 或 /Users/me/kb/）".into(),
+            ));
+        }
+        // 创建目录（已存在 OK）
+        std::fs::create_dir_all(&new_path_buf)?;
+        // 探针：写一个临时文件测试可写
+        let probe = new_path_buf.join(".kb_data_dir_writable_test");
+        std::fs::write(&probe, b"ok").map_err(|e| {
+            AppError::Custom(format!(
+                "目标目录不可写: {} ({})",
+                new_path_buf.display(),
+                e
+            ))
+        })?;
+        let _ = std::fs::remove_file(&probe);
+
+        // 原子写指针文件：先写 .tmp 再 rename
+        let pointer = default_app_data_dir.join(POINTER_FILE);
+        if let Some(parent) = pointer.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = default_app_data_dir.join(format!("{}.tmp", POINTER_FILE));
+        std::fs::write(&tmp, trimmed.as_bytes())?;
+        // Windows 上 rename 到已存在文件会失败；先删
+        if pointer.exists() {
+            let _ = std::fs::remove_file(&pointer);
+        }
+        std::fs::rename(&tmp, &pointer)?;
+        log::info!("[data_dir] 已写入新指针: {}（重启生效）", trimmed);
+        Ok(())
+    }
+
+    /// 清除指针 → 下次启动恢复默认
+    pub fn clear_pending(default_app_data_dir: &Path) -> Result<(), AppError> {
+        let pointer = default_app_data_dir.join(POINTER_FILE);
+        if pointer.exists() {
+            std::fs::remove_file(&pointer)?;
+            log::info!("[data_dir] 已清除指针文件，重启后回到默认目录");
+        }
+        Ok(())
+    }
+}
+
+/// 读指针文件；不存在返回 Ok(None)；空白内容也视为 None
+// ─── T-013 完整版：自动迁移 ──────────────────────────
+
+/// 迁移 marker 状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MigrationStatus {
+    /// 已写入 marker，等待启动期执行
+    Pending,
+    /// 启动期检测到，正在执行
+    InProgress,
+    /// 上次中途崩溃，需要用户重试 / 放弃
+    Crashed,
+    /// 完成
+    Done,
+}
+
+/// marker 文件内容（启动期读 + 写）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationMarker {
+    pub from: String,
+    pub to: String,
+    pub status: MigrationStatus,
+    pub started_at: String,
+    /// 最后一次更新（每完成一项更新；用于检测崩溃）
+    pub updated_at: String,
+    /// 已成功复制的项（相对路径，对应 MIGRATION_ITEMS 中条目）
+    #[serde(default)]
+    pub completed_items: Vec<String>,
+    /// 上次失败原因（status=crashed 时有值）。
+    /// 老版本写的 marker 没有这个字段，`serde(default)` 保证仍能解析。
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+/// 单次迁移进度事件（emit 给 splash 窗口）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationProgress {
+    /// "scan" | "copy_file" | "verify" | "done" | "error"
+    pub phase: String,
+    /// 当前正在处理的相对路径（item 内的文件）
+    pub current_file: String,
+    /// 当前 item 在 MIGRATION_ITEMS 中的索引（基于实际存在的 items）
+    pub item_index: usize,
+    /// 实际存在的 item 总数
+    pub item_total: usize,
+    /// 已完成字节数（累计）
+    pub bytes_done: u64,
+    /// 总字节数（扫描后已知）
+    pub bytes_total: u64,
+    /// 一句话状态
+    pub message: String,
+}
+
+/// 进度回调类型
+pub type ProgressEmitter = dyn Fn(&MigrationProgress) + Send + Sync;
+
+impl DataDirResolver {
+    /// 在 set_pending 同时写一个迁移 marker
+    pub fn set_pending_with_migration(
+        framework_app_data_dir: &Path,
+        from_dir: &Path,
+        to_dir: &str,
+    ) -> Result<(), AppError> {
+        // 防护第 1 层：源 == 目标直接拒绝，连指针都不写。
+        // 「把数据迁移到当前所在目录」本身没有任何意义，放行只会让
+        // run_migration 去做自我复制（见 is_same_location 的文档）。
+        if is_same_location(from_dir, Path::new(to_dir.trim())) {
+            return Err(AppError::InvalidInput(
+                "新数据目录与当前数据目录相同，无需迁移".into(),
+            ));
+        }
+        // 源目录可读性预检：把「云盘未挂载 / 网络盘断开 / 没权限」挡在**重启之前**。
+        // 不然用户点完确认才发现问题，而那时候错误只能在启动期爆出来（历史上就是那样炸的）。
+        preflight_source(from_dir)?;
+        // 先按普通流程写指针
+        Self::set_pending(framework_app_data_dir, to_dir)?;
+        // 再写迁移 marker
+        let marker = MigrationMarker {
+            from: from_dir.to_string_lossy().into(),
+            to: to_dir.to_string(),
+            status: MigrationStatus::Pending,
+            started_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            updated_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            completed_items: Vec::new(),
+            last_error: None,
+        };
+        write_marker(framework_app_data_dir, &marker)?;
+        log::info!("[migration] 已写入 marker: {} → {}", marker.from, marker.to);
+        Ok(())
+    }
+
+    /// 启动期：读 marker；不存在返回 None
+    pub fn read_migration_marker(
+        framework_app_data_dir: &Path,
+    ) -> Result<Option<MigrationMarker>, AppError> {
+        let path = framework_app_data_dir.join(MIGRATION_MARKER);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = std::fs::read(&path)?;
+        let m: MigrationMarker = serde_json::from_slice(&bytes)
+            .map_err(|e| AppError::Custom(format!("迁移 marker 解析失败: {}", e)))?;
+        Ok(Some(m))
+    }
+
+    /// 启动期：把 marker 标为完成（迁移结束后调）
+    pub fn mark_migration_done(framework_app_data_dir: &Path) -> Result<(), AppError> {
+        let path = framework_app_data_dir.join(MIGRATION_MARKER);
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+        Ok(())
+    }
+
+    /// 启动期：读出**本次启动应当执行**的迁移 marker（不该执行则返回 None）
+    ///
+    /// 与 [`read_migration_marker`](Self::read_migration_marker)（读原始内容，给 UI 用）的区别在于状态过滤：
+    ///
+    /// - `Pending`：用户刚设好、等重启执行 → 跑
+    /// - `InProgress`：上次进程在迁移途中被强杀 / 断电，没来得及标状态 → 跑
+    ///   （`completed_items` 会让它跳过已搬完的项，接着搬）
+    /// - `Crashed`：上次明确失败过 → **不跑**。失败原因通常是环境性的（网盘客户端没启动、
+    ///   移动硬盘没插），下次启动多半照样失败，无脑重跑只会让用户每次开机白等一次失败画面。
+    ///   这类 marker 交给主窗口的提示 UI，由用户排除原因后显式重试。
+    /// - `Done`：理论上不会留在盘上（完成即删 marker），兜底也不跑
+    pub fn read_startup_migration(
+        framework_app_data_dir: &Path,
+    ) -> Result<Option<MigrationMarker>, AppError> {
+        Ok(Self::read_migration_marker(framework_app_data_dir)?.filter(|m| {
+            matches!(
+                m.status,
+                MigrationStatus::Pending | MigrationStatus::InProgress
+            )
+        }))
+    }
+
+    /// 启动期：把 marker 标记为「上次崩了」并记录原因，返回更新后的 marker
+    ///
+    /// 迁移失败时必须调这个 —— 否则 marker 会停在 `InProgress` 状态原样留在盘上，
+    /// 下次启动 `read_migration_marker` 照样读到、照样重跑、照样失败：
+    /// 用户被锁在「启动即崩」的死循环里，连进应用取消迁移的机会都没有。
+    ///
+    /// marker 不存在（例如迁移刚好在删 marker 后失败）时返回 `Ok(None)`，不算错。
+    pub fn mark_migration_crashed(
+        framework_app_data_dir: &Path,
+        error: &str,
+    ) -> Result<Option<MigrationMarker>, AppError> {
+        // 必须读**盘上**的 marker 而不是内存里传入的那份：run_migration 每完成一项
+        // 就回写一次 completed_items，盘上的才是真实进度，决定要不要回滚指针全靠它。
+        let Some(mut marker) = Self::read_migration_marker(framework_app_data_dir)? else {
+            return Ok(None);
+        };
+        marker.status = MigrationStatus::Crashed;
+        marker.last_error = Some(error.to_string());
+        marker.updated_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        write_marker(framework_app_data_dir, &marker)?;
+        Ok(Some(marker))
+    }
+
+    /// 用户在应用里点「重试迁移」：marker 状态回到 Pending + 指针重新指向目标目录
+    ///
+    /// 指针要重新写是因为失败时可能已被 [`rollback_pointer_to`] 回滚到源目录了；
+    /// 不重写的话下次启动迁移完了指针还指着老地方，白搬一趟。
+    pub fn retry_migration(framework_app_data_dir: &Path) -> Result<(), AppError> {
+        let Some(mut marker) = Self::read_migration_marker(framework_app_data_dir)? else {
+            return Err(AppError::NotFound("没有待重试的迁移记录".into()));
+        };
+        marker.status = MigrationStatus::Pending;
+        marker.last_error = None;
+        marker.updated_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        write_marker(framework_app_data_dir, &marker)?;
+        Self::set_pending(framework_app_data_dir, &marker.to)?;
+        log::info!("[migration] 已重置为待迁移: {} → {}", marker.from, marker.to);
+        Ok(())
+    }
+
+    /// 迁移失败后把指针写回源目录，让**本次启动**仍旧用得上老数据
+    ///
+    /// 不能复用 [`set_pending`]：那个会 `create_dir_all` + 写探针文件，而这里的源目录
+    /// 恰恰可能是不可达 / 不可写的（云盘没挂载正是如此），探针一失败指针就回滚不了。
+    /// 这里只做纯粹的指针改写，不碰源目录本身。
+    pub fn rollback_pointer_to(
+        framework_app_data_dir: &Path,
+        from: &str,
+    ) -> Result<(), AppError> {
+        let trimmed = from.trim();
+        if trimmed.is_empty() {
+            return Err(AppError::InvalidInput("回滚目标路径为空".into()));
+        }
+        // 源就是框架默认目录 → 删指针即可（留着一个指向默认目录的指针只会让
+        // 设置页把来源显示成"自定义路径"，纯属误导）
+        if is_same_location(Path::new(trimmed), framework_app_data_dir) {
+            return Self::clear_pending(framework_app_data_dir);
+        }
+        let pointer = framework_app_data_dir.join(POINTER_FILE);
+        let tmp = framework_app_data_dir.join(format!("{}.rollback.tmp", POINTER_FILE));
+        std::fs::write(&tmp, trimmed.as_bytes())?;
+        if pointer.exists() {
+            let _ = std::fs::remove_file(&pointer);
+        }
+        std::fs::rename(&tmp, &pointer)?;
+        log::warn!("[migration] 迁移失败，指针已回滚到源目录: {}", trimmed);
+        Ok(())
+    }
+
+    /// 取消迁移 — 指针回到源目录 + 删 marker → 下次启动回到原位置
+    ///
+    /// ⚠️ 指针是**回滚到 marker.from**，不是简单删掉。删指针等于回落框架默认目录，
+    /// 而源目录本身完全可能是用户此前设的自定义路径（例如 D:\我的库）——
+    /// 那样"取消迁移"会把用户甩进一个空的默认目录，比迁移失败本身还糟。
+    pub fn cancel_migration(framework_app_data_dir: &Path) -> Result<(), AppError> {
+        match Self::read_migration_marker(framework_app_data_dir)? {
+            Some(m) => Self::rollback_pointer_to(framework_app_data_dir, &m.from)?,
+            // 没有 marker 就没有"源目录"可回，只能按老语义清指针
+            None => Self::clear_pending(framework_app_data_dir)?,
+        }
+        let path = framework_app_data_dir.join(MIGRATION_MARKER);
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+        log::info!("[migration] 已取消迁移：指针回滚到源目录 + 删除 marker");
+        Ok(())
+    }
+
+    /// 启动期：执行迁移
+    ///
+    /// - 流式逐文件复制（rename 优先；rename 失败回退流式 copy）
+    /// - 不删旧目录（保留作备份；UI 给"清理旧目录"按钮供用户事后操作）
+    /// - 中途任意一步失败：返回 Err，marker 保留（下次启动用户能看到"上次崩溃"）
+    /// - 全部成功后：mark_migration_done 删 marker
+    pub fn run_migration(
+        framework_app_data_dir: &Path,
+        marker: &MigrationMarker,
+        emit: &ProgressEmitter,
+    ) -> Result<(), AppError> {
+        let from = PathBuf::from(&marker.from);
+        let to = PathBuf::from(&marker.to);
+        std::fs::create_dir_all(&to)?;
+
+        // 防护第 2 层：marker 里源 == 目标 → 什么都不做，直接标记完成。
+        // set_pending_with_migration 已经在入口拦了，但老版本写下的 marker、
+        // 或用户手改过的 marker 仍可能是这种形态（线上真实出现过），
+        // 这里必须兜住 —— 否则会进入自我复制（见 is_same_location 的文档）。
+        if is_same_location(&from, &to) {
+            log::warn!(
+                "[migration] marker 的源与目标是同一目录（{}），无需迁移 —— 跳过复制并清除 marker",
+                from.display()
+            );
+            Self::mark_migration_done(framework_app_data_dir)?;
+            emit(&MigrationProgress {
+                phase: "done".into(),
+                current_file: String::new(),
+                item_index: 0,
+                item_total: 0,
+                bytes_done: 0,
+                bytes_total: 0,
+                message: "数据目录未变化，无需迁移".into(),
+            });
+            return Ok(());
+        }
+
+        // 源目录可读性预检：源不可达时**一个字节都别搬**，直接带人话原因失败。
+        // 少了这道闸，错误要等到 scan 的 read_dir 或 copy 的 File::open 才炸出来，
+        // 用户拿到的只有一句 "IO 错误: 云文件提供程序未运行。 (os error 362)"。
+        preflight_source(&from)?;
+
+        // 写 in_progress 状态
+        let mut current = marker.clone();
+        current.status = MigrationStatus::InProgress;
+        write_marker(framework_app_data_dir, &current)?;
+
+        // 扫描存在的 items + 总字节
+        emit(&MigrationProgress {
+            phase: "scan".into(),
+            current_file: String::new(),
+            item_index: 0,
+            item_total: 0,
+            bytes_done: 0,
+            bytes_total: 0,
+            message: "正在统计文件大小…".into(),
+        });
+        let plan = scan_items(&from)?;
+        let bytes_total: u64 = plan.iter().map(|p| p.size).sum();
+        let item_total = plan.len();
+        log::info!(
+            "[migration] 扫描完成：{} 项，共 {:.2} MB",
+            item_total,
+            bytes_total as f64 / 1024.0 / 1024.0
+        );
+
+        let mut bytes_done = 0u64;
+        for (idx, item) in plan.iter().enumerate() {
+            let src = from.join(&item.rel);
+            let dst = to.join(&item.rel);
+
+            // 跳过已完成（崩溃恢复时复用进度）
+            if current.completed_items.contains(&item.rel) {
+                bytes_done += item.size;
+                continue;
+            }
+
+            emit(&MigrationProgress {
+                phase: if item.is_dir { "copy_dir" } else { "copy_file" }.into(),
+                current_file: item.rel.clone(),
+                item_index: idx + 1,
+                item_total,
+                bytes_done,
+                bytes_total,
+                message: format!("正在复制 {}", item.rel),
+            });
+
+            // 1) 优先 rename（同盘 O(1)）
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let rename_ok = std::fs::rename(&src, &dst).is_ok();
+            if !rename_ok {
+                // 2) 跨盘 fallback：流式复制
+                if item.is_dir {
+                    copy_dir_recursive(&src, &dst, &mut bytes_done, bytes_total, emit, &item.rel)?;
+                } else {
+                    copy_file_with_progress(
+                        &src,
+                        &dst,
+                        &mut bytes_done,
+                        bytes_total,
+                        emit,
+                        &item.rel,
+                    )?;
+                }
+            } else {
+                bytes_done += item.size;
+            }
+
+            // 标记完成 + 持久化
+            current.completed_items.push(item.rel.clone());
+            current.updated_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+            write_marker(framework_app_data_dir, &current)?;
+        }
+
+        // 旧目录写一个 README 让用户知道可以删
+        let readme = from.join("_MIGRATED_README.txt");
+        let _ = std::fs::write(
+            &readme,
+            format!(
+                "本目录的数据已于 {} 迁移到：\n{}\n\n确认新目录数据正常后，可手动删除本目录。\n（应用不会自动清理旧数据，避免误删。）\n",
+                current.updated_at, current.to
+            ),
+        );
+
+        // 删 marker
+        Self::mark_migration_done(framework_app_data_dir)?;
+
+        emit(&MigrationProgress {
+            phase: "done".into(),
+            current_file: String::new(),
+            item_index: item_total,
+            item_total,
+            bytes_done: bytes_total,
+            bytes_total,
+            message: format!(
+                "迁移完成：{} 项，{:.2} MB",
+                item_total,
+                bytes_total as f64 / 1024.0 / 1024.0
+            ),
+        });
+        Ok(())
+    }
+}
+
+/// 单个迁移项（文件或目录）的扫描结果
+#[derive(Debug)]
+struct PlanItem {
+    rel: String,
+    is_dir: bool,
+    size: u64,
+}
+
+/// 把源目录相关的 IO 错误翻译成用户看得懂的一句话
+///
+/// 线上真实案例：用户旧机器把数据目录设在网盘挂载的 `Z:\`，重装系统后网盘客户端没装，
+/// 迁移直接抛 `IO 错误: 云文件提供程序未运行。 (os error 362)` —— 这句话对用户毫无指导性。
+fn describe_source_io_error(e: &std::io::Error) -> String {
+    #[cfg(windows)]
+    if let Some(code) = e.raw_os_error() {
+        // Windows 云文件（Cloud Files API）错误码段。OneDrive / iCloud / RaiDrive /
+        // 各类网盘挂载盘都走这套 API：文件平时只是个占位符（placeholder），
+        // 真去读内容时才由客户端回源下载；客户端没运行就报这一段错误码。
+        if (362..=400).contains(&code) {
+            return format!(
+                "源目录看起来是云盘 / 网盘挂载盘，但对应的客户端没有在运行（{}，os error {}）。\
+                 请先启动并登录该网盘客户端，确认目录能在资源管理器里正常打开文件后，再重试迁移。",
+                e, code
+            );
+        }
+        // 网络路径不可达：ERROR_BAD_NETPATH / ERROR_NETNAME_DELETED / ERROR_BAD_NET_NAME
+        if matches!(code, 53 | 64 | 67) {
+            return format!(
+                "源目录所在的网络位置连不上（{}，os error {}）。请确认网络驱动器已连接后再重试迁移。",
+                e, code
+            );
+        }
+    }
+    match e.kind() {
+        std::io::ErrorKind::PermissionDenied => format!(
+            "没有读取源数据目录的权限（{}）。可尝试以管理员身份运行，或检查该目录的访问权限。",
+            e
+        ),
+        std::io::ErrorKind::NotFound => {
+            format!("源数据目录或其中的文件已不存在（{}）。", e)
+        }
+        _ => format!("读取源数据目录失败（{}）。", e),
+    }
+}
+
+/// 迁移前的源目录可读性预检
+///
+/// 分三级探测，从便宜到贵：
+/// 1. 目录是否存在
+/// 2. 目录能否枚举（网络盘断开、权限不足在这里就现形）
+/// 3. **真读一个字节**。这一步不能省：云占位文件 stat 得到、也列得出来，
+///    只有触发 hydration（读内容）时才报 362 —— 只做 1、2 探不出问题。
+fn preflight_source(from: &Path) -> Result<(), AppError> {
+    if !from.exists() {
+        return Err(AppError::Custom(format!(
+            "源数据目录不存在：{} —— 如果它在移动硬盘 / 网盘挂载盘上，请先接上（或启动网盘客户端）再重试迁移。",
+            from.display()
+        )));
+    }
+
+    let entries = std::fs::read_dir(from).map_err(|e| {
+        AppError::Custom(format!("{}：{}", from.display(), describe_source_io_error(&e)))
+    })?;
+    for entry in entries {
+        entry.map_err(|e| {
+            AppError::Custom(format!("{}：{}", from.display(), describe_source_io_error(&e)))
+        })?;
+    }
+
+    // MIGRATION_ITEMS 里 db 排在最前，所以命中的通常就是 app.db —— 正是最该确认能读的文件。
+    // 源目录里一个待迁移文件都没有时直接放行：没东西可搬，谈不上读得动读不动。
+    for &name in MIGRATION_ITEMS {
+        let p = from.join(name);
+        if !p.is_file() {
+            continue;
+        }
+        let mut f = std::fs::File::open(&p).map_err(|e| {
+            AppError::Custom(format!("{}：{}", p.display(), describe_source_io_error(&e)))
+        })?;
+        let mut probe = [0u8; 1];
+        // 0 字节（空文件）也算读成功，只有 Err 才是真读不动
+        f.read(&mut probe).map_err(|e| {
+            AppError::Custom(format!("{}：{}", p.display(), describe_source_io_error(&e)))
+        })?;
+        break;
+    }
+    Ok(())
+}
+
+/// 扫描 source 下哪些 MIGRATION_ITEMS 存在 + 算总大小
+fn scan_items(from: &Path) -> Result<Vec<PlanItem>, AppError> {
+    let mut out = Vec::new();
+    for &name in MIGRATION_ITEMS {
+        let p = from.join(name);
+        if !p.exists() {
+            continue;
+        }
+        let is_dir = p.is_dir();
+        let size = if is_dir {
+            dir_size(&p)?
+        } else {
+            std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0)
+        };
+        out.push(PlanItem {
+            rel: name.to_string(),
+            is_dir,
+            size,
+        });
+    }
+    Ok(out)
+}
+
+/// 递归算目录字节数
+fn dir_size(path: &Path) -> Result<u64, AppError> {
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let p = entry.path();
+        if p.is_dir() {
+            total += dir_size(&p)?;
+        } else if let Ok(m) = entry.metadata() {
+            total += m.len();
+        }
+    }
+    Ok(total)
+}
+
+/// 流式复制单文件 + 64 KB 缓冲；定期 emit 进度
+fn copy_file_with_progress(
+    src: &Path,
+    dst: &Path,
+    bytes_done: &mut u64,
+    bytes_total: u64,
+    emit: &ProgressEmitter,
+    rel: &str,
+) -> Result<(), AppError> {
+    // 防护第 3 层（最后一道）：src == dst 时**绝不能**往下走。
+    // 下面的 `File::create(dst)` 是「创建或截断」语义，会先把源文件清零，
+    // 再从空文件读到 0 字节 —— 文件内容被彻底抹掉，且不可恢复。
+    // 前两层已在入口和 marker 处拦截，这里兜住一切漏网路径。
+    if is_same_location(src, dst) {
+        log::warn!("[migration] 跳过自我复制（源与目标是同一文件）: {}", src.display());
+        // 仍要累加字节，否则进度条永远差这一截
+        if let Ok(meta) = std::fs::metadata(src) {
+            *bytes_done += meta.len();
+        }
+        return Ok(());
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut input = std::fs::File::open(src)?;
+    let mut output = std::fs::File::create(dst)?;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut last_emit_bytes = *bytes_done;
+    loop {
+        let n = input.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        output.write_all(&buf[..n])?;
+        *bytes_done += n as u64;
+        // 每 4 MB emit 一次（避免事件爆炸）
+        if *bytes_done - last_emit_bytes >= 4 * 1024 * 1024 {
+            emit(&MigrationProgress {
+                phase: "copy_file".into(),
+                current_file: rel.to_string(),
+                item_index: 0,
+                item_total: 0,
+                bytes_done: *bytes_done,
+                bytes_total,
+                message: format!("复制中 {}", rel),
+            });
+            last_emit_bytes = *bytes_done;
+        }
+    }
+    output.sync_all().ok();
+    Ok(())
+}
+
+/// 递归复制整个目录
+fn copy_dir_recursive(
+    src: &Path,
+    dst: &Path,
+    bytes_done: &mut u64,
+    bytes_total: u64,
+    emit: &ProgressEmitter,
+    rel: &str,
+) -> Result<(), AppError> {
+    // 同 copy_file_with_progress：源目录 == 目标目录时递归复制毫无意义，
+    // 且会让下层对每个文件做自我复制。直接跳过。
+    if is_same_location(src, dst) {
+        log::warn!("[migration] 跳过自我复制（源与目标是同一目录）: {}", src.display());
+        return Ok(());
+    }
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from_path = entry.path();
+        let file_name = entry.file_name();
+        let to_path = dst.join(&file_name);
+        if from_path.is_dir() {
+            let sub_rel = format!("{}/{}", rel, file_name.to_string_lossy());
+            copy_dir_recursive(
+                &from_path,
+                &to_path,
+                bytes_done,
+                bytes_total,
+                emit,
+                &sub_rel,
+            )?;
+        } else {
+            let sub_rel = format!("{}/{}", rel, file_name.to_string_lossy());
+            copy_file_with_progress(
+                &from_path,
+                &to_path,
+                bytes_done,
+                bytes_total,
+                emit,
+                &sub_rel,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// 写 marker 文件（atomic：tmp + rename）
+fn write_marker(framework_app_data_dir: &Path, marker: &MigrationMarker) -> Result<(), AppError> {
+    let path = framework_app_data_dir.join(MIGRATION_MARKER);
+    let tmp = framework_app_data_dir.join(format!("{}.tmp", MIGRATION_MARKER));
+    let bytes = serde_json::to_vec_pretty(marker).map_err(|e| AppError::Custom(e.to_string()))?;
+    std::fs::write(&tmp, bytes)?;
+    if path.exists() {
+        let _ = std::fs::remove_file(&path);
+    }
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+fn read_pointer(default_app_data_dir: &Path) -> Result<Option<String>, AppError> {
+    let pointer = default_app_data_dir.join(POINTER_FILE);
+    if !pointer.exists() {
+        return Ok(None);
+    }
+    let s = std::fs::read_to_string(&pointer)?.trim().to_string();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(s))
+}
+
+/// 便携模式哨兵文件名（位于 exe 同级目录）
+pub const PORTABLE_SENTINEL: &str = "portable.txt";
+
+/// 探测 exe 同级是否有 portable.txt；有则返回目标数据根目录
+///
+/// 失败优雅降级：current_exe 拿不到 / 无父目录 → 返回 None（不报错，回退到指针/默认）
+fn detect_portable_data_dir() -> Result<Option<PathBuf>, AppError> {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return Ok(None),
+    };
+    let exe_dir = match exe.parent() {
+        Some(d) => d.to_path_buf(),
+        None => return Ok(None),
+    };
+    detect_portable_in(&exe_dir)
+}
+
+/// 可测试的纯函数版：给定一个目录，检查里面的 portable.txt 并返回目标路径
+fn detect_portable_in(exe_dir: &Path) -> Result<Option<PathBuf>, AppError> {
+    let sentinel = exe_dir.join(PORTABLE_SENTINEL);
+    if !sentinel.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&sentinel)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let target = if content.is_empty() {
+        exe_dir.join("data")
+    } else if is_foreign_absolute(&content) {
+        // 跨平台守卫：哨兵里写的是另一个平台的绝对路径（把整个便携目录从 Windows
+        // 拷到 macOS 之类）。此时 `Path::is_absolute()` 会返回 false，原逻辑会走
+        // `exe_dir.join(content)` 造出 `<exe>/E:\my\kb` 这种畸形目录 —— 静默不报错，
+        // 但数据全落在错的地方。这里改为回落 exe 同级 `data/`（便携模式的默认约定）。
+        log::warn!(
+            "[data_dir] portable.txt 里的 {:?} 不是本系统（{}）的路径形态，\
+             判定为跨平台搬迁残留 —— 回落到 exe 同级 data/ 目录",
+            content,
+            std::env::consts::OS
+        );
+        exe_dir.join("data")
+    } else if Path::new(&content).is_absolute() {
+        PathBuf::from(&content)
+    } else {
+        exe_dir.join(&content)
+    };
+    std::fs::create_dir_all(&target).map_err(|e| {
+        AppError::Custom(format!(
+            "便携模式目标目录创建失败 {}: {}",
+            target.display(),
+            e
+        ))
+    })?;
+    Ok(Some(target))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_app_data() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("kb_data_dir_test_{}_{}", std::process::id(), n));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn resolve_default_when_no_pointer() {
+        let app_data = temp_app_data();
+        // 清环境变量避免污染
+        std::env::remove_var("KB_DATA_DIR");
+        let r = DataDirResolver::resolve(&app_data).unwrap();
+        assert_eq!(r.source, DataDirSource::Default);
+        assert_eq!(r.current_dir, app_data.to_string_lossy());
+        assert!(r.pending_dir.is_none());
+    }
+
+    #[test]
+    fn set_pending_then_resolve_uses_pointer() {
+        let app_data = temp_app_data();
+        let target = temp_app_data().join("custom-target");
+        std::env::remove_var("KB_DATA_DIR");
+
+        DataDirResolver::set_pending(&app_data, target.to_str().unwrap()).unwrap();
+        let r = DataDirResolver::resolve(&app_data).unwrap();
+        assert_eq!(r.source, DataDirSource::Pointer);
+        assert_eq!(r.current_dir, target.to_string_lossy());
+        assert_eq!(r.pending_dir.as_deref(), Some(target.to_str().unwrap()));
+    }
+
+    #[test]
+    fn clear_pending_restores_default() {
+        let app_data = temp_app_data();
+        let target = temp_app_data().join("will-be-cleared");
+        std::env::remove_var("KB_DATA_DIR");
+
+        DataDirResolver::set_pending(&app_data, target.to_str().unwrap()).unwrap();
+        DataDirResolver::clear_pending(&app_data).unwrap();
+
+        let r = DataDirResolver::resolve(&app_data).unwrap();
+        assert_eq!(r.source, DataDirSource::Default);
+        assert!(r.pending_dir.is_none());
+    }
+
+    #[test]
+    fn set_pending_rejects_relative_path() {
+        let app_data = temp_app_data();
+        let r = DataDirResolver::set_pending(&app_data, "relative/path");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn set_pending_rejects_empty() {
+        let app_data = temp_app_data();
+        assert!(DataDirResolver::set_pending(&app_data, "").is_err());
+        assert!(DataDirResolver::set_pending(&app_data, "   ").is_err());
+    }
+
+    // ─── Portable 模式检测测试 ───
+
+    #[test]
+    fn portable_no_sentinel_returns_none() {
+        let exe_dir = temp_app_data();
+        let r = detect_portable_in(&exe_dir).unwrap();
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn portable_empty_sentinel_uses_exe_sibling_data() {
+        let exe_dir = temp_app_data();
+        std::fs::write(exe_dir.join(PORTABLE_SENTINEL), b"").unwrap();
+        let r = detect_portable_in(&exe_dir).unwrap();
+        let target = r.expect("portable should be detected");
+        assert_eq!(target, exe_dir.join("data"));
+        assert!(target.exists(), "目标目录应被自动创建");
+    }
+
+    #[test]
+    fn portable_sentinel_with_whitespace_treated_as_empty() {
+        let exe_dir = temp_app_data();
+        std::fs::write(exe_dir.join(PORTABLE_SENTINEL), b"   \n  \r\n  ").unwrap();
+        let r = detect_portable_in(&exe_dir).unwrap();
+        assert_eq!(r.unwrap(), exe_dir.join("data"));
+    }
+
+    #[test]
+    fn portable_sentinel_with_absolute_path() {
+        let exe_dir = temp_app_data();
+        let custom = temp_app_data().join("portable-custom");
+        std::fs::write(
+            exe_dir.join(PORTABLE_SENTINEL),
+            custom.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        let r = detect_portable_in(&exe_dir).unwrap();
+        assert_eq!(r.unwrap(), custom);
+        assert!(custom.exists());
+    }
+
+    #[test]
+    fn portable_sentinel_with_relative_path_joined_to_exe_dir() {
+        let exe_dir = temp_app_data();
+        std::fs::write(exe_dir.join(PORTABLE_SENTINEL), b"my-data").unwrap();
+        let r = detect_portable_in(&exe_dir).unwrap();
+        assert_eq!(r.unwrap(), exe_dir.join("my-data"));
+    }
+
+    // 注意：env 变量测试单独跑（otherwise 会干扰其他测试），这里用 #[ignore] 标记，需要时手动跑
+    #[test]
+    #[ignore = "env var test, run with --ignored"]
+    fn env_var_overrides_pointer() {
+        let app_data = temp_app_data();
+        let target_pointer = temp_app_data().join("from-pointer");
+        let target_env = temp_app_data().join("from-env");
+
+        DataDirResolver::set_pending(&app_data, target_pointer.to_str().unwrap()).unwrap();
+        std::env::set_var("KB_DATA_DIR", target_env.to_str().unwrap());
+
+        let r = DataDirResolver::resolve(&app_data).unwrap();
+        assert_eq!(r.source, DataDirSource::Env);
+        assert_eq!(r.current_dir, target_env.to_string_lossy());
+        // pending_dir 仍报告指针文件里的内容（让 UI 能展示"环境变量临时覆盖了你的设置"）
+        assert_eq!(
+            r.pending_dir.as_deref(),
+            Some(target_pointer.to_str().unwrap())
+        );
+
+        std::env::remove_var("KB_DATA_DIR");
+    }
+}
+
+#[cfg(test)]
+mod cross_platform_guard_tests {
+    use super::*;
+
+    /// 路径形态判定：Windows 盘符 / UNC / POSIX 三类都要认对
+    #[test]
+    fn path_shape_detection() {
+        assert!(looks_windows_absolute(r"E:\my\kb"));
+        assert!(looks_windows_absolute("C:/Users/x/kb"));
+        assert!(looks_windows_absolute(r"\\server\share\kb"));
+        assert!(!looks_windows_absolute("/Users/x/kb"));
+        assert!(!looks_windows_absolute("relative/path"));
+
+        assert!(looks_posix_absolute("/Users/x/Library/Application Support/com.agilefr.kb"));
+        assert!(looks_posix_absolute("/home/x/kb"));
+        // 含反斜杠的一律不当 POSIX 路径（几乎必然是被搬过来的 Windows 路径）
+        assert!(!looks_posix_absolute(r"/mnt\weird"));
+        assert!(!looks_posix_absolute(r"E:\my\kb"));
+        assert!(!looks_posix_absolute("relative/path"));
+    }
+
+    /// 本机形态 vs 外来形态：随当前编译目标平台切换
+    #[test]
+    fn native_vs_foreign_absolute() {
+        let win = r"E:\my\桌面软件tauri\knowledge_base";
+        let posix = "/Users/someone/Library/Application Support/com.agilefr.kb";
+
+        if cfg!(windows) {
+            assert!(is_native_absolute(win));
+            assert!(!is_native_absolute(posix));
+            assert!(is_foreign_absolute(posix), "unix 路径在 Windows 上应判为外来");
+            assert!(!is_foreign_absolute(win));
+        } else {
+            assert!(is_native_absolute(posix));
+            assert!(!is_native_absolute(win));
+            assert!(is_foreign_absolute(win), "Windows 路径在 unix 上应判为外来");
+            assert!(!is_foreign_absolute(posix));
+        }
+
+        // 普通相对路径两个判定都不该命中（否则会被误当搬迁残留）
+        assert!(!is_native_absolute("data"));
+        assert!(!is_foreign_absolute("data"));
+        assert!(!is_foreign_absolute("sub/dir"));
+    }
+
+    /// 核心回归：指针里是**另一个平台**的绝对路径 → 忽略指针、回落默认目录，
+    /// 而不是静默造出一个畸形目录当数据根（那正是"图片地址还是 Windows 的"的成因）。
+    #[test]
+    fn foreign_pointer_falls_back_to_default() {
+        let app_data = temp_app_data_for_guard();
+        std::env::remove_var("KB_DATA_DIR");
+
+        // 手写指针（绕过 set_pending 的本机校验，模拟从另一台机器拷过来的文件）
+        let foreign = if cfg!(windows) {
+            "/Users/someone/Library/Application Support/com.agilefr.kb"
+        } else {
+            r"E:\my\桌面软件tauri\knowledge_base\data"
+        };
+        std::fs::write(app_data.join(POINTER_FILE), foreign).unwrap();
+
+        let r = DataDirResolver::resolve(&app_data).unwrap();
+        assert_eq!(r.source, DataDirSource::Default, "外来指针必须被忽略");
+        assert_eq!(r.current_dir, app_data.to_string_lossy());
+        assert!(r.pending_dir.is_none(), "不该把本机用不了的路径回传给前端");
+
+        // 关键：绝不能在任何地方造出以外来路径命名的目录
+        let bogus = std::path::Path::new(foreign);
+        assert!(
+            !bogus.exists(),
+            "不应创建外来路径目录，否则数据会落到错的位置: {}",
+            foreign
+        );
+    }
+
+    /// 指针是本机形态的正常路径 → 照常生效（守卫不能误伤正常场景）
+    #[test]
+    fn native_pointer_still_works() {
+        let app_data = temp_app_data_for_guard();
+        let target = temp_app_data_for_guard().join("native-target");
+        std::env::remove_var("KB_DATA_DIR");
+
+        DataDirResolver::set_pending(&app_data, target.to_str().unwrap()).unwrap();
+        let r = DataDirResolver::resolve(&app_data).unwrap();
+        assert_eq!(r.source, DataDirSource::Pointer);
+        assert_eq!(r.current_dir, target.to_string_lossy());
+    }
+
+    /// 便携哨兵里是外来绝对路径 → 回落 exe 同级 data/，
+    /// 而不是 join 成 `<exe>/E:\my\kb` 这种畸形目录
+    #[test]
+    fn foreign_portable_sentinel_falls_back_to_data_subdir() {
+        let exe_dir = temp_app_data_for_guard();
+        let foreign = if cfg!(windows) {
+            "/Users/someone/kb-data"
+        } else {
+            r"E:\kb-data"
+        };
+        std::fs::write(exe_dir.join(PORTABLE_SENTINEL), foreign).unwrap();
+
+        let got = detect_portable_in(&exe_dir).unwrap().expect("有哨兵应返回 Some");
+        assert_eq!(got, exe_dir.join("data"));
+        assert!(!exe_dir.join(foreign).exists(), "不应造出畸形拼接目录");
+    }
+
+    /// 便携哨兵里是普通相对路径 → 仍按 exe 同级相对解析（守卫不误伤）
+    #[test]
+    fn relative_portable_sentinel_unaffected() {
+        let exe_dir = temp_app_data_for_guard();
+        std::fs::write(exe_dir.join(PORTABLE_SENTINEL), "mydata").unwrap();
+        let got = detect_portable_in(&exe_dir).unwrap().unwrap();
+        assert_eq!(got, exe_dir.join("mydata"));
+    }
+
+    fn temp_app_data_for_guard() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir()
+            .join(format!("kb_guard_test_{}_{}", std::process::id(), n));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+}
+
+#[cfg(test)]
+mod self_copy_guard_tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let d = std::env::temp_dir().join(format!("kb_selfcopy_{}_{}_{}", tag, std::process::id(), n));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn noop_emit() -> Box<ProgressEmitter> {
+        Box::new(|_: &MigrationProgress| {})
+    }
+
+    /// 🔴 核心回归：src == dst 时**绝不能**把文件截断成 0 字节。
+    ///
+    /// 没有这道防护时，`File::create(dst)` 会先清零源文件，再从空文件读 0 字节 ——
+    /// 整个 app.db 被抹掉且不可恢复。线上真实出现过 `marker: …/data → …/data`。
+    #[test]
+    fn copy_file_never_truncates_when_src_equals_dst() {
+        let dir = temp_dir("file");
+        let f = dir.join("app.db");
+        let payload = b"SQLite format 3\x00 important user data";
+        std::fs::write(&f, payload).unwrap();
+
+        let mut done = 0u64;
+        let emit = noop_emit();
+        copy_file_with_progress(&f, &f, &mut done, payload.len() as u64, &emit, "app.db").unwrap();
+
+        let after = std::fs::read(&f).unwrap();
+        assert_eq!(after, payload, "自我复制绝不能改动文件内容（这是数据全毁级 bug）");
+        assert_eq!(done, payload.len() as u64, "进度仍应累加，否则进度条到不了 100%");
+    }
+
+    /// 路径写法不同但指向同一文件（尾部 `/`、`.` 中间段）也要挡住
+    #[test]
+    fn copy_file_guard_handles_equivalent_path_spellings() {
+        let dir = temp_dir("spell");
+        let f = dir.join("app.db");
+        let payload = b"data-must-survive";
+        std::fs::write(&f, payload).unwrap();
+
+        // 用 `<dir>/./app.db` 指向同一个文件
+        let alias = dir.join(".").join("app.db");
+        let mut done = 0u64;
+        let emit = noop_emit();
+        copy_file_with_progress(&f, &alias, &mut done, payload.len() as u64, &emit, "app.db").unwrap();
+
+        assert_eq!(std::fs::read(&f).unwrap(), payload, "等价路径写法也必须被识别为同一文件");
+    }
+
+    /// 正常的跨目录复制不能被误伤
+    #[test]
+    fn copy_file_still_works_for_distinct_paths() {
+        let src_dir = temp_dir("src");
+        let dst_dir = temp_dir("dst");
+        let src = src_dir.join("a.bin");
+        let dst = dst_dir.join("a.bin");
+        let payload = vec![7u8; 200 * 1024]; // 跨过 64KB 缓冲多轮读写
+        std::fs::write(&src, &payload).unwrap();
+
+        let mut done = 0u64;
+        let emit = noop_emit();
+        copy_file_with_progress(&src, &dst, &mut done, payload.len() as u64, &emit, "a.bin").unwrap();
+
+        assert_eq!(std::fs::read(&dst).unwrap(), payload, "正常复制必须照常工作");
+        assert_eq!(std::fs::read(&src).unwrap(), payload, "源文件不能被动");
+        assert_eq!(done, payload.len() as u64);
+    }
+
+    /// 目录级自我复制同样跳过，且目录内文件完好
+    #[test]
+    fn copy_dir_never_destroys_when_src_equals_dst() {
+        let dir = temp_dir("dir");
+        let sub = dir.join("kb_assets");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("x.png"), b"PNG-BYTES").unwrap();
+
+        let mut done = 0u64;
+        let emit = noop_emit();
+        copy_dir_recursive(&sub, &sub, &mut done, 9, &emit, "kb_assets").unwrap();
+
+        assert_eq!(std::fs::read(sub.join("x.png")).unwrap(), b"PNG-BYTES");
+    }
+
+    /// 防护第 1 层：入口拒绝「源 == 目标」的迁移请求
+    #[test]
+    fn set_pending_with_migration_rejects_same_dir() {
+        let app_data = temp_dir("entry");
+        let data = temp_dir("entry-data");
+
+        let r = DataDirResolver::set_pending_with_migration(
+            &app_data,
+            &data,
+            data.to_str().unwrap(),
+        );
+        assert!(r.is_err(), "源 == 目标必须被拒绝");
+
+        // 连指针都不该写下（失败要干净）
+        assert!(
+            !app_data.join(POINTER_FILE).exists(),
+            "拒绝时不应留下指针文件"
+        );
+        assert!(!app_data.join(MIGRATION_MARKER).exists(), "拒绝时不应留下 marker");
+    }
+
+    /// 入口对不同目录仍然放行（防护不能误伤正常迁移）
+    #[test]
+    fn set_pending_with_migration_allows_distinct_dirs() {
+        let app_data = temp_dir("ok-app");
+        let from = temp_dir("ok-from");
+        let to = temp_dir("ok-to");
+
+        DataDirResolver::set_pending_with_migration(&app_data, &from, to.to_str().unwrap())
+            .expect("不同目录应正常放行");
+        assert!(app_data.join(POINTER_FILE).exists());
+        assert!(app_data.join(MIGRATION_MARKER).exists());
+    }
+
+    /// 防护第 2 层：已存在的「源 == 目标」marker（老版本写的 / 手改的）
+    /// 必须被识别、跳过复制、并清掉 marker（否则每次启动都重试）
+    #[test]
+    fn run_migration_skips_and_clears_same_dir_marker() {
+        let app_data = temp_dir("marker-app");
+        let data = temp_dir("marker-data");
+        let f = data.join("app.db");
+        std::fs::write(&f, b"user-data").unwrap();
+
+        let marker = MigrationMarker {
+            from: data.to_string_lossy().into(),
+            to: data.to_string_lossy().into(),
+            status: MigrationStatus::Pending,
+            started_at: "2026-08-04 14:28:51".into(),
+            updated_at: "2026-08-04 14:28:51".into(),
+            completed_items: Vec::new(),
+            last_error: None,
+        };
+        write_marker(&app_data, &marker).unwrap();
+
+        let emit = noop_emit();
+        DataDirResolver::run_migration(&app_data, &marker, &emit).unwrap();
+
+        assert_eq!(std::fs::read(&f).unwrap(), b"user-data", "数据必须完好");
+        assert!(
+            !app_data.join(MIGRATION_MARKER).exists(),
+            "marker 必须被清除，否则每次启动都会重跑"
+        );
+    }
+
+    // ─── 迁移失败恢复路径（P0/P1）───────────────────────
+
+    fn pending_marker(from: &Path, to: &Path) -> MigrationMarker {
+        MigrationMarker {
+            from: from.to_string_lossy().into(),
+            to: to.to_string_lossy().into(),
+            status: MigrationStatus::Pending,
+            started_at: "2026-08-17 16:04:14".into(),
+            updated_at: "2026-08-17 16:04:14".into(),
+            completed_items: Vec::new(),
+            last_error: None,
+        }
+    }
+
+    /// 🔴 核心回归：迁移失败必须把 marker 标成 Crashed 并记下原因。
+    /// 停在 InProgress 不动 = 下次启动照样重跑、照样失败 → 用户被锁在启动即崩的死循环里。
+    #[test]
+    fn mark_crashed_records_reason_and_status() {
+        let app_data = temp_dir("crash-app");
+        let from = temp_dir("crash-from");
+        let to = temp_dir("crash-to");
+        write_marker(&app_data, &pending_marker(&from, &to)).unwrap();
+
+        let updated = DataDirResolver::mark_migration_crashed(&app_data, "os error 362")
+            .unwrap()
+            .expect("有 marker 就该返回更新后的内容");
+        assert_eq!(updated.status, MigrationStatus::Crashed);
+
+        // 必须真的落盘，不能只改内存里那份
+        let reread = DataDirResolver::read_migration_marker(&app_data).unwrap().unwrap();
+        assert_eq!(reread.status, MigrationStatus::Crashed);
+        assert_eq!(reread.last_error.as_deref(), Some("os error 362"));
+    }
+
+    /// 没有 marker 时标记失败不算错（迁移正好在删 marker 之后失败）
+    #[test]
+    fn mark_crashed_without_marker_is_noop() {
+        let app_data = temp_dir("crash-none");
+        assert!(DataDirResolver::mark_migration_crashed(&app_data, "x")
+            .unwrap()
+            .is_none());
+    }
+
+    /// 老版本写下的 marker（没有 last_error 字段）必须仍能解析 —— 否则升级即炸
+    #[test]
+    fn marker_without_last_error_field_still_parses() {
+        let app_data = temp_dir("compat");
+        let legacy = r#"{
+            "from": "Z:\\我的库",
+            "to": "D:\\我的库",
+            "status": "in_progress",
+            "started_at": "2026-08-17 16:04:14",
+            "updated_at": "2026-08-17 16:04:14",
+            "completed_items": []
+        }"#;
+        std::fs::write(app_data.join(MIGRATION_MARKER), legacy).unwrap();
+
+        let m = DataDirResolver::read_migration_marker(&app_data).unwrap().unwrap();
+        assert_eq!(m.status, MigrationStatus::InProgress);
+        assert!(m.last_error.is_none());
+    }
+
+    /// 重试：状态回 Pending + 清掉上次的错误 + 指针重新指向目标目录
+    #[test]
+    fn retry_resets_status_and_pointer() {
+        let app_data = temp_dir("retry-app");
+        let from = temp_dir("retry-from");
+        let to = temp_dir("retry-to");
+        std::env::remove_var("KB_DATA_DIR");
+        write_marker(&app_data, &pending_marker(&from, &to)).unwrap();
+        DataDirResolver::mark_migration_crashed(&app_data, "boom").unwrap();
+        // 失败时指针被回滚到了源目录
+        DataDirResolver::rollback_pointer_to(&app_data, from.to_str().unwrap()).unwrap();
+
+        DataDirResolver::retry_migration(&app_data).unwrap();
+
+        let m = DataDirResolver::read_migration_marker(&app_data).unwrap().unwrap();
+        assert_eq!(m.status, MigrationStatus::Pending);
+        assert!(m.last_error.is_none());
+        let r = DataDirResolver::resolve(&app_data).unwrap();
+        assert_eq!(r.current_dir, to.to_string_lossy(), "指针必须重新指向目标目录");
+    }
+
+    /// 🔴 启动期必须**跳过** Crashed 的 marker。
+    /// 不跳的话：失败原因通常是环境性的（网盘没启动），下次启动照样失败，
+    /// 用户每次开机都得白等一次失败画面，而且永远等不到自己做决定的机会。
+    #[test]
+    fn startup_skips_crashed_marker() {
+        let app_data = temp_dir("startup-crashed");
+        let from = temp_dir("startup-crashed-from");
+        let to = temp_dir("startup-crashed-to");
+        write_marker(&app_data, &pending_marker(&from, &to)).unwrap();
+        DataDirResolver::mark_migration_crashed(&app_data, "os error 362").unwrap();
+
+        assert!(
+            DataDirResolver::read_startup_migration(&app_data)
+                .unwrap()
+                .is_none(),
+            "Crashed 的 marker 不该在启动期自动重跑"
+        );
+        // 但 UI 仍要能读到它（否则用户看不到失败提示、也无从重试）
+        assert!(DataDirResolver::read_migration_marker(&app_data)
+            .unwrap()
+            .is_some());
+    }
+
+    /// Pending / InProgress 必须照跑（InProgress = 上次被强杀/断电，靠 completed_items 续传）
+    #[test]
+    fn startup_runs_pending_and_in_progress() {
+        for status in [MigrationStatus::Pending, MigrationStatus::InProgress] {
+            let app_data = temp_dir("startup-run");
+            let from = temp_dir("startup-run-from");
+            let to = temp_dir("startup-run-to");
+            let mut m = pending_marker(&from, &to);
+            m.status = status;
+            write_marker(&app_data, &m).unwrap();
+
+            assert!(
+                DataDirResolver::read_startup_migration(&app_data)
+                    .unwrap()
+                    .is_some(),
+                "{:?} 状态必须在启动期执行",
+                status
+            );
+        }
+    }
+
+    /// 重试后必须重新被启动期认领 —— 否则用户点了「重试并重启」什么也不会发生
+    #[test]
+    fn startup_picks_up_marker_again_after_retry() {
+        let app_data = temp_dir("startup-retry");
+        let from = temp_dir("startup-retry-from");
+        let to = temp_dir("startup-retry-to");
+        std::env::remove_var("KB_DATA_DIR");
+        write_marker(&app_data, &pending_marker(&from, &to)).unwrap();
+        DataDirResolver::mark_migration_crashed(&app_data, "boom").unwrap();
+        assert!(DataDirResolver::read_startup_migration(&app_data)
+            .unwrap()
+            .is_none());
+
+        DataDirResolver::retry_migration(&app_data).unwrap();
+
+        assert!(
+            DataDirResolver::read_startup_migration(&app_data)
+                .unwrap()
+                .is_some(),
+            "重试后必须重新被启动期认领"
+        );
+    }
+
+    /// 放弃迁移后启动期不该再有任何动作
+    #[test]
+    fn startup_has_nothing_after_cancel() {
+        let app_data = temp_dir("startup-cancel");
+        let from = temp_dir("startup-cancel-from");
+        let to = temp_dir("startup-cancel-to");
+        std::env::remove_var("KB_DATA_DIR");
+        DataDirResolver::set_pending_with_migration(&app_data, &from, to.to_str().unwrap())
+            .unwrap();
+        DataDirResolver::cancel_migration(&app_data).unwrap();
+
+        assert!(DataDirResolver::read_startup_migration(&app_data)
+            .unwrap()
+            .is_none());
+    }
+
+    /// 没有 marker 时重试要报错，而不是静默成功
+    #[test]
+    fn retry_without_marker_errors() {
+        let app_data = temp_dir("retry-none");
+        assert!(DataDirResolver::retry_migration(&app_data).is_err());
+    }
+
+    /// 🔴 指针回滚不能依赖源目录可写 —— 源不可达正是迁移失败的主因。
+    /// 用一个不存在的源路径回滚，仍必须成功写下指针。
+    #[test]
+    fn rollback_pointer_works_even_if_source_unreachable() {
+        let app_data = temp_dir("rollback");
+        std::env::remove_var("KB_DATA_DIR");
+        let ghost = if cfg!(windows) {
+            r"Z:\我的库".to_string()
+        } else {
+            "/mnt/ghost-cloud/kb".to_string()
+        };
+
+        DataDirResolver::rollback_pointer_to(&app_data, &ghost).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(app_data.join(POINTER_FILE)).unwrap(),
+            ghost
+        );
+    }
+
+    /// 源目录就是框架默认目录时，回滚 = 删指针（留个指向默认目录的指针纯属误导）
+    #[test]
+    fn rollback_to_default_dir_clears_pointer() {
+        let app_data = temp_dir("rollback-default");
+        std::fs::write(app_data.join(POINTER_FILE), "whatever").unwrap();
+
+        DataDirResolver::rollback_pointer_to(&app_data, app_data.to_str().unwrap()).unwrap();
+        assert!(!app_data.join(POINTER_FILE).exists());
+    }
+
+    /// 🔴 取消迁移必须把指针**退回源目录**，不是无脑删指针。
+    /// 源本身是自定义路径时，删指针会把用户甩进空的默认目录 —— 比迁移失败还糟。
+    #[test]
+    fn cancel_migration_restores_source_pointer() {
+        let app_data = temp_dir("cancel-app");
+        let from = temp_dir("cancel-from");
+        let to = temp_dir("cancel-to");
+        std::env::remove_var("KB_DATA_DIR");
+        DataDirResolver::set_pending_with_migration(&app_data, &from, to.to_str().unwrap())
+            .unwrap();
+
+        DataDirResolver::cancel_migration(&app_data).unwrap();
+
+        assert!(!app_data.join(MIGRATION_MARKER).exists(), "marker 必须删掉");
+        let r = DataDirResolver::resolve(&app_data).unwrap();
+        assert_eq!(r.current_dir, from.to_string_lossy(), "必须回到源目录");
+    }
+
+    // ─── 源目录预检（P2）─────────────────────────────
+
+    /// 源目录不存在 → 预检直接失败，且提示里带上路径（用户得知道是哪个盘没接上）
+    #[test]
+    fn preflight_rejects_missing_source() {
+        let ghost = std::env::temp_dir().join("kb_preflight_never_exists_xyz");
+        let err = preflight_source(&ghost).unwrap_err().to_string();
+        assert!(err.contains("不存在"), "错误信息应说明源目录不存在: {}", err);
+    }
+
+    /// 正常可读的源目录（含 db 文件）必须放行，别误伤
+    #[test]
+    fn preflight_accepts_readable_source() {
+        let from = temp_dir("preflight-ok");
+        std::fs::write(from.join("app.db"), b"SQLite format 3\x00").unwrap();
+        std::fs::create_dir_all(from.join("kb_assets")).unwrap();
+        preflight_source(&from).unwrap();
+    }
+
+    /// 空目录也放行：没东西可搬，谈不上读得动读不动
+    #[test]
+    fn preflight_accepts_empty_source() {
+        let from = temp_dir("preflight-empty");
+        preflight_source(&from).unwrap();
+    }
+
+    /// 入口预检：源不可读时 `set_pending_with_migration` 当场就该拒绝，
+    /// 且不留下任何指针 / marker —— 用户在设置页点确认时就能看到原因，不用等重启崩一次
+    #[test]
+    fn set_pending_with_migration_rejects_unreachable_source() {
+        let app_data = temp_dir("preflight-entry");
+        let to = temp_dir("preflight-entry-to");
+        let ghost = std::env::temp_dir().join("kb_preflight_entry_ghost_xyz");
+
+        let r =
+            DataDirResolver::set_pending_with_migration(&app_data, &ghost, to.to_str().unwrap());
+        assert!(r.is_err(), "源不可达必须被拒绝");
+        assert!(!app_data.join(POINTER_FILE).exists(), "拒绝时不应留下指针");
+        assert!(!app_data.join(MIGRATION_MARKER).exists(), "拒绝时不应留下 marker");
+    }
+
+    #[test]
+    fn is_same_location_basics() {
+        let a = temp_dir("same-a");
+        let b = temp_dir("same-b");
+        assert!(is_same_location(&a, &a));
+        assert!(!is_same_location(&a, &b));
+        // 尾部分隔符不影响判定（走字符串兜底路径也要正确）
+        let with_slash = PathBuf::from(format!("{}/", a.to_string_lossy()));
+        assert!(is_same_location(&a, &with_slash));
+        // 不存在的路径走字符串兜底
+        let ghost = std::env::temp_dir().join("kb_ghost_never_exists_xyz");
+        assert!(is_same_location(&ghost, &ghost));
+    }
+}

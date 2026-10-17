@@ -1,0 +1,982 @@
+/**
+ * T-024 同步 V1 设置区
+ *
+ * 与现有 V0 SyncSection（整库 ZIP 备份）并存。
+ * 这里管理"多 backend + 单笔记粒度增量同步"。
+ *
+ * v1 阶段仅 LocalPath backend 可用；S3 / WebDAV / Git 显示"敬请期待"占位。
+ */
+import { useEffect, useState } from "react";
+import {
+  Alert,
+  App as AntdApp,
+  Badge,
+  Button,
+  Form,
+  Input,
+  InputNumber,
+  Modal,
+  Popconfirm,
+  Progress,
+  Radio,
+  Space,
+  Switch,
+  Table,
+  Tag,
+  Tooltip,
+  Typography,
+  theme as antdTheme,
+} from "antd";
+import {
+  AlertTriangle,
+  CloudDownload,
+  CloudUpload,
+  FolderOpen,
+  Plug,
+  Plus,
+  Trash2,
+  Pencil,
+  RefreshCcw,
+  Share2,
+  Download,
+} from "lucide-react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { configApi, syncApi, syncV1Api } from "@/lib/api";
+import { ShareConfigModal } from "@/components/config-share/ShareConfigModal";
+import { ImportConfigModal } from "@/components/config-share/ImportConfigModal";
+import { ConflictResolveModal } from "@/components/settings/ConflictResolveModal";
+import { exportSyncBackend, type Envelope } from "@/lib/configShare";
+import type {
+  SyncBackend,
+  SyncBackendInput,
+  SyncBackendKind,
+  SyncV1ProgressEvent,
+} from "@/types";
+
+const { Text, Paragraph } = Typography;
+
+interface BackendFormState {
+  id: number | null;
+  kind: SyncBackendKind;
+  name: string;
+  /** Local */
+  path: string;
+  /** WebDAV */
+  url: string;
+  username: string;
+  password: string;
+  /** S3 */
+  endpoint: string;
+  region: string;
+  bucket: string;
+  accessKey: string;
+  secretKey: string;
+  prefix: string;
+  enabled: boolean;
+  autoSync: boolean;
+  syncIntervalMin: number;
+}
+
+const EMPTY_FORM: BackendFormState = {
+  id: null,
+  kind: "local",
+  name: "",
+  path: "",
+  url: "",
+  username: "",
+  password: "",
+  endpoint: "",
+  region: "auto",
+  bucket: "",
+  accessKey: "",
+  secretKey: "",
+  prefix: "",
+  enabled: true,
+  autoSync: false,
+  syncIntervalMin: 30,
+};
+
+const KIND_LABEL: Record<SyncBackendKind, string> = {
+  local: "本地路径 / 同步盘",
+  webdav: "WebDAV",
+  s3: "S3 兼容（阿里云 OSS / 腾讯云 COS / R2 / MinIO）",
+};
+
+const KIND_TAG_COLOR: Record<SyncBackendKind, string> = {
+  local: "green",
+  webdav: "blue",
+  s3: "geekblue",
+};
+
+function buildConfigJson(s: BackendFormState): string {
+  switch (s.kind) {
+    case "local":
+      return JSON.stringify({ path: s.path });
+    case "webdav":
+      return JSON.stringify({
+        url: s.url,
+        username: s.username,
+        password: s.password,
+      });
+    case "s3":
+      return JSON.stringify({
+        endpoint: s.endpoint,
+        region: s.region || "auto",
+        bucket: s.bucket,
+        accessKey: s.accessKey,
+        secretKey: s.secretKey,
+        prefix: s.prefix || "",
+      });
+  }
+}
+
+function parseConfigJson(
+  kind: SyncBackendKind,
+  json: string,
+): Partial<BackendFormState> {
+  try {
+    const v = JSON.parse(json) as Record<string, unknown>;
+    const get = (k: string, def = "") =>
+      typeof v[k] === "string" ? (v[k] as string) : def;
+    switch (kind) {
+      case "local":
+        return { path: get("path") };
+      case "webdav":
+        return {
+          url: get("url"),
+          username: get("username"),
+          password: get("password"),
+        };
+      case "s3":
+        return {
+          endpoint: get("endpoint"),
+          region: get("region", "auto"),
+          bucket: get("bucket"),
+          accessKey: get("accessKey"),
+          secretKey: get("secretKey"),
+          prefix: get("prefix"),
+        };
+    }
+  } catch {
+    return {};
+  }
+}
+
+export function SyncV1Section() {
+  const { token } = antdTheme.useToken();
+  const { message, modal } = AntdApp.useApp();
+  const [backends, setBackends] = useState<SyncBackend[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [form, setForm] = useState<BackendFormState>(EMPTY_FORM);
+  const [busyBackendId, setBusyBackendId] = useState<number | null>(null);
+  // 正在跑的操作：用于让"只有当前操作的按钮转圈、其余只灰掉"
+  const [busyOp, setBusyOp] = useState<"test" | "push" | "pull" | null>(null);
+  const [progress, setProgress] = useState<SyncV1ProgressEvent | null>(null);
+  const [shareEnv, setShareEnv] = useState<Envelope | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [rebuildingIndex, setRebuildingIndex] = useState(false);
+  const [gcRunning, setGcRunning] = useState(false);
+  // T-S051: 待处理冲突
+  const [conflictCount, setConflictCount] = useState(0);
+  const [conflictModalOpen, setConflictModalOpen] = useState(false);
+
+  // T-S024: 重建附件索引 —— 扫描所有笔记 content 中的本地资产引用并 upsert 到 note_attachments
+  async function handleRebuildAttachmentIndex() {
+    setRebuildingIndex(true);
+    try {
+      const n = await syncV1Api.rebuildAttachmentIndex();
+      message.success(`附件索引重建完成：登记 ${n} 条引用`);
+    } catch (e) {
+      message.error(`重建附件索引失败：${e}`);
+    } finally {
+      setRebuildingIndex(false);
+    }
+  }
+
+  // T-S025: 清理远端孤儿附件 —— 对所有同步源依次跑 GC（7 天宽限期标记 → 超期才删）
+  async function handleGcAttachments() {
+    if (backends.length === 0) {
+      message.info("还没有同步源");
+      return;
+    }
+    setGcRunning(true);
+    try {
+      let deleted = 0;
+      let marked = 0;
+      let unmarked = 0;
+      const errors: string[] = [];
+      for (const b of backends) {
+        const r = await syncV1Api.gcAttachments(b.id);
+        deleted += r.deleted;
+        marked += r.newlyMarked;
+        unmarked += r.unmarked;
+        if (r.errors?.length) errors.push(...r.errors);
+      }
+      const parts = [`删除 ${deleted} 个`, `新标记 ${marked} 个`];
+      if (unmarked > 0) parts.push(`恢复 ${unmarked} 个（又被引用）`);
+      const summary = parts.join("，");
+      if (errors.length > 0) {
+        message.warning(
+          `孤儿附件清理完成（${errors.length} 个出错）：${summary}。首例：${errors[0]}`,
+        );
+      } else {
+        message.success(`孤儿附件清理完成：${summary}（新标记的满 7 天后下次清理时删除）`);
+      }
+    } catch (e) {
+      message.error(`清理孤儿附件失败：${e}`);
+    } finally {
+      setGcRunning(false);
+    }
+  }
+
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    void listen<SyncV1ProgressEvent>("sync_v1:progress", (e) => {
+      setProgress(e.payload);
+    }).then((u) => {
+      unlisten = u;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  // 自动同步结果通知：成功不打扰（仅刷新列表更新 last_*_ts 显示），失败弹 toast；
+  // encryptedSkipped>0（vault meta 不匹配 → 加密笔记被静默跳过）显式告知用户避免误以为同步了
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    void listen<{
+      backendId: number;
+      ok: boolean;
+      error?: string | null;
+      encryptedSkipped?: number;
+    }>("sync_v1:auto-triggered", (e) => {
+      const { ok, error, backendId, encryptedSkipped } = e.payload;
+      if (ok) {
+        void loadBackends();
+        void loadConflictCount();
+      } else {
+        message.warning(`自动同步失败 (backend #${backendId})：${error ?? "未知错误"}`);
+      }
+      if ((encryptedSkipped ?? 0) > 0) {
+        message.warning(
+          `${encryptedSkipped} 篇加密笔记未同步：本机 vault 与远端不匹配（密码 / salt 不一致）`,
+          6,
+        );
+      }
+    }).then((u) => {
+      unlisten = u;
+    });
+    return () => {
+      unlisten?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    void loadBackends();
+    void loadConflictCount();
+  }, []);
+
+  // T-S051: 刷新"待处理冲突"数量（用于按钮角标）
+  async function loadConflictCount() {
+    try {
+      const list = await syncV1Api.listConflicts();
+      setConflictCount(list.length);
+    } catch {
+      // 静默失败，不打扰
+    }
+  }
+
+  async function loadBackends() {
+    setLoading(true);
+    try {
+      const list = await syncV1Api.listBackends();
+      setBackends(list);
+    } catch (e) {
+      message.error(`加载同步配置失败: ${e}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function openCreateModal() {
+    setForm({ ...EMPTY_FORM });
+    setModalOpen(true);
+  }
+
+  function openEditModal(b: SyncBackend) {
+    const parsed = parseConfigJson(b.kind, b.configJson);
+    setForm({
+      ...EMPTY_FORM,
+      id: b.id,
+      kind: b.kind,
+      name: b.name,
+      enabled: b.enabled,
+      autoSync: b.autoSync,
+      syncIntervalMin: b.syncIntervalMin,
+      ...parsed,
+    });
+    setModalOpen(true);
+  }
+
+  async function handlePickPath() {
+    const sel = await openDialog({
+      directory: true,
+      multiple: false,
+      title: "选择同步目录",
+    });
+    if (typeof sel === "string") {
+      setForm((s) => ({ ...s, path: sel }));
+    }
+  }
+
+  /**
+   * 一键复用「备份与恢复」(V0) 里已配置的 WebDAV：
+   * URL/用户名走 app_config，密码走 SQLite 加密存储 → 解密后塞进表单
+   * 仅在新建时拉到当前的 V0 名字作为默认 name；编辑时不覆盖已有 name
+   */
+  async function handleReuseV0Webdav() {
+    try {
+      const url = await configApi.get("sync.webdav_url").catch(() => "");
+      const username = await configApi
+        .get("sync.webdav_username")
+        .catch(() => "");
+      if (!url || !username) {
+        message.warning(
+          "「备份与恢复」里还没填 WebDAV，请先去那边填好 URL 和用户名",
+        );
+        return;
+      }
+      let password = "";
+      try {
+        password = (await syncApi.getPassword(username)) ?? "";
+      } catch {
+        password = "";
+      }
+      setForm((s) => ({
+        ...s,
+        kind: "webdav",
+        name: s.name || `从备份与恢复复用（${username}）`,
+        url,
+        username,
+        password,
+      }));
+      if (!password) {
+        message.info("已填入 URL 和用户名；密码未保存到钥匙串，请手动补填");
+      } else {
+        message.success("已从「备份与恢复」复用 WebDAV 配置");
+      }
+    } catch (e) {
+      message.error(`读取失败：${e}`);
+    }
+  }
+
+  function validateForm(): string | null {
+    if (!form.name.trim()) return "请填写名称";
+    switch (form.kind) {
+      case "local":
+        if (!form.path.trim()) return "请选择本地路径";
+        break;
+      case "webdav":
+        if (!form.url || !form.username) return "请填写 WebDAV URL 和用户名";
+        break;
+      case "s3":
+        if (!form.endpoint || !form.bucket || !form.accessKey)
+          return "请填写 endpoint / bucket / accessKey";
+        break;
+    }
+    return null;
+  }
+
+  async function handleSave() {
+    const err = validateForm();
+    if (err) {
+      message.warning(err);
+      return;
+    }
+    const input: SyncBackendInput = {
+      kind: form.kind,
+      name: form.name.trim(),
+      configJson: buildConfigJson(form),
+      enabled: form.enabled,
+      autoSync: form.autoSync,
+      syncIntervalMin: form.syncIntervalMin,
+    };
+    try {
+      if (form.id == null) {
+        await syncV1Api.createBackend(input);
+        message.success("已创建同步配置");
+      } else {
+        await syncV1Api.updateBackend(form.id, input);
+        message.success("已更新同步配置");
+      }
+      setModalOpen(false);
+      void loadBackends();
+    } catch (e) {
+      message.error(`保存失败: ${e}`);
+    }
+  }
+
+  async function handleDelete(id: number) {
+    try {
+      await syncV1Api.deleteBackend(id);
+      message.success("已删除");
+      void loadBackends();
+    } catch (e) {
+      message.error(`删除失败: ${e}`);
+    }
+  }
+
+  async function handleTest(id: number) {
+    setBusyBackendId(id);
+    setBusyOp("test");
+    try {
+      await syncV1Api.testConnection(id);
+      message.success("连接正常");
+    } catch (e) {
+      message.error(`连接失败: ${e}`);
+    } finally {
+      setBusyBackendId(null);
+      setBusyOp(null);
+    }
+  }
+
+  async function handlePush(id: number) {
+    setBusyBackendId(id);
+    setBusyOp("push");
+    setProgress(null);
+    try {
+      const r = await syncV1Api.push(id);
+      const msg = `推送完成：上传 ${r.uploaded} / 跳过 ${r.skipped} / 错误 ${r.errors.length}`;
+      if (r.errors.length > 0) {
+        modal.warning({ title: "推送有错误", content: r.errors.join("\n") });
+      } else {
+        message.success(msg);
+      }
+      void loadBackends();
+    } catch (e) {
+      message.error(`推送失败: ${e}`);
+    } finally {
+      setBusyBackendId(null);
+      setBusyOp(null);
+      setProgress(null);
+    }
+  }
+
+  async function handlePull(id: number) {
+    setBusyBackendId(id);
+    setBusyOp("pull");
+    setProgress(null);
+    try {
+      const r = await syncV1Api.pull(id);
+      const msg = `拉取完成：下载 ${r.downloaded} / 删本地 ${r.deletedLocal} / 冲突 ${r.conflicts} / 错误 ${r.errors.length}`;
+      if (r.errors.length > 0) {
+        modal.warning({ title: "拉取有错误", content: r.errors.join("\n") });
+      } else if (r.conflicts > 0) {
+        modal.warning({
+          title: `${r.conflicts} 条冲突待处理`,
+          content:
+            "本地和远端各改了同一条笔记。点上方「冲突待处理」按钮可以并排对比、手动合并。",
+        });
+      } else {
+        message.success(msg);
+      }
+      // 加密笔记被静默跳过 → 显式告知（两端 vault salt/密码不一致时常见）
+      if ((r.encryptedSkipped ?? 0) > 0) {
+        modal.warning({
+          title: `${r.encryptedSkipped} 篇加密笔记未同步`,
+          content:
+            '本机 vault（加密保险库）与远端不匹配 — 多半是两端用了不同的主密码或还没在本机解锁。请确认两端 vault 用的是同一密码、且已解锁；若是新设备，需先在保险库里"导入远端配置"或用同一密码重建 vault。',
+        });
+      }
+      void loadBackends();
+      void loadConflictCount();
+    } catch (e) {
+      message.error(`拉取失败: ${e}`);
+    } finally {
+      setBusyBackendId(null);
+      setBusyOp(null);
+      setProgress(null);
+    }
+  }
+
+  // 后台同步：立即返回，不阻塞界面；完成/失败由 sync_v1:auto-triggered 事件弹 toast
+  async function handleBackgroundSync(id: number) {
+    try {
+      await syncV1Api.triggerBackgroundSync(id);
+      message.info("已在后台开始同步（先拉后推），完成后会提示；这期间可以继续干别的");
+    } catch (e) {
+      message.error(`启动后台同步失败: ${e}`);
+    }
+  }
+
+  return (
+    <div>
+      <Alert
+        type="success"
+        showIcon
+        message="多端实时同步（推荐用法）"
+        description={
+          <span style={{ fontSize: 12 }}>
+            单笔记粒度的增量同步：多端共用 UUID（不会重复创建笔记）、删除会同步到其它端、
+            附件按内容 hash 去重上传、加密笔记跨端可见。
+            <br />
+            <b>首次启用同步前</b>，请先点下方<b>「重建附件索引」</b>，让本机笔记里引用的图片/PDF
+            等附件被登记进同步范围。
+          </span>
+        }
+        style={{ marginBottom: 12 }}
+      />
+
+      <div className="flex items-center justify-between mb-3">
+        <span
+          className="flex items-center gap-2"
+          style={{ fontSize: 13, color: token.colorTextSecondary }}
+        >
+          <RefreshCcw size={14} />
+          已配置的同步源：每个同步源独立维护推送 / 拉取状态
+        </span>
+        <Space size={4}>
+          {conflictCount > 0 && (
+            <Tooltip title="本地和远端各改了同一条笔记，需要你来决定保留哪个版本（或手动合并）。">
+              <Badge count={conflictCount} size="small" offset={[-2, 2]}>
+                <Button
+                  size="small"
+                  danger
+                  icon={<AlertTriangle size={14} />}
+                  onClick={() => setConflictModalOpen(true)}
+                >
+                  冲突待处理
+                </Button>
+              </Badge>
+            </Tooltip>
+          )}
+          <Tooltip title="扫描所有笔记的图片/PDF/source 引用并登记到附件同步索引。首次启用同步前、或批量导入笔记后请按一次。">
+            <Button
+              size="small"
+              loading={rebuildingIndex}
+              onClick={handleRebuildAttachmentIndex}
+            >
+              重建附件索引
+            </Button>
+          </Tooltip>
+          <Tooltip title="清理远端 attachments/ 下已无笔记引用的孤儿文件。首次发现的孤儿会先标记，满 7 天再删（防误删）。本地路径 / S3 / WebDAV 均支持（个别禁用递归列举的 WebDAV 服务器会自动跳过）。">
+            <Button
+              size="small"
+              loading={gcRunning}
+              onClick={handleGcAttachments}
+            >
+              清理孤儿附件
+            </Button>
+          </Tooltip>
+          <Tooltip title="从 JSON / 二维码导入同步源">
+            <Button
+              size="small"
+              icon={<Download size={14} />}
+              onClick={() => setImportOpen(true)}
+            >
+              导入
+            </Button>
+          </Tooltip>
+          <Button
+            type="primary"
+            size="small"
+            icon={<Plus size={14} />}
+            onClick={openCreateModal}
+          >
+            新增同步源
+          </Button>
+        </Space>
+      </div>
+
+      <Table<SyncBackend>
+        size="small"
+        rowKey="id"
+        loading={loading}
+        dataSource={backends}
+        pagination={false}
+        locale={{ emptyText: "还没有同步源，点右上角「新增同步源」开始" }}
+        columns={[
+          {
+            title: "名称",
+            dataIndex: "name",
+            // 不要在同一行 flex 里同时塞 Tag + 长名字：名字遇到窄列宽会被 flex 压
+            // 到 1 字符宽，中文/邮箱可逐字换行后整段竖排成一字一行（实际反馈过的 bug）。
+            // 改为上下两行：Tag 在上，名字独占整列自然换行。
+            render: (_, b) => (
+              <div className="flex flex-col gap-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Tag color={KIND_TAG_COLOR[b.kind]} style={{ marginInlineEnd: 0 }}>
+                    {KIND_LABEL[b.kind]}
+                  </Tag>
+                  {!b.enabled && <Tag style={{ marginInlineEnd: 0 }}>已禁用</Tag>}
+                </div>
+                <Text strong style={{ wordBreak: "break-word" }}>
+                  {b.name}
+                </Text>
+              </div>
+            ),
+          },
+          {
+            title: "上次推送 / 拉取",
+            width: 220,
+            render: (_, b) => (
+              <Space direction="vertical" size={0} style={{ fontSize: 12 }}>
+                <Text type="secondary">
+                  ↑ {b.lastPushTs ?? "—"}
+                </Text>
+                <Text type="secondary">
+                  ↓ {b.lastPullTs ?? "—"}
+                </Text>
+              </Space>
+            ),
+          },
+          {
+            title: "操作",
+            width: 460,
+            render: (_, b) => {
+              const busy = busyBackendId === b.id;
+              return (
+                <Space size={4} wrap>
+                  <Tooltip title="测试连接">
+                    <Button
+                      size="small"
+                      icon={<Plug size={13} />}
+                      loading={busy && busyOp === "test"}
+                      disabled={busy && busyOp !== "test"}
+                      onClick={() => handleTest(b.id)}
+                    />
+                  </Tooltip>
+                  <Tooltip title="推送本地变更到远端">
+                    <Button
+                      size="small"
+                      icon={<CloudUpload size={13} />}
+                      loading={busy && busyOp === "push"}
+                      disabled={busy && busyOp !== "push"}
+                      onClick={() => handlePush(b.id)}
+                    >
+                      推送
+                    </Button>
+                  </Tooltip>
+                  <Tooltip title="从远端拉取变更到本地">
+                    <Button
+                      size="small"
+                      icon={<CloudDownload size={13} />}
+                      loading={busy && busyOp === "pull"}
+                      disabled={busy && busyOp !== "pull"}
+                      onClick={() => handlePull(b.id)}
+                    >
+                      拉取
+                    </Button>
+                  </Tooltip>
+                  <Tooltip title="后台同步（先拉后推）：点了立刻返回，同步在后台跑、不阻塞界面，完成后弹提示">
+                    <Button
+                      size="small"
+                      icon={<RefreshCcw size={13} />}
+                      disabled={busy}
+                      onClick={() => handleBackgroundSync(b.id)}
+                    >
+                      后台同步
+                    </Button>
+                  </Tooltip>
+                  <Tooltip title="分享到其他设备（含密码 / 密钥，可加密）">
+                    <Button
+                      size="small"
+                      icon={<Share2 size={13} />}
+                      disabled={busy}
+                      onClick={() => setShareEnv(exportSyncBackend(b))}
+                    />
+                  </Tooltip>
+                  <Tooltip title="编辑">
+                    <Button
+                      size="small"
+                      icon={<Pencil size={13} />}
+                      disabled={busy}
+                      onClick={() => openEditModal(b)}
+                    />
+                  </Tooltip>
+                  <Popconfirm
+                    title="确认删除此同步源？"
+                    description="只清掉同步源配置和远端状态记录，不会动你的笔记"
+                    onConfirm={() => handleDelete(b.id)}
+                    disabled={busy}
+                  >
+                    <Button size="small" danger icon={<Trash2 size={13} />} disabled={busy} />
+                  </Popconfirm>
+                </Space>
+              );
+            },
+          },
+        ]}
+      />
+
+      {progress && (
+        <div className="mt-3">
+          <Paragraph style={{ fontSize: 13, marginBottom: 4 }}>
+            {progress.message}
+          </Paragraph>
+          {progress.total > 0 ? (
+            <Progress
+              percent={Math.round(
+                ((progress.current || 0) / Math.max(1, progress.total)) * 100,
+              )}
+              size="small"
+              status={progress.phase === "done" ? "success" : "active"}
+            />
+          ) : (
+            <Progress percent={100} size="small" status="active" showInfo={false} />
+          )}
+        </div>
+      )}
+
+      <Modal
+        title={form.id == null ? "新增同步源" : `编辑同步源：${form.name}`}
+        open={modalOpen}
+        onCancel={() => setModalOpen(false)}
+        onOk={handleSave}
+        okText="保存"
+        cancelText="取消"
+        width={620}
+        destroyOnHidden
+        styles={{
+          body: {
+            // 表单字段较多（尤其 S3 类型）时，弹窗高度会撑爆视口顶到导航栏后面，
+            // 用户找不到底部「保存」按钮。固定 body 高度 + 内部滚动，让 Modal
+            // 自身保持稳定的可视高度。
+            height: 480,
+            overflowY: "auto",
+            paddingRight: 12,
+          },
+        }}
+      >
+        <Form layout="vertical" size="small">
+          <Form.Item label="类型">
+            <Radio.Group
+              value={form.kind}
+              onChange={(e) =>
+                setForm((s) => ({ ...s, kind: e.target.value as SyncBackendKind }))
+              }
+              optionType="button"
+              buttonStyle="solid"
+            >
+              {(
+                ["local", "webdav", "s3"] as SyncBackendKind[]
+              ).map((k) => (
+                <Radio.Button key={k} value={k}>
+                  {KIND_LABEL[k]}
+                </Radio.Button>
+              ))}
+            </Radio.Group>
+          </Form.Item>
+
+          <Form.Item label="名称（自起，区分多个配置）" required>
+            <Input
+              value={form.name}
+              onChange={(e) =>
+                setForm((s) => ({ ...s, name: e.target.value }))
+              }
+              placeholder="如「我的坚果云」「办公电脑」"
+            />
+          </Form.Item>
+
+          {form.kind === "local" && (
+            <>
+              <Form.Item
+                label="本地路径"
+                required
+                extra="可以指向你的百度云 / iCloud Drive / OneDrive 同步盘目录，借用云盘原生同步"
+              >
+                <Input
+                  value={form.path}
+                  onChange={(e) =>
+                    setForm((s) => ({ ...s, path: e.target.value }))
+                  }
+                  placeholder="C:\Users\...\Sync\knowledge-base"
+                  suffix={
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<FolderOpen size={13} />}
+                      onClick={handlePickPath}
+                    />
+                  }
+                />
+              </Form.Item>
+            </>
+          )}
+
+          {form.kind === "webdav" && (
+            <>
+              <div className="mb-2">
+                <Button
+                  size="small"
+                  icon={<RefreshCcw size={13} />}
+                  onClick={handleReuseV0Webdav}
+                >
+                  复用「备份与恢复」的 WebDAV 配置
+                </Button>
+              </div>
+              <Form.Item
+                label="WebDAV URL"
+                required
+                extra="例如坚果云：https://dav.jianguoyun.com/dav/我的同步空间"
+              >
+                <Input
+                  value={form.url}
+                  onChange={(e) =>
+                    setForm((s) => ({ ...s, url: e.target.value }))
+                  }
+                  placeholder="https://dav.example.com/dav/path"
+                />
+              </Form.Item>
+              <Form.Item label="用户名" required>
+                <Input
+                  value={form.username}
+                  onChange={(e) =>
+                    setForm((s) => ({ ...s, username: e.target.value }))
+                  }
+                />
+              </Form.Item>
+              <Form.Item label="密码（应用密码 / 第三方授权码）" required>
+                <Input.Password
+                  value={form.password}
+                  onChange={(e) =>
+                    setForm((s) => ({ ...s, password: e.target.value }))
+                  }
+                  placeholder="坚果云用「应用密码」、Nextcloud 用 App Token"
+                />
+              </Form.Item>
+              <Alert
+                type="info"
+                showIcon
+                message="V1 是单笔记粒度的真同步，跟上方「整库 ZIP 备份」V0 是两套独立机制，可以并存"
+              />
+            </>
+          )}
+
+          {form.kind === "s3" && (
+            <>
+              <Form.Item
+                label="Endpoint URL"
+                required
+                extra="阿里云 OSS：https://oss-cn-hangzhou.aliyuncs.com / 腾讯云 COS：https://cos.ap-shanghai.myqcloud.com / R2：https://<account>.r2.cloudflarestorage.com / MinIO：http://localhost:9000"
+              >
+                <Input
+                  value={form.endpoint}
+                  onChange={(e) =>
+                    setForm((s) => ({ ...s, endpoint: e.target.value }))
+                  }
+                  placeholder="https://oss-cn-hangzhou.aliyuncs.com"
+                />
+              </Form.Item>
+              <Form.Item
+                label="Region"
+                extra="AWS S3 必填（如 us-east-1）；R2 / 阿里云 / 腾讯云通常填 auto 或留空即可"
+              >
+                <Input
+                  value={form.region}
+                  onChange={(e) =>
+                    setForm((s) => ({ ...s, region: e.target.value }))
+                  }
+                  placeholder="auto"
+                />
+              </Form.Item>
+              <Form.Item label="Bucket 名称" required>
+                <Input
+                  value={form.bucket}
+                  onChange={(e) =>
+                    setForm((s) => ({ ...s, bucket: e.target.value }))
+                  }
+                  placeholder="my-knowledge-base"
+                />
+              </Form.Item>
+              <Form.Item label="Access Key" required>
+                <Input
+                  value={form.accessKey}
+                  onChange={(e) =>
+                    setForm((s) => ({ ...s, accessKey: e.target.value }))
+                  }
+                />
+              </Form.Item>
+              <Form.Item label="Secret Key" required>
+                <Input.Password
+                  value={form.secretKey}
+                  onChange={(e) =>
+                    setForm((s) => ({ ...s, secretKey: e.target.value }))
+                  }
+                />
+              </Form.Item>
+              <Form.Item
+                label="路径前缀（可选）"
+                extra="留空则放在 bucket 根；填 kb/ 则所有同步对象放在 bucket/kb/ 下，方便和别的内容隔离"
+              >
+                <Input
+                  value={form.prefix}
+                  onChange={(e) =>
+                    setForm((s) => ({ ...s, prefix: e.target.value }))
+                  }
+                  placeholder="kb"
+                />
+              </Form.Item>
+            </>
+          )}
+
+          <div className="mt-3 flex flex-wrap items-center gap-6">
+            <span className="flex items-center gap-2">
+              <Switch
+                checked={form.enabled}
+                onChange={(v) => setForm((s) => ({ ...s, enabled: v }))}
+              />
+              <Text>启用</Text>
+            </span>
+            <span className="flex items-center gap-2">
+              <Switch
+                checked={form.autoSync}
+                onChange={(v) => setForm((s) => ({ ...s, autoSync: v }))}
+              />
+              <Text>自动同步</Text>
+            </span>
+            <span className="flex items-center gap-2">
+              <Text type="secondary">间隔</Text>
+              <InputNumber
+                size="small"
+                min={5}
+                max={1440}
+                value={form.syncIntervalMin}
+                onChange={(v) =>
+                  setForm((s) => ({
+                    ...s,
+                    syncIntervalMin: typeof v === "number" ? v : 30,
+                  }))
+                }
+              />
+              <Text type="secondary">分钟</Text>
+            </span>
+          </div>
+        </Form>
+      </Modal>
+
+      <ShareConfigModal
+        open={shareEnv !== null}
+        onClose={() => setShareEnv(null)}
+        envelope={shareEnv}
+      />
+      <ImportConfigModal
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImported={() => void loadBackends()}
+      />
+      <ConflictResolveModal
+        open={conflictModalOpen}
+        onClose={() => {
+          setConflictModalOpen(false);
+          void loadConflictCount();
+        }}
+        onChanged={() => void loadConflictCount()}
+      />
+    </div>
+  );
+}

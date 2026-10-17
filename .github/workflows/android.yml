@@ -1,0 +1,174 @@
+# =============================================================================
+# Android 构建工作流（移动端 T-M020）
+# =============================================================================
+#
+# 🔴 移动端有独立版本线：版本号读 `src-tauri/tauri.android.conf.json` 的 `version`
+#    （从 0.1.0 起，跟桌面 `tauri.conf.json` 的 1.x 解耦）。Tauri 2 构建 Android 时
+#    会自动把 tauri.android.conf.json 合并覆盖到 tauri.conf.json，所以 APK 的
+#    versionName 和编译进去的 `package_info().version` 都是这个独立版本。
+#
+# 触发方式：
+#   - workflow_dispatch（手动触发；可选 debug / release，默认 debug）
+#   - 推送 mobile-v*.*.* 格式的 Tag（例 mobile-v0.1.0）→ 一律走 release 正式签名构建。
+#     **不是** v*.*.*（那是桌面 release.yml 的）—— 两套 tag 互不干扰。release-publish
+#     的「移动端发布」流程就靠推 mobile-v<移动版本> tag 触发拿到正式签名 APK。
+#     ⚠️ 被 tag 的那个 commit 的消息不能含 `[skip ci]`，否则 tag push 也会被跳过。
+#
+# 构建类型：
+#   - debug：SDK 自带 debug keystore 自签名，可直接侧载（仅 workflow_dispatch 选 debug 时）
+#   - release：用 kb-release.jks 正式签名（需仓库配好 ANDROID_* + TAURI_SIGNING_* Secrets）
+#       同时出 APK（侧载 / 配合 App 内"检查更新"）和 AAB（传 Google Play）
+#       —— tag 触发、或 workflow_dispatch 选 release 时走这条
+#
+# release 构建需要的 GitHub Secrets（主 bkywksj 仓库已配；切备用 CI 仓时需在新仓补配）：
+#   - ANDROID_KEYSTORE_BASE64        base64(kb-release.jks 文件内容)
+#   - ANDROID_KEYSTORE_PASSWORD      keystore 密码
+#   - ANDROID_KEY_ALIAS              key alias（kb）
+#   - ANDROID_KEY_PASSWORD           key 密码
+#   - TAURI_SIGNING_PRIVATE_KEY      tauri updater 私钥（src-tauri/keys/tauri-updater.key 内容）
+#   - TAURI_SIGNING_PRIVATE_KEY_PASSWORD  （空）
+#
+# 产物（起名 Knowledge.Base_<移动版本>_android-arm64.xxx，移动版本来自 tauri.android.conf.json）：
+#   - Knowledge.Base_<移动版本>_android-arm64.apk   （侧载 / App 内"检查更新"下载）
+#   - Knowledge.Base_<移动版本>_android-arm64.aab   （release 才有，传 Google Play）
+#
+# 上传到：
+#   - GitHub Actions Artifacts（30 天后自动清理）
+#   - tag 触发时附加到本仓库 GitHub Release（草稿，tag = mobile-v<移动版本>）
+#     → release-publish 的移动端发布流程把 APK 放进 release 仓 + 生成 update-mobile.json，
+#       App 内 check_mobile_update 命令读 update-mobile.json 拿到 APK 直链 → openUrl 下载安装
+# =============================================================================
+
+name: Android Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: '构建类型（debug 自签名 / release 需要 keystore）'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
+  push:
+    tags:
+      - 'mobile-v*.*.*'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0 ndk;27.0.12077973'
+
+      - name: Set NDK env vars
+        run: |
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.0.12077973" >> $GITHUB_ENV
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> $GITHUB_ENV
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          # Android target 单独 key，避免与桌面构建缓存互冲
+          key: 'android-${{ matrix.target || ''aarch64'' }}'
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      # debug 只在 workflow_dispatch 明确选 debug 时跑（侧载快速测试用）。
+      # tag 触发 / workflow_dispatch 选 release → 走下面的 release 路径。
+      - name: Tauri Android build (debug)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'debug'
+        run: pnpm exec tauri android build --apk --debug --target aarch64
+
+      # release：先从 Secrets 还原 keystore + key.properties（gitignored，仓库里没有），
+      # build.gradle.kts 的 signingConfigs.release 会读 key.properties 自动签名。
+      # 条件：tag 触发（refs/tags/...）或 workflow_dispatch 选 release。
+      - name: Restore Android release keystore
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.build_type == 'release'
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > src-tauri/gen/android/kb-release.jks
+          cat > src-tauri/gen/android/key.properties <<EOF
+          storeFile=../kb-release.jks
+          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          EOF
+
+      - name: Tauri Android build (release, signed APK + AAB)
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.build_type == 'release'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm exec tauri android build --apk --aab --target aarch64
+
+      - name: List build outputs
+        run: find src-tauri/gen/android/app/build/outputs -type f \( -name '*.apk' -o -name '*.aab' \) -print
+
+      # 给产物起稳定名 Knowledge.Base_<移动版本>_android-arm64.apk —— App 内"检查更新"
+      # 的 update-mobile.json 会指向这个固定文件名。版本号读移动端独立配置
+      # tauri.android.conf.json（**不是** package.json，那是桌面 1.x）。
+      # 这一步对 debug / release 都跑（debug 也方便侧载时辨认版本）。
+      - name: Stage renamed artifacts
+        id: stage
+        run: |
+          VERSION=$(node -p "require('./src-tauri/tauri.android.conf.json').version")
+          mkdir -p dist-android
+          APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -n 1)
+          cp "$APK" "dist-android/Knowledge.Base_${VERSION}_android-arm64.apk"
+          AAB=$(find src-tauri/gen/android/app/build/outputs/bundle -name '*.aab' 2>/dev/null | head -n 1 || true)
+          if [ -n "$AAB" ]; then cp "$AAB" "dist-android/Knowledge.Base_${VERSION}_android-arm64.aab"; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          ls -lh dist-android
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: knowledge-base-android-${{ (startsWith(github.ref, 'refs/tags/') && 'release') || github.event.inputs.build_type || 'debug' }}-v${{ steps.stage.outputs.version }}
+          path: dist-android/*
+          if-no-files-found: error
+          retention-days: 30
+
+      # tag 触发时把 APK/AAB 附到本仓库的 GitHub Release 草稿（tag = mobile-v<移动版本>）。
+      # release-publish 的移动端发布流程从这个草稿（或上面的 Actions artifact）取产物，
+      # 放进 release 仓 releases/mobile-v<版本>/ + 生成 update-mobile.json。
+      - name: Attach to Release (only on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: dist-android/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

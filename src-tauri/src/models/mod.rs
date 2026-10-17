@@ -1,0 +1,2671 @@
+use serde::{Deserialize, Serialize};
+
+/// 应用配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    pub key: String,
+    pub value: String,
+}
+
+/// 全局快捷键绑定信息（返回给前端的视图模型）
+///
+/// - `accel = ""` 表示「禁用」（用户主动关掉这条热键）
+/// - `is_custom`：用户改过键（与 `default_accel` 不同 / 已禁用）
+/// - 注：仅 global scope 的热键经过 Rust 侧绑定；app/editor 内键不参与此模型
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortcutBinding {
+    pub id: String,
+    pub accel: String,
+    pub default_accel: String,
+    pub is_custom: bool,
+    pub disabled: bool,
+}
+
+/// 系统信息
+///
+/// `data_dir` 是当前数据根目录（用户改自定义目录 / KB_DATA_DIR / 便携模式后为对应路径）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemInfo {
+    pub os: String,
+    pub arch: String,
+    pub app_version: String,
+    pub data_dir: String,
+    pub images_dir: String,
+}
+
+// ─── 笔记 ─────────────────────────────────────
+
+/// 笔记（返回给前端）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Note {
+    pub id: i64,
+    pub title: String,
+    /// 明文 content。加密笔记这里是"🔒 已加密"占位符；真实内容需调 decrypt_note 拿
+    pub content: String,
+    pub folder_id: Option<i64>,
+    pub is_daily: bool,
+    pub daily_date: Option<String>,
+    pub is_pinned: bool,
+    /// T-003: 是否"隐藏"。默认视图全部过滤；wiki link 跳转仍可打开
+    pub is_hidden: bool,
+    /// T-007: 是否加密。前端据此决定是否显示"已加密"/"解锁查看"按钮
+    pub is_encrypted: bool,
+    /// 是否"临时编辑"。以临时方式打开的外部 .md：照常入库、照常写回原文件，
+    /// 但不进主列表 / 搜索 / 双链 / RAG，只在「临时文件」面板里能翻到。
+    /// 与 is_hidden 的区别：那个是隐私（配 PIN），这个只是"不想污染知识库"。
+    #[serde(default)]
+    pub is_scratch: bool,
+    pub word_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    /// 关联的原始文件相对路径（相对 app_data_dir），为 None 表示纯笔记
+    pub source_file_path: Option<String>,
+    /// 原始文件类型："pdf" / "docx" / "doc" / null
+    pub source_file_type: Option<String>,
+    /// 同一 folder 内的自定义排序值，越小越靠前（间隔 1000 留空隙）
+    /// 默认按 updated_at DESC 初始化；只有用户在"自定义排序"模式下拖拽过才与时间序偏离
+    pub sort_order: i64,
+    /// 笔记类型："markdown"（默认）/ "whiteboard"（白板，content 是 Excalidraw JSON）。
+    /// 前端据此决定点开笔记时进 Markdown 编辑器还是白板画布。
+    pub note_type: String,
+}
+
+/// 笔记内嵌白板保存后的资源路径（都是相对 data_dir 的 POSIX 路径）。
+///
+/// 场景文件与预览图**配对命名**（`wb-<uuid>.excalidraw` / `wb-<uuid>.png`），
+/// 这样"改一块白板"永远只覆盖这两个文件，不会每存一次就在磁盘上多留一份残骸。
+#[derive(Debug, Clone, Serialize)]
+pub struct EmbeddedWhiteboardSaved {
+    /// Excalidraw 场景 JSON 文件
+    pub scene_path: String,
+    /// 供笔记里直接显示的 PNG 预览图
+    pub preview_path: String,
+}
+
+/// 笔记类型常量。故意用 &str 而不是 enum：
+/// 这个值要直接进 SQL、进同步用的 `.md` front-matter、进前端 JSON，
+/// 三处都是字符串；包一层 enum 只会到处 to_string()／parse 来回转。
+pub mod note_type {
+    /// 普通 Markdown 笔记（存量默认值）。
+    ///
+    /// Rust 侧暂时用不到它（默认值写在 schema v52 的 `DEFAULT 'markdown'` 里），
+    /// 但留着才能让这里成为「note_type 合法取值」的唯一出处 —— 否则读代码的人
+    /// 得去翻迁移脚本才知道除了 whiteboard 还有什么。
+    #[allow(dead_code)]
+    pub const MARKDOWN: &str = "markdown";
+    /// 白板笔记：`notes.content` 存 Excalidraw 场景 JSON
+    pub const WHITEBOARD: &str = "whiteboard";
+}
+
+/// AI 引用笔记里抽出的图片清单（给前端在回答下方"溯源"挂缩略图）。
+///
+/// RAG 问答时 AI 引用了哪几篇笔记已记录在 message.references 里；前端拿这批 note_id
+/// 调 `get_notes_images` 取回每篇笔记 content 内的图片资源，渲染成可点击缩略图。
+/// `images` 是相对 data_dir 的 POSIX 路径（与 image.rs 落盘格式一致），
+/// 前端 `toKbAsset` 拼成 `kb-asset://` 后走 `resolveAssetSrc`/`getBlob`（加密图 .enc）渲染。
+#[derive(Debug, Clone, Serialize)]
+pub struct NoteImageRef {
+    pub note_id: i64,
+    pub title: String,
+    pub images: Vec<String>,
+}
+
+// ─── T-007 笔记加密保险库 ──────────────────────
+
+/// Vault 整体状态
+///
+/// 三元状态机：
+/// - `NotSet`：还没设置过主密码，首次使用前要走 setup
+/// - `Locked`：已设置但未解锁（会话启动态 / 手动锁定后）
+/// - `Unlocked`：会话内存里缓存了主密钥；可以加/解密
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum VaultStatus {
+    NotSet,
+    Locked,
+    Unlocked,
+}
+
+/// 应用启动锁状态（软锁 / UX 门禁，不是数据加密）
+///
+/// 与 Vault / HiddenPin 完全独立：这是"打开软件就要输密码"的全局门禁。
+/// - `enabled`：是否已设置进入密码（= 锁是否开启）
+/// - `auto_lock_minutes`：闲置自动锁定分钟数；0 = 关闭自动锁定
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppLockStatus {
+    pub enabled: bool,
+    pub auto_lock_minutes: i64,
+}
+
+/// 创建/更新笔记的入参
+#[derive(Debug, Clone, Deserialize)]
+pub struct NoteInput {
+    pub title: String,
+    pub content: String,
+    pub folder_id: Option<i64>,
+}
+
+/// 笔记列表查询参数
+#[derive(Debug, Clone, Deserialize)]
+pub struct NoteQuery {
+    pub folder_id: Option<i64>,
+    pub keyword: Option<String>,
+    pub page: Option<usize>,
+    pub page_size: Option<usize>,
+    /// true 时只返回 folder_id IS NULL 的笔记（"未分类"虚拟文件夹）。
+    /// 与 folder_id 互斥（同时传 folder_id 优先生效）。
+    pub uncategorized: Option<bool>,
+    /// true 时点父文件夹连同所有子孙文件夹的笔记一起返回。
+    /// 仅当传了 folder_id 时生效；未传时无意义。前端默认 true，符合用户直觉。
+    pub include_descendants: Option<bool>,
+    /// 排序模式（默认 None=按 is_pinned DESC, updated_at DESC）
+    /// - None / "default" → is_pinned DESC, updated_at DESC（旧行为）
+    /// - "custom" → is_pinned DESC, sort_order ASC, updated_at DESC（用户自定义）
+    /// - "created" → is_pinned DESC, created_at DESC
+    /// - "title" → is_pinned DESC, title ASC
+    pub sort_by: Option<String>,
+}
+
+// ─── 文件夹 ───────────────────────────────────
+
+/// 文件夹（返回给前端，含子文件夹树）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Folder {
+    pub id: i64,
+    pub name: String,
+    pub parent_id: Option<i64>,
+    pub sort_order: i32,
+    pub children: Vec<Folder>,
+    pub note_count: usize,
+    /// 自定义图标颜色（十六进制 `#1677ff`）；None = 默认主题色
+    pub color: Option<String>,
+}
+
+/// 一个「空文件夹」——子树内（含自身）没有任何未回收笔记。
+///
+/// 「导入历史日记」会按 `日期文件夹/笔记.md` 的结构建出成百上千个日期文件夹，
+/// 日记被摘走后它们就成了空壳，一个个手删不现实 —— 清理功能用这个结构给用户预览。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmptyFolderInfo {
+    pub id: i64,
+    /// 从根到该文件夹的完整路径（`日记/2020/2020-05-26`），让用户看清要删的是哪个
+    pub path: String,
+}
+
+// ─── 标签 ─────────────────────────────────────
+
+/// 标签（返回给前端，含关联笔记数）
+///
+/// `parent_id` 为 None 表示顶层标签；树形层级在 v39 schema 引入。
+/// `note_count` 是该标签**直接关联**的笔记数（不递归子标签）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tag {
+    pub id: i64,
+    pub name: String,
+    pub color: Option<String>,
+    pub note_count: usize,
+    #[serde(default)]
+    pub parent_id: Option<i64>,
+}
+
+/// 笔记列表「标签」列用的轻量标签。
+///
+/// 不带 `note_count`：那要对每个标签做一次聚合，而列表只需要名字和颜色。
+#[derive(Debug, Clone, Serialize)]
+pub struct NoteTagBrief {
+    pub id: i64,
+    pub name: String,
+    pub color: Option<String>,
+}
+
+/// 创建/更新标签的入参
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct TagInput {
+    pub name: String,
+    pub color: Option<String>,
+}
+
+// ─── 搜索 ─────────────────────────────────────
+
+// ─── Excel 二维数据集（P1-3b）────────────────────
+
+/// 一个数据集 = Excel 某个 sheet 里的一个「数据区域」。
+///
+/// 同一个 sheet 可能有多个区域（主表 + 下方小计表），故三元组
+/// `(source_path, sheet_name, region_index)` 才是它的业务主键。
+#[derive(Debug, Clone, Serialize)]
+// 与同为「喂给 antd Table 的结构化数据」的 ExcelPreviewData 保持一致：前端拿 camelCase
+#[serde(rename_all = "camelCase")]
+pub struct Dataset {
+    pub id: i64,
+    /// 相对 data_dir 的附件路径
+    pub source_path: String,
+    pub sheet_name: String,
+    pub region_index: i64,
+    /// 表头在原始行里的下标；None = 无表头（列名是 A列/B列）
+    pub header_row: Option<i64>,
+    pub row_count: i64,
+    pub col_count: i64,
+    pub created_at: String,
+}
+
+/// 列画像
+#[derive(Debug, Clone, Serialize)]
+// 与同为「喂给 antd Table 的结构化数据」的 ExcelPreviewData 保持一致：前端拿 camelCase
+#[serde(rename_all = "camelCase")]
+pub struct DatasetField {
+    pub col_index: i64,
+    pub name: String,
+    /// number / date / boolean / text
+    pub inferred_type: String,
+    /// time / measure / identifier / status / category
+    pub semantic_role: Option<String>,
+    /// 非空率 0.0~1.0
+    pub completeness: f64,
+    pub distinct_count: i64,
+}
+
+/// 数据集详情 = 元信息 + 列画像
+#[derive(Debug, Clone, Serialize)]
+// 与同为「喂给 antd Table 的结构化数据」的 ExcelPreviewData 保持一致：前端拿 camelCase
+#[serde(rename_all = "camelCase")]
+pub struct DatasetSchema {
+    #[serde(flatten)]
+    pub dataset: Dataset,
+    pub fields: Vec<DatasetField>,
+}
+
+// ─── 数据集查询计划（P2-3）────────────────────────
+
+/// 聚合口径。**枚举即白名单** —— 模型只能从这 7 个里选，写别的直接反序列化失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatasetMetric {
+    /// 满足条件的行数（不看具体列）
+    Rows,
+    /// 指定列的非空计数
+    Count,
+    /// 指定列的去重计数
+    CountDistinct,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+impl DatasetMetric {
+    /// 除 `rows` 外都必须给 `metric_column`
+    pub fn needs_column(self) -> bool {
+        !matches!(self, DatasetMetric::Rows)
+    }
+
+    /// 只对数值列有意义的口径 —— 拿它去求和"订单编号"是典型误用
+    pub fn numeric_only(self) -> bool {
+        matches!(self, DatasetMetric::Sum | DatasetMetric::Avg)
+    }
+}
+
+/// 过滤算子白名单。
+///
+/// 藏知 `structured_table.py:51-63` 列了 11 个，这里去掉 `direct_child_of`
+/// （它服务于对方的组织架构层级数据，我们的二维表没有这个概念，
+/// 留着只会让模型以为存在这种能力）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatasetFilterOp {
+    Eq,
+    Ne,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    Contains,
+    StartsWith,
+    EndsWith,
+    /// 值命中给定集合之一
+    In,
+    /// 空值 / 空串
+    IsEmpty,
+    IsNotEmpty,
+}
+
+impl DatasetFilterOp {
+    /// 是否需要 `value`（`is_empty` / `is_not_empty` 不需要）
+    pub fn needs_value(self) -> bool {
+        !matches!(self, DatasetFilterOp::IsEmpty | DatasetFilterOp::IsNotEmpty)
+    }
+
+    /// 是否按数值比较（而非字符串）
+    pub fn numeric_compare(self) -> bool {
+        matches!(
+            self,
+            DatasetFilterOp::Gt | DatasetFilterOp::Gte | DatasetFilterOp::Lt | DatasetFilterOp::Lte
+        )
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DatasetFilter {
+    pub column: String,
+    pub op: DatasetFilterOp,
+    /// `in` 用数组，其它用单值；`is_empty` 系列可省略
+    #[serde(default)]
+    pub value: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatasetSortBy {
+    /// 按聚合值排（默认）
+    Metric,
+    /// 按分组名排
+    Group,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatasetSortOrder {
+    Asc,
+    Desc,
+}
+
+/// 模型填的「查询计划」——**它永远不写 SQL**。
+///
+/// 这是藏知「表格双轨制」的执行轨：向量/关键词只负责找到*哪张表*，
+/// 真正的计算交给这份结构化计划，由我们拼参数化 SQL 执行。
+/// 好处是模型算错数学的可能性被彻底排除，代价是能表达的查询有限 —— 这个取舍是对的，
+/// 用户宁可听到"这个我算不了"，也不想拿到一个看着像模像样的错数字。
+///
+/// `deny_unknown_fields`：模型幻想出一个 `having` 字段时**当场失败**并把错误回灌给它，
+/// 而不是静默忽略后返回一个"看起来对但少了条件"的结果。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DatasetQueryPlan {
+    pub dataset_id: i64,
+    #[serde(default)]
+    pub filters: Vec<DatasetFilter>,
+    /// 分组列；不给就是全表一个聚合值
+    #[serde(default)]
+    pub group_by: Option<String>,
+    pub metric: DatasetMetric,
+    /// `metric = rows` 时可省略，其余必填
+    #[serde(default)]
+    pub metric_column: Option<String>,
+    #[serde(default)]
+    pub sort_by: Option<DatasetSortBy>,
+    #[serde(default)]
+    pub sort_order: Option<DatasetSortOrder>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// 查询计划的执行结果。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatasetQueryResult {
+    /// 分组名 → 聚合值。无 group_by 时只有一行、分组名为空串
+    pub rows: Vec<DatasetQueryRow>,
+    /// 参与聚合的原始行数（过滤后、分组前）
+    pub matched_rows: i64,
+    /// 是否因为 limit 截断了分组
+    pub truncated: bool,
+    /// 零结果时给的自纠线索：最接近的几个真实取值
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_values: Option<DatasetSuggestion>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatasetQueryRow {
+    pub group: String,
+    /// 聚合值；`min`/`max` 对文本列会是字符串，故用 JSON 值
+    pub value: serde_json::Value,
+}
+
+/// 零结果时的"你是不是想找这些"
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatasetSuggestion {
+    pub column: String,
+    pub values: Vec<String>,
+}
+
+/// 搜索筛选条件（P1-2）。
+///
+/// 全部字段可选，`None` = 该维度不约束。前端只传用户真正勾选的维度，
+/// 没勾的字段不出现在 JSON 里（`Option` 反序列化成 `None`）。
+///
+/// 🔴 **fail-closed 语义**：显式传了空数组（`Some(vec![])`）表示
+/// "用户勾选了这个维度但一个都没选中" → 结果应为空，**绝不能退化成不筛选**。
+/// 这是对标项目写死的一条规则（"显式空选择绝不能扩成全空间查询"）：
+/// 前端一个状态 bug 就可能把"筛选到零结果"变成"把整个知识库倒出来"。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchFilters {
+    /// 限定文件夹（已含子孙文件夹 id，由前端展开）
+    pub folder_ids: Option<Vec<i64>>,
+    /// 限定标签（笔记需**同时**含全部所选标签，AND 语义）
+    pub tag_ids: Option<Vec<i64>>,
+    /// 更新时间下界（ISO8601 字符串，含）
+    pub updated_after: Option<String>,
+    /// 更新时间上界（ISO8601 字符串，含）
+    pub updated_before: Option<String>,
+    /// 限定笔记类型（markdown / whiteboard）
+    pub note_types: Option<Vec<String>>,
+    /// 创建时间下界（ISO8601 字符串，含）
+    pub created_after: Option<String>,
+    /// 创建时间上界（ISO8601 字符串，含）
+    pub created_before: Option<String>,
+    /// 仅在标题里搜（不看正文）。`None` / `false` = 标题与正文都搜（原行为）
+    pub title_only: Option<bool>,
+}
+
+impl SearchFilters {
+    /// 是否存在"显式勾选但选空"的维度 —— 命中即应返回零结果（fail-closed）
+    pub fn has_empty_selection(&self) -> bool {
+        matches!(&self.folder_ids, Some(v) if v.is_empty())
+            || matches!(&self.tag_ids, Some(v) if v.is_empty())
+            || matches!(&self.note_types, Some(v) if v.is_empty())
+    }
+}
+
+/// 全文搜索结果
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchResult {
+    pub id: i64,
+    pub title: String,
+    pub snippet: String,
+    pub updated_at: String,
+    pub folder_id: Option<i64>,
+    /// 笔记类型（见 [`note_type`]）。搜索结果里要据此换图标 ——
+    /// 白板点开进的是画布而不是编辑器，长得跟普通笔记一样会让人误判。
+    pub note_type: String,
+}
+
+// ─── 回收站 ───────────────────────────────────
+
+/// 回收站笔记查询参数
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct TrashQuery {
+    pub page: Option<usize>,
+    pub page_size: Option<usize>,
+}
+
+// ─── 笔记链接 ─────────────────────────────────
+
+/// 笔记链接（反向链接信息）
+#[derive(Debug, Clone, Serialize)]
+pub struct NoteLink {
+    pub source_id: i64,
+    pub source_title: String,
+    pub context: Option<String>,
+    pub updated_at: String,
+}
+
+/// 与当前笔记相连的一篇笔记（出链 / 入链共用）。
+///
+/// 不复用 `NoteLink`：那个的字段名是 `source_*`，用来描述出链时语义正好相反
+/// （出链的对端是 target），读代码会拧巴。这里用中性的 `id` / `title`。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedNote {
+    pub id: i64,
+    pub title: String,
+    pub updated_at: String,
+}
+
+/// 当前笔记的链接全貌，供编辑器底部状态条一次取回。
+///
+/// 三类信息合在一个 Command 里返回，避免前端为一条状态条打三次 IPC。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteLinkSummary {
+    /// 本篇链出去的笔记（我引用了谁）
+    pub outgoing: Vec<LinkedNote>,
+    /// 链进来的笔记（谁引用了我）
+    pub incoming: Vec<LinkedNote>,
+    /// 断链：正文里写了 `[[X]]` 但 X 不存在 / 已删 / 已隐藏，按原文标题去重。
+    /// 这是知识库里很实用的信号 —— 能发现打错的链接和被删掉的目标。
+    pub broken: Vec<String>,
+}
+
+/// wiki 链接候选项（`[[` 补全下拉用）
+///
+/// 比旧的 `(id, title)` 元组多了 `folder_name`，让前端在**重名标题**时
+/// 用直接父文件夹名做消歧义提示（如「张三 · 项目A」「张三 · 项目B」）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WikiLinkSuggestItem {
+    pub id: i64,
+    pub title: String,
+    /// 直接父文件夹名；笔记不在任何文件夹下时为 None
+    pub folder_name: Option<String>,
+}
+
+// ─── 知识图谱 ─────────────────────────────────
+
+/// 图谱节点（笔记 或 文件夹）
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphNode {
+    pub id: i64,
+    pub title: String,
+    /// 节点类型："note" = 笔记，"folder" = 文件夹
+    ///
+    /// 笔记与文件夹的自增 id 在各自的表里独立分配、可能相同，
+    /// 所以前端拼 G6 节点 id 时要按 node_type 加不同前缀（`n{id}` / `f{id}`）区分。
+    pub node_type: String,
+    pub is_daily: bool,
+    pub is_pinned: bool,
+    pub tag_count: usize,
+    pub link_count: usize,
+    /// 文件夹自定义颜色（仅 folder 节点可能有；note 恒为 None）
+    pub color: Option<String>,
+}
+
+/// 图谱边（链接关系）
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphEdge {
+    pub source: i64,
+    pub target: i64,
+    /// 边类型：
+    /// - "link"        = wiki 双链（note → note，实线带箭头）
+    /// - "folder_child"= 父子文件夹（folder → folder，虚线无箭头）
+    /// - "folder_note" = 文件夹归属（folder → note，虚线无箭头）
+    ///
+    /// source/target 的真实归属（note 还是 folder）由 edge_type 决定，
+    /// 前端据此给两端拼对应的 `n{id}` / `f{id}` 前缀。
+    pub edge_type: String,
+}
+
+/// 知识图谱数据
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphData {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
+// ─── AI 知识问答 ─────────────────────────────
+
+/// AI 模型配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiModel {
+    pub id: i64,
+    pub name: String,
+    /// 服务商预置 key（ai-profile crate 的 `ProviderPreset.key`，如 `deepseek` / `ollama` /
+    /// `openai_compatible_custom`）。schema v62 起不再是本项目自己的厂商 id。
+    pub provider: String,
+    /// 接口地址，**原样使用、不推断版本段**（schema v62 已按旧规则把存量地址补齐）
+    pub api_url: String,
+    /// API Key（可为空，如 Ollama 本地模型）。
+    ///
+    /// 🔴 **Rust 内部持有明文，但 Command 层返回给前端前会擦成 None**
+    /// （见 `commands::ai::sanitize_model`）。前端一律用 [`Self::has_api_key`]
+    /// 判断"配没配"，需要明文时走显式的 `get_ai_model_api_key`。
+    ///
+    /// 为什么不在更底层擦：`services/ai.rs` 有 16 处 `db.get_ai_model()`
+    /// 拿它去调服务商，底层擦掉那些全得改，且极易漏。
+    pub api_key: Option<String>,
+    /// 是否配了 API Key。前端据此显示"已保存 / 未配置"，不需要拿到明文。
+    #[serde(default)]
+    pub has_api_key: bool,
+    /// 模型标识 (如 gpt-4o-mini, claude-sonnet-4-20250514, llama3)
+    pub model_id: String,
+    /// 是否为默认模型
+    pub is_default: bool,
+    /// 已存的上下文窗口（token）。**0 = 未设置**（schema v62）。
+    ///
+    /// 🔴 对话、预算一律用 `model_service::effective_context_window`（用户 > 端点上报 > 预置），
+    /// 不要直接读这个字段 —— 它为 0 时真实窗口可能在预置里登记着。
+    pub max_context: i64,
+    /// `max_context` / `max_output` 的来源：`user` 手填 / `endpoint`「获取」时端点上报；None = 没存。
+    /// `preset` 不落库（存了就冻结成旧值）。
+    #[serde(default)]
+    pub limits_source: Option<String>,
+    /// 端点上报的模型输出上限，给 `max_tokens` 封顶用；None = 不知道
+    #[serde(default)]
+    pub max_output: Option<i64>,
+    /// 单次回答的 token 上限。**None = 不传该参数**，用服务商默认值。
+    ///
+    /// 与 [`Self::max_context`] 是两回事，别混：前者管"输入能塞多少"，
+    /// 这个管"输出最多写多长"，且两者之和不能超过窗口。
+    ///
+    /// 各家上限差异极大且在变（实测 `deepseek-chat` 是 [1, 393216]，
+    /// 而它旧版文档写 8192），所以不设死默认值 —— 填超了服务商会 400，
+    /// UI 里已提示"报错就调小"。Ollama 用 -1 表示无限生成。
+    #[serde(default)]
+    pub max_tokens: Option<i64>,
+    pub created_at: String,
+}
+
+/// AI 模型连通性测试结果
+///
+/// 测试按钮专用：发一次极小请求（OpenAI 兼容 max_tokens=1，Ollama num_predict=1），
+/// 失败原因走 `format_*_error` 中文化，前端 Modal.error 直接展示。
+#[derive(Debug, Clone, Serialize)]
+pub struct AiModelTestResult {
+    /// 是否连通成功
+    pub ok: bool,
+    /// 端到端往返耗时（毫秒）
+    pub latency_ms: u64,
+    /// 服务端样本（成功时取首段回复前 N 字；失败时为空，错误走 Err 路径）
+    pub sample: Option<String>,
+}
+
+/// 创建/更新 AI 模型入参
+#[derive(Debug, Clone, Deserialize)]
+pub struct AiModelInput {
+    pub name: String,
+    pub provider: String,
+    pub api_url: String,
+    /// API Key，**更新时是三态语义**（抄藏知 `settings_ai.py:139-206` 的 keep/replace/clear）：
+    ///
+    /// | 值 | 含义 |
+    /// |---|---|
+    /// | 字段缺失 / `None` | **保持原值不变** |
+    /// | `Some("")` | 清除 |
+    /// | `Some(k)` | 替换成 k |
+    ///
+    /// 为什么需要三态：Key 对前端不回显（见 [`AiModel::api_key`]），
+    /// 用户只改模型名时表单里的 Key 是空的 —— 若把空当"清除"，
+    /// **改个名字就会把 Key 弄丢**。
+    ///
+    /// 新建（create）时没有"原值"可保持，`None` 就是没配。
+    pub api_key: Option<String>,
+    pub model_id: String,
+    /// 上下文窗口，**三态**（同 `max_tokens`）：字段缺失 = 保持原值 / `Some(None)` = 清除（未设置）/
+    /// `Some(Some(n))` = 设为 n。新建时缺失与清除等价。
+    #[serde(default, deserialize_with = "crate::models::double_option")]
+    pub max_context: Option<Option<i64>>,
+    /// 限额来源（`user` / `endpoint`），三态同上
+    #[serde(default, deserialize_with = "crate::models::double_option")]
+    pub limits_source: Option<Option<String>>,
+    /// 端点上报的输出上限，三态同上
+    #[serde(default, deserialize_with = "crate::models::double_option")]
+    pub max_output: Option<Option<i64>>,
+    /// 单次回答 token 上限。**三态**，与 `api_key` 同理：
+    /// 字段缺失 = 保持原值 / `Some(None)` = 清空（回到"不传"）/ `Some(Some(n))` = 设为 n。
+    ///
+    /// 用 `Option<Option<i64>>` 是因为 `None` 本身就是一个有意义的取值（不传该参数），
+    /// 单层 Option 区分不了"没提供这个字段"和"想把它清空"。
+    #[serde(default, deserialize_with = "crate::models::double_option")]
+    pub max_tokens: Option<Option<i64>>,
+}
+
+/// 让 `Option<Option<T>>` 能区分「字段缺失」与「显式 null」。
+///
+/// serde 默认把两者都反序列化成 `None`，于是"清空"这个意图就丢了。
+/// 加上 `#[serde(default)]` 后：字段缺失 → 外层 `None`；`"max_tokens": null` → `Some(None)`。
+pub fn double_option<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Deserialize::deserialize(de).map(Some)
+}
+
+/// AI 对话
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiConversation {
+    pub id: i64,
+    pub title: String,
+    pub model_id: i64,
+    /// 附加给本对话的笔记 ID 列表（JSON 数组反序列化后）
+    /// 整个对话共享，类比 ChatGPT 项目里的 attached files
+    pub attached_note_ids: Vec<i64>,
+    /// RAG 检索范围限定到某文件夹（含所有子孙文件夹）。
+    /// None = 全库检索；Some(folder_id) = "对此文件夹问 AI" 发起的范围会话。
+    pub scope_folder_id: Option<i64>,
+    /// 角色预设：指向 prompt_templates 的一条提示词（v50 引入）。
+    /// None = 不套角色；设了则每轮把该提示词追加到 system prompt 末尾。
+    #[serde(default)]
+    pub preset_id: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// AI 消息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiMessage {
+    pub id: i64,
+    pub conversation_id: i64,
+    /// 角色: user / assistant
+    pub role: String,
+    pub content: String,
+    /// 引用的笔记 ID 列表 (JSON 数组)
+    pub references: Option<String>,
+    /// 本条 assistant 消息里 AI 调用了哪些 skill（JSON 序列化的 SkillCall 数组）
+    ///
+    /// 前端拿到后反序列化成 SkillCall[] 渲染折叠卡片；为 None 表示没调用过工具。
+    /// 只在 role="assistant" 且启用 skills 的对话里会写入。
+    pub skill_calls: Option<String>,
+    /// 一轮回复的收尾信息（JSON 序列化的 [`TurnMeta`]，v63 起）
+    ///
+    /// 只有 assistant 消息会写；存量消息为 None，前端按「已完成、无统计」渲染。
+    #[serde(default)]
+    pub turn_meta: Option<String>,
+    pub created_at: String,
+}
+
+/// 一轮回复的收尾信息，存在 `ai_messages.turn_meta_json`
+///
+/// 给前端「一轮回复 = 一张卡片」渲染用：卡片头的状态 / 耗时、执行过程里每轮调工具前的话、
+/// 可折叠的思考过程、失败原因。不参与发给模型的上下文。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnMeta {
+    /// "done" / "stopped" / "error"
+    pub end_reason: String,
+    /// end_reason = "error" 时的错误原文（多行，前端原样展示）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// 从收到提问到这一轮结束的耗时
+    #[serde(default)]
+    pub duration_ms: u64,
+    /// 智能模式下各轮「调工具之前模型说的话」，下标 = 轮次（与 [`SkillCall::round`] 对应）。
+    /// 最后一轮不调工具，它的话就是最终回答，存在消息 content 里，不在这里。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub round_texts: Vec<String>,
+    /// 推理模型走 `reasoning_content` 字段吐出的思考过程（deepseek-r1 官方 API 等）。
+    /// 混在正文里的 `<think>` 块不在这里，前端渲染时自己拆。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning: String,
+}
+
+/// AI 聊天请求
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct AiChatRequest {
+    pub conversation_id: i64,
+    pub message: String,
+    /// 是否启用 RAG（检索笔记作为上下文）
+    pub use_rag: Option<bool>,
+}
+
+// ─── 首页统计 ─────────────────────────────────
+
+/// 首页统计数据
+#[derive(Debug, Clone, Serialize)]
+pub struct DashboardStats {
+    pub total_notes: usize,
+    pub total_folders: usize,
+    pub total_tags: usize,
+    pub total_links: usize,
+    pub today_updated: usize,
+    pub total_words: usize,
+    /// 最后一次「写作」时间（含日记，排除导入笔记）；用于首页「距上次写作」。
+    /// 无任何手写笔记时为 None。
+    pub last_written_at: Option<String>,
+}
+
+// ─── 导入 ─────────────────────────────────────
+
+/// 扫描到的文件条目（供前端预览勾选）
+///
+/// match_kind + existing_note_id 在扫描阶段就告诉前端"该文件是否已经导入过"，
+/// 用户可据此选择冲突策略（跳过/副本）。
+#[derive(Debug, Clone, Serialize)]
+pub struct ScannedFile {
+    /// 文件绝对路径
+    pub path: String,
+    /// 相对扫描根的父目录，斜杠统一为 '/'；根层文件为空串
+    /// 示例：扫描 "D:/foo/11"，文件 "D:/foo/11/子A/note.md" → "子A"
+    pub relative_dir: String,
+    /// 文件名（不含扩展名）
+    pub name: String,
+    /// 文件大小（字节）
+    pub size: u64,
+    /// 去重匹配结果：
+    /// - "new"   全新文件，未找到任何已有笔记
+    /// - "path"  按 canonical source_file_path 命中（最精确）
+    /// - "fuzzy" 按 (title, content_hash) 兜底命中（用户可能搬动过源文件）
+    pub match_kind: String,
+    /// match_kind 非 "new" 时，指向已存在笔记的 id
+    pub existing_note_id: Option<i64>,
+    /// 从所在文件夹名（优先）或文件名识别出的日期 `YYYY-MM-DD`；不像日记则为 None。
+    /// 用于「日期文件夹/笔记.md」结构的日记导入 —— 见 services::daily_import。
+    pub detected_date: Option<String>,
+    /// 文件夹名与文件名都解析出日期但**不一致**（以文件夹为准，但要让用户知道）
+    pub date_conflict: bool,
+}
+
+/// 导入冲突策略：遇到已存在的文件怎么处理
+///
+/// 仅在 `import_selected_files` 批量导入场景生效；
+/// 单文件 `open_markdown_file` 另有同步回写语义，不走这里。
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImportConflictPolicy {
+    /// 跳过（默认，最安全）：扫描标记为 path/fuzzy 的文件不重新创建笔记
+    Skip,
+    /// 创建副本：标题加 " (2)" 后缀新建独立笔记，原笔记保持不变
+    Duplicate,
+}
+
+impl Default for ImportConflictPolicy {
+    fn default() -> Self {
+        Self::Skip
+    }
+}
+
+/// 导入结果
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ImportResult {
+    /// 新建的笔记数
+    pub imported: usize,
+    /// 跳过的数量（空文件 / 去重时按 Skip 策略跳过）
+    pub skipped: usize,
+    /// 按 Duplicate 策略新建的副本数
+    pub duplicated: usize,
+    pub errors: Vec<String>,
+    /// T-009: 从 frontmatter 解析并自动关联的标签条数（每个笔记 × 每个标签计 1）
+    #[serde(default)]
+    pub tags_attached: usize,
+    /// T-009: 成功解析到 frontmatter 的笔记数
+    #[serde(default)]
+    pub frontmatter_parsed: usize,
+    /// T-009 Commit 2: 复制到 kb_assets/images 的图片张数
+    #[serde(default)]
+    pub attachments_copied: usize,
+    /// T-009 Commit 2: 缺失的图片清单（"笔记标题: 原始引用"格式，已去重）
+    #[serde(default)]
+    pub attachments_missing: Vec<String>,
+    /// 本次新建的笔记 ID（按文件参数顺序，含 Duplicate 副本）。
+    /// 前端用它做"导入后跳转"：1 篇直接打开编辑器，多篇跳列表。
+    #[serde(default, rename = "noteIds")]
+    pub note_ids: Vec<i64>,
+    /// 命中已有笔记并按 Skip 策略跳过时记录的现有笔记 ID。
+    /// 前端"重复命中也跳"逻辑用：用户拖个旧文件想打开它，能直达。
+    #[serde(default, rename = "existingNoteIds")]
+    pub existing_note_ids: Vec<i64>,
+    /// 按「日期文件夹」识别并标记为日记的篇数
+    #[serde(default)]
+    pub daily_marked: usize,
+    /// 同一天有多篇时，只有第一篇成了日记，其余仍是普通笔记的篇数。
+    /// 前端据此提示用户"可到日记页用「整理历史日记」把它们合并进当天"。
+    #[serde(default)]
+    pub daily_extra_notes: usize,
+}
+
+/// 导入进度（通过事件推送）
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportProgress {
+    pub current: usize,
+    pub total: usize,
+    pub file_name: String,
+}
+
+/// "打开单个 md 文件"返回结果：含新建/复用的 note id + 是否触发了内容同步
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenMarkdownResult {
+    pub note_id: i64,
+    /// true = 检测到源文件内容有变化，已覆盖回笔记（前端可据此提示）
+    pub was_synced: bool,
+    /// true = 这条笔记当前是"临时编辑"状态（不进主列表 / 搜索 / 双链）
+    ///
+    /// 注意不等于本次调用传入的 `as_scratch`：复用已有正式笔记时不会被降级成临时，
+    /// 前端要据这个**实际状态**决定是否显示"临时"提示条。
+    pub is_scratch: bool,
+}
+
+// ─── 附件 ─────────────────────────────────────
+
+/// 附件信息（保存后回传给前端，用于插入 Tiptap 链接）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentInfo {
+    /// 绝对路径（前端用来构造 file:// 链接给 opener 打开）
+    pub path: String,
+    /// 原始文件名（用户能看懂的文本，显示在链接里）
+    pub file_name: String,
+    /// 字节数（用于显示 "1.2 MB"）
+    pub size: u64,
+    /// MIME 类型（按扩展名映射；未知为 application/octet-stream）
+    pub mime: String,
+}
+
+// ─── 孤儿素材（统一）─────────────────────────────
+//
+// 五类素材：images / videos / attachments / pdfs / sources
+// 每类独立扫描器；UI 用 Tabs 分组展示。
+
+/// 单条孤儿素材
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrphanItem {
+    /// 素材类型：image / video / attachment / pdf / source
+    pub kind: String,
+    /// 绝对路径
+    pub path: String,
+    /// 按 note_id 分目录的素材有；纯平铺的 images 没有
+    pub note_id: Option<i64>,
+    pub size: u64,
+    /// 孤儿原因：notePurged / unreferenced
+    pub reason: String,
+}
+
+/// 单类素材的孤儿组（用于 UI Tab 内）
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OrphanGroup {
+    /// 实际孤儿数（不含截断）
+    pub count: usize,
+    pub total_bytes: u64,
+    /// 孤儿明细（最多 500 条）
+    pub items: Vec<OrphanItem>,
+    /// items 是否被截断显示
+    pub truncated: bool,
+}
+
+/// 全量孤儿扫描结果
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OrphanAssetScan {
+    pub images: OrphanGroup,
+    pub videos: OrphanGroup,
+    pub attachments: OrphanGroup,
+    pub pdfs: OrphanGroup,
+    pub sources: OrphanGroup,
+}
+
+/// 孤儿素材清理结果
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrphanAssetClean {
+    pub deleted: usize,
+    pub freed_bytes: u64,
+    pub failed: Vec<String>,
+}
+
+// ─── 导出 ─────────────────────────────────────
+
+/// 导出结果
+#[derive(Debug, Clone, Serialize)]
+pub struct ExportResult {
+    pub exported: usize,
+    pub errors: Vec<String>,
+    /// 用户选择的父目录（与入参一致，便于前端展示）
+    pub output_dir: String,
+    /// 实际创建的导出根目录（在 output_dir 下自动包一层时间戳目录）
+    pub root_dir: String,
+    /// 拷贝到 .assets/ 目录的资产文件总数（图片 + 附件，按物理文件去重）
+    pub assets_copied: usize,
+}
+
+/// 单篇导出结果
+#[derive(Debug, Clone, Serialize)]
+pub struct SingleExportResult {
+    /// 实际创建的笔记根目录（含 .md 和 assets/）
+    pub root_dir: String,
+    /// .md 文件绝对路径
+    pub file_path: String,
+    /// 拷贝到 assets/ 的资产文件数
+    pub assets_copied: usize,
+}
+
+/// 导出进度（通过事件推送）
+#[derive(Debug, Clone, Serialize)]
+pub struct ExportProgress {
+    pub current: usize,
+    pub total: usize,
+    pub file_name: String,
+}
+
+// ─── 日记中心 ─────────────────────────────────
+
+/// 日记列表项（平铺，前端按 year/month 分组渲染）
+#[derive(Debug, Clone, Serialize)]
+pub struct DailyEntry {
+    pub id: i64,
+    pub title: String,
+    /// YYYY-MM-DD
+    pub daily_date: String,
+    pub updated_at: String,
+}
+
+// ─── 写作趋势 ─────────────────────────────────
+
+/// 每日写作统计
+#[derive(Debug, Clone, Serialize)]
+pub struct DailyWritingStat {
+    /// 日期 (YYYY-MM-DD)
+    pub date: String,
+    /// 当日更新的笔记数
+    pub note_count: usize,
+    /// 当日总字数（更新过的笔记的字数之和）
+    pub word_count: usize,
+}
+
+// ─── 笔记模板 ─────────────────────────────────
+
+/// 笔记模板
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteTemplate {
+    pub id: i64,
+    pub name: String,
+    pub description: String,
+    pub content: String,
+    pub created_at: String,
+}
+
+/// 创建/更新模板入参
+#[derive(Debug, Clone, Deserialize)]
+pub struct NoteTemplateInput {
+    pub name: String,
+    pub description: String,
+    pub content: String,
+}
+
+// ─── 通用 ─────────────────────────────────────
+
+/// 分页响应
+#[derive(Debug, Clone, Serialize)]
+pub struct PageResult<T: Serialize> {
+    pub items: Vec<T>,
+    pub total: usize,
+    pub page: usize,
+    pub page_size: usize,
+}
+
+/// 批量恢复笔记的结果
+///
+/// `to_root` = 其中有多少条因原文件夹已不存在而落到了根目录。
+/// 用于前端在 message 里给"X 条恢复到根目录"的提示。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreBatchResult {
+    pub restored: usize,
+    pub to_root: usize,
+}
+
+// ─── 同步 ─────────────────────────────────────
+
+/// 同步范围：控制本次同步包含哪些数据
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncScope {
+    /// 笔记元数据（app.db 的 notes 及关联表）
+    pub notes: bool,
+    /// 图片资产（kb_assets/images/）
+    pub images: bool,
+    /// PDF 原文件（pdfs/）
+    pub pdfs: bool,
+    /// Word 源文件（sources/）
+    pub sources: bool,
+    /// 应用设置（settings.json）
+    pub settings: bool,
+}
+
+impl Default for SyncScope {
+    fn default() -> Self {
+        // V1/V2 默认全部勾选（资产也勾，符合用户预期）
+        Self {
+            notes: true,
+            images: true,
+            pdfs: true,
+            sources: true,
+            settings: true,
+        }
+    }
+}
+
+/// 导入模式：合并 or 覆盖
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SyncImportMode {
+    /// 合并：已有的保留，新增的导入
+    Merge,
+    /// 覆盖：先清空本地 DB/资产，再用同步包替换
+    Overwrite,
+}
+
+/// WebDAV 配置（不含密码——密码走 keyring）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebDavConfig {
+    pub url: String,
+    pub username: String,
+    /// 仅在前端传入时使用；后端读取时从 keyring 取
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+/// 云端同步文件的清单信息（用于 preview）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncManifest {
+    /// manifest 版本号（格式升级用）
+    pub schema_version: u32,
+    /// 设备名
+    pub device: String,
+    /// 导出时间（ISO 8601 本地时间）
+    pub exported_at: String,
+    /// 应用版本
+    pub app_version: String,
+    /// 本次同步包含的范围
+    pub scope: SyncScope,
+    /// 元数据统计（仅用于预览展示）
+    pub stats: SyncStats,
+    /// 导出端是否为 dev build。
+    /// import 端会用此字段强校验：dev 包不能导入 prod 实例反之亦然
+    /// （否则资产路径前缀不一致会变孤儿数据）。
+    /// `Option`：None = 老版本导出（在引入校验之前），按宽容模式放行 + 日志告警。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_dev: Option<bool>,
+    /// 导出时 `app.db` 的 `PRAGMA user_version`（= `database::schema::SCHEMA_VERSION`）。
+    ///
+    /// **为什么必须有**：`schema_version` 字段管的是 ZIP 包**格式**版本（恒为 1），跟数据库结构无关。
+    /// 在引入本字段之前，导入端对"包里 app.db 的库结构版本"零校验，于是：
+    /// - 导入**更高**版本的库 → 本次能用，但**下次启动** `schema::migrate` 直接返回
+    ///   "数据库版本高于应用支持的版本" → `Database::init` 失败 → **应用再也起不来**
+    /// - 导入**更低**版本的库 → 当前会话所有查询撞 "no such column"，要重启才自愈
+    ///
+    /// 现在导入端会拿它做前置拦截（高版本直接拒绝导入），并在替换后自动跑迁移升级低版本库。
+    /// `Option`：None = 老版本导出的包（无此字段），此时改为从解出来的 db 文件实读
+    /// `user_version` 兜底校验（见 `SyncService::verify_sqlite_snapshot`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_user_version: Option<i32>,
+}
+
+/// 同步数据统计
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncStats {
+    pub notes_count: usize,
+    pub folders_count: usize,
+    pub tags_count: usize,
+    pub images_count: usize,
+    pub pdfs_count: usize,
+    pub sources_count: usize,
+    /// 资产总大小（字节）
+    pub assets_size: u64,
+}
+
+/// 同步操作结果
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncResult {
+    /// 实际同步的条数/文件数（视具体范围而定）
+    pub stats: SyncStats,
+    /// 完成时间
+    pub finished_at: String,
+}
+
+/// 同步历史记录
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncHistoryItem {
+    pub id: i64,
+    /// "export" / "import" / "push" / "pull"
+    pub direction: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub success: bool,
+    pub error: Option<String>,
+    pub stats_json: String,
+}
+
+// ─── 待办任务 ───────────────────────────────────
+
+/// 任务关联：挂到笔记 / 本地路径 / URL
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskLink {
+    pub id: i64,
+    pub task_id: i64,
+    /// "note" / "path" / "url"
+    pub kind: String,
+    /// note → note_id 字符串；path → 绝对路径；url → 完整 URL
+    pub target: String,
+    /// 显示文案（如笔记标题）
+    pub label: Option<String>,
+}
+
+/// 任务（含关联列表）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Task {
+    pub id: i64,
+    pub title: String,
+    pub description: Option<String>,
+    /// 0=urgent / 1=normal / 2=low
+    pub priority: i32,
+    pub important: bool,
+    /// 0=todo / 1=done
+    pub status: i32,
+    /// 'YYYY-MM-DD' 或 'YYYY-MM-DD HH:MM:SS'；前者视作当天 23:59:59
+    pub due_date: Option<String>,
+    pub completed_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    /// 提前 N 分钟提醒；None=不提醒；需要 due_date 带时分才精确
+    pub remind_before_minutes: Option<i32>,
+    /// 上次触发提醒的时刻（ISO 'YYYY-MM-DD HH:MM:SS'），去重用
+    pub reminded_at: Option<String>,
+    /// 循环规则: "none" / "daily" / "weekly" / "monthly"
+    pub repeat_kind: String,
+    /// 每 N 个单位，默认 1
+    pub repeat_interval: i32,
+    /// 每周的哪几天，ISO 1=Mon..7=Sun，逗号分隔；仅 weekly 有效
+    pub repeat_weekdays: Option<String>,
+    /// 循环终止日期 'YYYY-MM-DD'
+    pub repeat_until: Option<String>,
+    /// 总触发次数上限（含首次）
+    pub repeat_count: Option<i32>,
+    /// 已触发次数
+    pub repeat_done_count: i32,
+    /// 批次来源标识（AI 批量导入用，同次生成共享同一个 UUID）；手动创建为 NULL
+    pub source_batch_id: Option<String>,
+    /// 一级分类 ID；None = 未分类
+    pub category_id: Option<i64>,
+    /// 父任务 ID；None = 主任务，Some(id) = 子任务
+    pub parent_task_id: Option<i64>,
+    /// 工作流看板列归属：'todo' / 'doing' / 'done'（v40 引入，与 status 互补）。
+    /// `serde(default)` 让旧 schema 反序列化时回退到 "todo"，避免破坏老 fixture。
+    #[serde(default = "default_kanban_stage")]
+    pub kanban_stage: String,
+    /// 所属项目 ID（v41 引入）；None = 未挂项目
+    #[serde(default)]
+    pub project_id: Option<i64>,
+    /// 甘特图条左端日期 'YYYY-MM-DD'（v41 引入）；None = 没指定开始时间。
+    /// 配合 `due_date`（右端）形成时间区间；只有右端没左端时甘特图渲染为"截止点"
+    #[serde(default)]
+    pub start_date: Option<String>,
+    /// v43 跨端同步稳定标识；旧库尚未迁移时可能为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_uuid: Option<String>,
+    /// v43 软删墓碑标记；UI 列表始终过滤掉，仅同步层读取。
+    #[serde(default)]
+    pub is_deleted: bool,
+    /// 已完成子任务数（仅主任务有意义；子任务恒为 0）
+    #[serde(default)]
+    pub subtask_done: i32,
+    /// 总子任务数（同上）
+    #[serde(default)]
+    pub subtask_total: i32,
+    pub links: Vec<TaskLink>,
+}
+
+fn default_kanban_stage() -> String {
+    "todo".to_string()
+}
+
+// ─── Dataview 块（v1.12 引入，最简模板版） ────────────
+
+/// Dataview 查询结果的统一行结构。
+///
+/// 不论查的是笔记 / 任务 / 其它，都规范化成 (title + subtitle + 跳转目标)，
+/// 前端用一套渲染逻辑（antd Table / List）。
+///
+/// - `link_kind = "note"` → 点击跳转 `/notes/<link_id>`
+/// - `link_kind = "task"` → 点击打开任务详情 Modal（前端按 id 自行拉详情）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataviewRow {
+    pub title: String,
+    /// 副标题：紧急度+截止日 / 文件夹路径 / 标签列表 等辅助信息
+    pub subtitle: Option<String>,
+    pub link_kind: String,
+    pub link_id: i64,
+    pub updated_at: String,
+    /// 扩展字段（v1 不用，v2 给富展示模板留口）
+    #[serde(default)]
+    pub extra: Option<serde_json::Value>,
+}
+
+// ─── 项目（v41） ──────────────────────────────────
+
+/// 项目：任务的"工作流容器"，带时间维度（start/end）和归档状态。
+///
+/// 与 task_categories 的区别：
+/// - category 是轻量"圆点+名字"分类，可跨项目复用
+/// - project 是"立项-推进-归档"语义，是甘特图的根
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Project {
+    pub id: i64,
+    pub name: String,
+    pub description: Option<String>,
+    pub color: String,
+    /// 项目计划开始日期 'YYYY-MM-DD'
+    pub start_date: Option<String>,
+    /// 项目计划结束日期 'YYYY-MM-DD'
+    pub end_date: Option<String>,
+    pub archived: bool,
+    pub sort_order: i32,
+    pub created_at: String,
+    pub updated_at: String,
+    /// 该项目下"未完成"任务数（status=0）
+    #[serde(default)]
+    pub active_task_count: i64,
+    /// 该项目下"已完成"任务数（status=1）
+    #[serde(default)]
+    pub done_task_count: i64,
+    /// v42 跨端同步稳定标识；旧库尚未迁移时可能为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_uuid: Option<String>,
+    /// v42 软删墓碑标记；UI 列表始终过滤掉，仅同步层读取。
+    #[serde(default)]
+    pub is_deleted: bool,
+}
+
+/// 创建项目入参
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateProjectInput {
+    pub name: String,
+    pub description: Option<String>,
+    pub color: Option<String>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+}
+
+/// 更新项目入参（字段缺省表示不改）
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProjectInput {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub clear_description: Option<bool>,
+    pub color: Option<String>,
+    pub start_date: Option<String>,
+    pub clear_start_date: Option<bool>,
+    pub end_date: Option<String>,
+    pub clear_end_date: Option<bool>,
+    pub archived: Option<bool>,
+    pub sort_order: Option<i32>,
+}
+
+/// 创建任务入参
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateTaskInput {
+    pub title: String,
+    pub description: Option<String>,
+    pub priority: Option<i32>,
+    pub important: Option<bool>,
+    pub due_date: Option<String>,
+    pub remind_before_minutes: Option<i32>,
+    pub links: Option<Vec<TaskLinkInput>>,
+    /// 循环规则: "none"/"daily"/"weekly"/"monthly"，缺省按 "none"
+    pub repeat_kind: Option<String>,
+    pub repeat_interval: Option<i32>,
+    pub repeat_weekdays: Option<String>,
+    pub repeat_until: Option<String>,
+    pub repeat_count: Option<i32>,
+    /// AI 批量导入时同批次共享一个 UUID，用于一键撤销整批
+    pub source_batch_id: Option<String>,
+    /// 一级分类 ID；None = 未分类
+    pub category_id: Option<i64>,
+    /// 父任务 ID（创建子任务时传）；None = 创建主任务
+    pub parent_task_id: Option<i64>,
+    /// 所属项目 ID（v41 引入）；None = 无项目
+    pub project_id: Option<i64>,
+    /// 甘特图开始日期 'YYYY-MM-DD'（v41 引入）；None = 没指定
+    pub start_date: Option<String>,
+}
+
+/// 更新任务入参（字段缺省表示不改动）
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateTaskInput {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub priority: Option<i32>,
+    pub important: Option<bool>,
+    pub due_date: Option<String>,
+    /// 传 true 显式清空 due_date
+    pub clear_due_date: Option<bool>,
+    pub remind_before_minutes: Option<i32>,
+    /// 传 true 显式清空 remind_before_minutes
+    pub clear_remind_before_minutes: Option<bool>,
+    /// 循环规则；传 "none" 或传 clear_repeat=true 表示关闭循环
+    pub repeat_kind: Option<String>,
+    pub repeat_interval: Option<i32>,
+    pub repeat_weekdays: Option<String>,
+    pub clear_repeat_weekdays: Option<bool>,
+    pub repeat_until: Option<String>,
+    pub clear_repeat_until: Option<bool>,
+    pub repeat_count: Option<i32>,
+    pub clear_repeat_count: Option<bool>,
+    /// 一级分类 ID（None 不动；传 Some(id) 改）
+    pub category_id: Option<i64>,
+    /// 传 true 显式清空 category_id（落到"未分类"）
+    pub clear_category_id: Option<bool>,
+    /// 所属项目 ID（v41 引入）；None 不动；传 Some(id) 改
+    pub project_id: Option<i64>,
+    /// 传 true 显式清空 project_id（落到"无项目"）
+    pub clear_project_id: Option<bool>,
+    /// 甘特图开始日期 'YYYY-MM-DD'（v41 引入）；None 不动
+    pub start_date: Option<String>,
+    /// 传 true 显式清空 start_date
+    pub clear_start_date: Option<bool>,
+}
+
+/// 任务关联入参（新建任务时一起传）
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskLinkInput {
+    pub kind: String,
+    pub target: String,
+    pub label: Option<String>,
+}
+
+/// 任务查询筛选条件
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TaskQuery {
+    /// Some(0) = 只看未完成, Some(1) = 只看已完成, None = 全部
+    pub status: Option<i32>,
+    /// 关键词（标题 / 描述 LIKE）
+    pub keyword: Option<String>,
+    /// 某个优先级
+    pub priority: Option<i32>,
+    /// 某个分类（与 uncategorized 互斥，同时传 category_id 优先生效）
+    pub category_id: Option<i64>,
+    /// true 时只返回 category_id IS NULL 的任务（"未分类"虚拟分类）
+    pub uncategorized: Option<bool>,
+}
+
+/// 顶栏 Ctrl+K 搜索的任务命中（轻量）
+///
+/// 不复用 Task 是为了少传字段，搜索面板只展示这几条，结构更扁平
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskSearchHit {
+    pub id: i64,
+    pub title: String,
+    /// 简短上下文片段：description 截断后；description 为空时回退用 due_date 描述
+    pub snippet: String,
+    /// 0=todo / 1=done（前端可据此显示已完成置灰）
+    pub status: i32,
+    /// 0=urgent / 1=normal / 2=low
+    pub priority: i32,
+    pub due_date: Option<String>,
+}
+
+/// 待办分类（一级，扁平）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskCategory {
+    pub id: i64,
+    pub name: String,
+    /// 圆点颜色，如 "#1677ff"
+    pub color: String,
+    /// 可选 emoji 或 lucide 图标名
+    pub icon: Option<String>,
+    pub sort_order: i32,
+    pub created_at: String,
+    /// v44 跨端同步稳定标识。
+    /// 同步层用此让"用户在 A 端把分类重命名"也能跨端识别为同一个分类，
+    /// 不必每次都按 name 做匹配。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_uuid: Option<String>,
+}
+
+/// 创建分类入参
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateTaskCategoryInput {
+    pub name: String,
+    pub color: Option<String>,
+    pub icon: Option<String>,
+    pub sort_order: Option<i32>,
+}
+
+/// 更新分类入参（字段缺省 = 不改）
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateTaskCategoryInput {
+    pub name: Option<String>,
+    pub color: Option<String>,
+    pub icon: Option<String>,
+    pub clear_icon: Option<bool>,
+    pub sort_order: Option<i32>,
+}
+
+/// 任务统计（首页卡片 / 侧边栏徽章）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskStats {
+    pub total_todo: usize,
+    pub total_done: usize,
+    pub urgent_todo: usize,
+    pub overdue: usize,
+    pub due_today: usize,
+}
+
+// ─── AI 提示词库 ─────────────────────────────
+
+/// AI 提示词模板（返回给前端）
+///
+/// - 内置模板 `is_builtin=1`，`builtin_code` 是旧硬编码 action（continue/summarize…）的别名，便于兼容。
+/// - 用户自定义模板 `is_builtin=0`，`builtin_code=None`。
+/// - `output_mode` 决定前端 AI 菜单拿到结果后默认怎么插入：
+///     · `replace` 替换选区
+///     · `append`  追加到选区末尾（续写场景）
+///     · `popup`   只展示，不自动插入（总结场景）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptTemplate {
+    pub id: i64,
+    pub title: String,
+    pub description: String,
+    pub prompt: String,
+    /// 'replace' | 'append' | 'popup'
+    pub output_mode: String,
+    /// Lucide 图标名，如 "ArrowRight"
+    pub icon: Option<String>,
+    pub is_builtin: bool,
+    pub builtin_code: Option<String>,
+    pub sort_order: i32,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+// ─── AI Skills（T-004） ────────────────────
+
+/// AI 调用的一次 Skill（工具）记录
+///
+/// 从模型流里解析出 tool_calls 后 dispatch 执行，得到结果一起打包给前端展示/持久化。
+/// 字段设计模仿 OpenAI tool_calls 的结构但做了扁平化：
+///   · `args_json` / `result` 都是字符串，便于直接渲染
+///   · `status` 统一用 "ok" / "error" / "running"，前端状态机好画
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillCall {
+    /// OpenAI 返回的 tool_call_id（同一次请求里唯一）
+    pub id: String,
+    pub name: String,
+    /// 反序列化后的参数（JSON 字符串，供前端 pretty-print 展示）
+    pub args_json: String,
+    /// Skill 执行结果，一般是 JSON 或截断后的文本
+    pub result: String,
+    /// "ok" / "error" / "running"（服务器侧持久化时只会写 ok/error）
+    pub status: String,
+    /// 第几轮发起的调用（从 0 开始）。同一轮的多个调用是模型一次性要的，前端标成「并行」。
+    /// v63 之前的存量记录没有这个字段，按 0 处理（全部归到第 1 轮）。
+    #[serde(default)]
+    pub round: u32,
+    /// 工具执行耗时；running 状态下为 None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
+// ─── AI 规划今日待办（T-005） ──────────────
+
+/// 前端发起"AI 规划今日"的入参
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanTodayRequest {
+    /// 用户输入的"今日目标"（可选），AI 会据此定向推荐
+    pub goal: Option<String>,
+    /// 是否把"昨日未完成 + 过期未完成"顺延进来；默认 true
+    #[serde(default = "default_true")]
+    pub include_yesterday_unfinished: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// AI 对一条待办的建议（未真正写入数据库）
+///
+/// 前端把这些建议展示在 Modal 表格，用户可编辑/勾选后调用现有 `taskApi.create`
+/// 批量写入 tasks 表。与 `CreateTaskInput` 刻意保持字段兼容，方便前端直接映射。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskSuggestion {
+    pub title: String,
+    /// 0=紧急重要，1=普通，2=低；默认 1
+    #[serde(default)]
+    pub priority: Option<i32>,
+    /// 艾森豪威尔重要性维度
+    #[serde(default)]
+    pub important: Option<bool>,
+    /// 截止日期 'YYYY-MM-DD' 或 'YYYY-MM-DD HH:MM:SS'，一般是今天
+    pub due_date: Option<String>,
+    /// 提前提醒时间（分钟）。null = 不提醒；0 = 准时提醒；正整数 = 提前 N 分钟。
+    /// AI 根据四象限自动判断：Q1 紧急多用 0/15；Q2 重要多用 60/1440；Q4 多用 null。
+    ///
+    /// `rename = "remindBefore"`：序列化和反序列化都用 `remindBefore` —— 与现有
+    /// AI prompt（plan_today / draft_note）和前端 TS `TaskSuggestion.remindBefore` 对齐。
+    /// `alias = "remindBeforeMinutes"` 兼容旧版本可能输出的 camelCase 字段名。
+    #[serde(
+        default,
+        rename = "remindBefore",
+        alias = "remindBeforeMinutes"
+    )]
+    pub remind_before_minutes: Option<i32>,
+    /// AI 给出的推荐理由（可选，用于 UI 折叠展示）
+    pub reason: Option<String>,
+}
+
+/// AI 规划今日的返回结构
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanTodayResponse {
+    pub tasks: Vec<TaskSuggestion>,
+    /// 一句总结 AI 对今日安排的思路；可选
+    pub summary: Option<String>,
+}
+
+// ─── AI 智能规划（目标驱动）─────────────────
+
+/// "目标驱动 AI 规划"入参：用户给一个长期目标，AI 自己拆成多条待办 + 阶段里程碑
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanFromGoalRequest {
+    /// 用户描述的目标，例如"180 天减肥到 55 公斤"
+    pub goal: String,
+    /// 计划周期总天数；默认 30
+    #[serde(default = "default_horizon_days")]
+    pub horizon_days: i32,
+    /// 起始日期 'YYYY-MM-DD'；缺省取今天
+    pub start_date: Option<String>,
+    /// 用户额外补充信息（可选），例如作息/兴趣/约束
+    pub profile_hint: Option<String>,
+}
+
+fn default_horizon_days() -> i32 {
+    30
+}
+
+/// 阶段里程碑（项目级节点，例如「第 1 月：身体激活」）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MilestoneDraft {
+    pub title: String,
+    /// 日期范围文本（如 "5月1日-5月31日"），AI 自由格式
+    pub date_range: Option<String>,
+    /// 该阶段的核心任务/目标描述
+    pub description: Option<String>,
+}
+
+/// "目标驱动 AI 规划"返回结构：批次内一次性生成所有产出，由前端在预览页勾选后落库
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanFromGoalResponse {
+    /// AI 拆出的待办（带四象限标注）
+    pub tasks: Vec<TaskSuggestion>,
+    /// AI 拆出的阶段里程碑（用户可参考但不强制落库）
+    #[serde(default)]
+    pub milestones: Vec<MilestoneDraft>,
+    /// 整体规划思路（一段话）
+    pub summary: Option<String>,
+    /// 此次生成的批次 ID（服务端生成），前端落库时每条任务都要带上，
+    /// 后续可用 undo_task_batch(batch_id) 一键撤销整批。
+    /// AI 输出 JSON 时不包含此字段，由 service 层填充，因此反序列化时缺省为空。
+    #[serde(default)]
+    pub batch_id: String,
+    /// 服务端给前端的友好警告（如"Excel 太大，已截断 X 个 Sheet"）；可空
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// "Excel 文件 → AI 规划"入参：用户选一个 Excel/ODS 文件，AI 据此拆任务
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanFromExcelRequest {
+    /// 用户选择的 Excel 文件绝对路径（来自 Tauri dialog）
+    pub file_path: String,
+    /// 计划周期天数；默认 30
+    #[serde(default = "default_horizon_days")]
+    pub horizon_days: i32,
+    /// 起始日期 'YYYY-MM-DD'；缺省取今天
+    pub start_date: Option<String>,
+    /// 用户对 Excel 内容的额外说明（可选），例如"重点关注健身部分"
+    pub extra_goal: Option<String>,
+}
+
+// ─── AI 会话附件（路线 A：导入文件给 AI 会话用） ──────────
+
+/// Excel/ODS 附件解析预览。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExcelPreview {
+    pub file_path: String,
+    pub display_name: String,
+    pub markdown: String,
+    pub total_rows: usize,
+    pub truncated_sheets: Vec<String>,
+    pub chars_estimated: usize,
+}
+
+/// 文本类附件（md / txt / json / 代码等）解析预览。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextPreview {
+    pub file_path: String,
+    pub display_name: String,
+    pub content: String,
+    pub total_lines: usize,
+    pub chars_estimated: usize,
+    /// 单文件超 60k 字符时尾部被截断
+    pub truncated: bool,
+}
+
+/// PDF 附件解析预览（仅文字层抽取）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PdfPreview {
+    pub file_path: String,
+    pub display_name: String,
+    pub content: String,
+    pub chars_estimated: usize,
+    pub truncated: bool,
+}
+
+/// 统一的附件解析预览（按文件扩展名自动分发到 Excel/Text/PDF）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AttachmentPreview {
+    Excel(ExcelPreview),
+    Text(TextPreview),
+    Pdf(PdfPreview),
+}
+
+/// 发送给 AI 的消息附件。tagged enum：kind=excel/text/pdf。
+/// 内容字段已是预解析结果，直接拼到 user message 前，发送时不再读盘
+/// （避免文件被改/删后行为不一致）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(dead_code)] // file_path 仅用于反序列化追溯，build_message_with_attachments 不读
+pub enum MessageAttachment {
+    Excel {
+        #[serde(rename = "filePath")]
+        file_path: String,
+        #[serde(rename = "displayName")]
+        display_name: String,
+        markdown: String,
+        #[serde(rename = "totalRows")]
+        total_rows: usize,
+        #[serde(rename = "truncatedSheets", default)]
+        truncated_sheets: Vec<String>,
+    },
+    Text {
+        #[serde(rename = "filePath")]
+        file_path: String,
+        #[serde(rename = "displayName")]
+        display_name: String,
+        content: String,
+        #[serde(default)]
+        truncated: bool,
+    },
+    Pdf {
+        #[serde(rename = "filePath")]
+        file_path: String,
+        #[serde(rename = "displayName")]
+        display_name: String,
+        content: String,
+        #[serde(default)]
+        truncated: bool,
+    },
+}
+
+// ─── 附件可视化预览（前端 Modal 用，区别于上面给 AI 用的） ──────────────
+
+/// 单个 Sheet 的结构化数据（前端用 antd Table 直接渲染）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExcelSheetData {
+    pub name: String,
+    pub headers: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    /// 原始总行数（截断前）
+    pub total_rows: usize,
+    /// 被截断省略的中间行数（0 = 没截断）
+    pub truncated_rows: usize,
+}
+
+/// Excel/ODS 的多 Sheet 预览数据包
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExcelPreviewData {
+    pub sheets: Vec<ExcelSheetData>,
+    /// 文件总行数（所有 sheet 累计）
+    pub total_rows: usize,
+}
+
+/// 纯文本预览（md/txt/json/csv/代码等）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextPreviewData {
+    pub content: String,
+    pub total_lines: usize,
+    /// 超大文件尾部被截断（避免一次塞死前端）
+    pub truncated: bool,
+}
+
+// ─── AI 写笔记并归档（T-006） ──────────────
+
+/// 笔记目标长度
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetLength {
+    Short,  // 短，100~300 字
+    Medium, // 中等，300~800 字（默认）
+    Long,   // 长篇，800~2000 字
+}
+
+impl Default for TargetLength {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
+impl TargetLength {
+    /// 给模型看的字数要求提示
+    pub fn word_hint(&self) -> &'static str {
+        match self {
+            Self::Short => "100~300 字",
+            Self::Medium => "300~800 字",
+            Self::Long => "800~2000 字",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftNoteRequest {
+    /// 笔记主题（必填）
+    pub topic: String,
+    /// 参考材料（可选；用户提供的背景/要点/链接等）
+    pub reference: Option<String>,
+    /// 目标长度；缺省用 Medium
+    #[serde(default)]
+    pub target_length: TargetLength,
+}
+
+/// AI 生成的笔记草稿（未写入 DB；前端 Modal 展示后用户确认才真正保存）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftNoteResponse {
+    pub title: String,
+    /// Markdown 正文
+    pub content: String,
+    /// AI 建议的目录路径，如 "工作/周报"；空串 = 根目录
+    pub folder_path: String,
+    /// AI 给出的"为什么归到这个目录"的理由；前端折叠展示
+    pub reason: Option<String>,
+}
+
+/// 创建提示词模板的入参
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptTemplateInput {
+    pub title: String,
+    pub description: Option<String>,
+    pub prompt: String,
+    /// 'replace' | 'append' | 'popup'，省略则用 'replace'
+    pub output_mode: Option<String>,
+    pub icon: Option<String>,
+    /// 省略视为末尾（会取 max(sort_order)+10）
+    pub sort_order: Option<i32>,
+    /// 省略视为启用
+    pub enabled: Option<bool>,
+}
+
+// ─── T-024 同步架构 V1 ─────────────────────────
+
+/// 同步后端类型
+///
+/// `local` 写到用户磁盘上的某个目录（最简单、零网络风险，常用作"挂同步盘"路径）；
+/// `webdav` 走现有 WebDAV 客户端；`s3` / `git` 后续阶段实现
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SyncBackendKind {
+    Local,
+    Webdav,
+    S3,
+}
+
+/// 同步后端配置（DB 行）
+///
+/// `config_json` 内的字段随 `kind` 不同：
+/// - `Local`：`{"path": "..."}`
+/// - `Webdav`：`{"url": "...", "username": "...", "password_encrypted": "..."}`
+/// - `S3`：`{"endpoint": "...", "region": "...", "bucket": "...", "access_key": "...", "secret_key_encrypted": "..."}`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncBackend {
+    pub id: i64,
+    pub kind: SyncBackendKind,
+    pub name: String,
+    pub config_json: String,
+    pub enabled: bool,
+    pub auto_sync: bool,
+    pub sync_interval_min: i64,
+    pub last_push_ts: Option<String>,
+    pub last_pull_ts: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// 创建/更新同步后端配置入参
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncBackendInput {
+    pub kind: SyncBackendKind,
+    pub name: String,
+    pub config_json: String,
+    pub enabled: Option<bool>,
+    pub auto_sync: Option<bool>,
+    pub sync_interval_min: Option<i64>,
+}
+
+/// 远端同步状态（DB 行，per-backend per-note）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncRemoteState {
+    pub backend_id: i64,
+    pub note_id: i64,
+    pub remote_path: String,
+    pub last_synced_hash: String,
+    pub last_synced_ts: String,
+    pub tombstone: bool,
+}
+
+/// V1 同步 manifest 中的单条记录
+///
+/// 序列化为 manifest.json 上传到远端。设计要点：
+/// 1. **note_id 不直接用本地自增 id**：用 stable_uuid（笔记表加列存）防止多端 id 冲突
+///    - **本会话先用本地 id 当 stable_uuid**，T-024 后续阶段再加 uuid 列做严格去重
+/// 2. **content_hash 是 SHA-256(title + "\n" + body)**：标题改动也算变更
+/// 3. **tombstone**：删除的笔记保留一条 manifest 项让其他端知道要删
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestEntry {
+    /// 稳定 ID（v1 临时 = 本地笔记 id 的字符串形式）
+    pub stable_id: String,
+    pub title: String,
+    /// 笔记内容指纹，hex 小写。具体公式见 SyncManifestV1.hash_algo：
+    /// - 缺失（旧客户端）= `SHA-256(title + "\n" + content)`
+    /// - "v2"（当前）  = `SHA-256(title + "\n" + notes.content_hash)`，复用 v22 起的 notes.content_hash 列，
+    ///   manifest 计算时无需再读 content，大库内存与 IO 显著下降
+    /// - 加密笔记（T-S014，encrypted=true）：content_hash 改用 encrypted_blob 的 sha256_hex 参与公式
+    pub content_hash: String,
+    /// ISO-8601 / 本地时间字符串（来自 notes.updated_at）
+    pub updated_at: String,
+    /// 远端 .md 文件路径（相对 vault 根，正斜杠分隔）
+    pub remote_path: String,
+    /// 是否已删除（tombstone）
+    #[serde(default)]
+    pub tombstone: bool,
+    /// 文件夹路径（如 "工作/周报"）；根层为空串。导入时用来重建文件夹树
+    #[serde(default)]
+    pub folder_path: String,
+    /// T-S014：是否为加密笔记。true 时远端 `.md` 文件内容是 base64(encrypted_blob) 而非明文；
+    /// 拉取后写入 notes.encrypted_blob + is_encrypted=1 + content="🔒 已加密" 占位
+    #[serde(default)]
+    pub encrypted: bool,
+    /// 是否每日笔记（notes.is_daily）。修复"日记跨端同步丢失 is_daily → 对端 get_or_create_daily
+    /// 认不出来 → 每天反复新建一条" 的 bug：push 端把 is_daily 写进 manifest，pull 端据此
+    /// 用 `create_note_with_uuid(..., is_daily, daily_date)` 恢复。
+    /// 旧 manifest 无此字段 → 反序列化为 false（pull 端靠 `get_or_create_daily` 的兜底认领自愈）。
+    #[serde(default)]
+    pub is_daily: bool,
+    /// 每日笔记的日期（YYYY-MM-DD，来自 notes.daily_date）；`is_daily=true` 时有值，否则 None。
+    /// 旧 manifest 无此字段 → None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_date: Option<String>,
+    /// 是否隐藏笔记（notes.is_hidden）。修复跨端同步丢失 is_hidden → 隐藏笔记拉到对端变可见
+    /// （隐私问题）。旧 manifest 无此字段 → false。隐藏笔记内容本来就明文同步（"隐藏"≠加密），
+    /// 这里只让"隐藏状态"也跨端一致；pull 仅做单向恢复（远端隐藏 → 本地也隐藏），不反向取消隐藏。
+    #[serde(default)]
+    pub is_hidden: bool,
+    /// 笔记的标签名列表（按 name 跨端，不携带 id/color/sort_order —— color 是本地偏好不该跨端覆盖）。
+    ///
+    /// **`Option` 区分"字段缺失"和"显式空"** —— 不用 `Vec<String>` 因为无法区分：
+    /// - `None`（旧客户端 manifest 没这字段 / 加密笔记不带）→ pull 端**不动本地 tag 关联**
+    /// - `Some(vec![])`（新客户端写的，该笔记目前无标签）→ pull 端**清空本地 tag 关联**
+    /// - `Some(vec!["工作", "周报"])` → pull 端按 name find-or-create + 替换关联
+    ///
+    /// 这样"用户把笔记的所有标签删光"也能跨端传播，不会因为 empty 被当成"不动"。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    /// 笔记类型（notes.note_type）："markdown" / "whiteboard"。
+    ///
+    /// **不带这个字段白板同步就废了**：远端 `.md` 里白板正文是一坨 Excalidraw JSON，
+    /// 对端拉下来若认不出类型，就会当普通 Markdown 笔记塞进富文本编辑器 ——
+    /// 用户看到满屏 JSON，一保存原画布还被覆盖。
+    ///
+    /// 旧客户端的 manifest 没这字段 → 反序列化成 None → pull 端按 markdown 处理
+    /// （与改造前行为一致，向后兼容）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_type: Option<String>,
+}
+
+/// V1 同步 manifest 顶层的附件清单条目（T-S022 sidecar CAS 附件同步）
+///
+/// 描述远端 CAS 布局中存在的一个附件文件，对应远端路径 `attachments/<aa>/<bb>/<hash>.<ext>`。
+/// 客户端拉到 manifest 后据此算"哪些 hash 是本地缺失的"，下载补齐。
+///
+/// 字段语义：
+/// - `hash`：sha256 hex（决定远端文件名 + 是否要传/下载）
+/// - `size`：原始字节数，用于进度展示
+/// - `mime`：可选 MIME，UI 显示用
+/// - `ext`：可选小写扩展名（如 "png" / "pdf"），用于拼远端 `<hash>.<ext>` 文件名让人类可读
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentEntry {
+    pub hash: String,
+    pub size: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext: Option<String>,
+    /// 该附件在本机被引用过的所有相对路径（相对 `data_dir`），如
+    /// `["kb_assets/images/3/photo.png", "kb_assets/images/5/cover.png"]`。
+    /// **同一字节文件被多笔记引用时**这里会有多条；pull 端按此把 `sync_in/<hash>.<ext>` 拷到原位置，
+    /// 让 `kb-asset://kb_assets/images/...` 能命中。
+    /// 旧 manifest 不带此字段 → `Vec::new()`；pull 端遇到空 paths 时仍把字节存到 `sync_in/`，
+    /// 但不会还原到原路径（笔记里的引用就显示不出来——靠新写端 push 后下次 pull 才修上）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+}
+
+/// V1 同步顶层携带的 vault 元数据（T-S014 端到端加密同步）
+///
+/// 多端共享同一密码 + 同一 salt → 派生出同一把 vault key，从而能解密同步过来的密文。
+/// `salt` 公开存在远端是安全的（密码学上 salt 设计上就是公开的）；
+/// `verifier` 是用 vault key 加密的常量，用来在解锁时校验密码正确，不会泄露 key。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultMeta {
+    /// vault salt 的 base64（来自 app_config 的 `vault.salt`）
+    pub salt: String,
+    /// vault verifier 的 base64（来自 app_config 的 `vault.verifier`）
+    pub verifier: String,
+}
+
+/// V1 同步 manifest（远端 manifest.json 全文）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncManifestV1 {
+    /// manifest schema 版本（恒为 1）
+    pub manifest_version: u32,
+    /// 应用版本（生成 manifest 的客户端，仅供调试）
+    pub app_version: String,
+    /// 设备名（hostname；多端冲突排查用）
+    pub device: String,
+    /// 生成时间
+    pub generated_at: String,
+    /// 全部笔记条目（含 tombstone）
+    pub entries: Vec<ManifestEntry>,
+    /// hash 算法标识。"v2" = `SHA-256(title + "\n" + notes.content_hash)`，复用现有列免读 content。
+    /// 字段缺失视为旧 v1 算法 = `SHA-256(title + "\n" + content)`，pull/push 时会清空本地
+    /// sync_remote_state 触发首次全量重推升级到 v2。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash_algo: Option<String>,
+    /// T-S014：vault 元数据（salt + verifier）。多端共享同一份 → 派生出同一 vault key 解密密文。
+    /// 字段缺失（旧客户端 / 远端未启用 vault）→ 加密笔记不参与同步
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<VaultMeta>,
+    /// T-S022：sidecar CAS 附件清单。远端 `attachments/<aa>/<bb>/<hash>.<ext>` 存在哪些文件，
+    /// 拉端据此算差集决定要下载哪些。空 Vec 时不序列化（旧客户端无字段也兼容）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentEntry>,
+    /// Bug 12b：项目跨端同步条目。空 Vec 不序列化保兼容；旧客户端读到也忽略。
+    /// **位置要求**：必须在 `tasks` 之前序列化 —— pull 端按 manifest 顺序处理，
+    /// 任务可能引用项目 UUID，先建项目再处理任务。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<ProjectManifestEntry>,
+    /// Bug 12b：任务跨端同步条目（含子任务，通过 parent_task_uuid 引用父任务）。
+    /// 空 Vec 不序列化保兼容。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<TaskManifestEntry>,
+    /// Bug 12b：任务分类条目（按 stable_uuid 跨端识别；name 重命名也能识别为同一分类）。
+    /// 空 Vec 不序列化保兼容。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub task_categories: Vec<TaskCategoryManifestEntry>,
+}
+
+impl SyncManifestV1 {
+    pub const VERSION: u32 = 1;
+    /// 当前 hash 算法标识。pull/push 时检测远端 manifest 的 hash_algo 是否匹配。
+    pub const HASH_ALGO_V2: &'static str = "v2";
+}
+
+/// Bug 12b：项目跨端同步条目（v44 引入）。
+///
+/// content_hash = `SHA-256(name + "\n" + description + "\n" + color + "\n" +
+///                         start_date + "\n" + end_date + "\n" + archived + "\n" +
+///                         sort_order)`，决定"内容是否变化"。
+/// `tombstone=true` 表示本端已软删，跨端传播删除事件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectManifestEntry {
+    /// 稳定 UUID（v42 backfill / create 时生成）
+    pub stable_id: String,
+    pub name: String,
+    pub content_hash: String,
+    pub updated_at: String,
+    /// 描述（None 不序列化）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// 颜色十六进制（"#RRGGBB"）
+    pub color: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub sort_order: i32,
+    #[serde(default)]
+    pub tombstone: bool,
+}
+
+/// Bug 12b：任务跨端同步条目（v44 引入）。
+///
+/// content_hash = `SHA-256(title + "\n" + description + "\n" + due_date + "\n" +
+///                         start_date + "\n" + status + "\n" + priority + "\n" +
+///                         important + "\n" + project_uuid + "\n" + category_uuid + "\n" +
+///                         kanban_stage + "\n" + parent_task_uuid + "\n" +
+///                         repeat_kind + "\n" + repeat_interval + "\n" +
+///                         repeat_weekdays + "\n" + repeat_until + "\n" + repeat_count)`。
+///
+/// **不跨端**字段：
+/// - `reminded_at`（本地提醒去重；多端各算各的）
+/// - `repeat_done_count`（本地推进，避免双端互相 advance）
+/// - `remind_before_minutes` 也是本地偏好（不同端通知策略可不同）
+/// - `source_batch_id`（本地批次标识）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskManifestEntry {
+    /// 稳定 UUID（v43 backfill / create 时生成）
+    pub stable_id: String,
+    pub title: String,
+    pub content_hash: String,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// 0=urgent / 1=normal / 2=low
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(default)]
+    pub important: bool,
+    /// 0=todo / 1=done
+    #[serde(default)]
+    pub status: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    /// 工作流看板列：'todo' / 'doing' / 'done'
+    #[serde(default)]
+    pub kanban_stage: String,
+    /// 父任务 UUID（子任务才有；主任务为 None）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_uuid: Option<String>,
+    /// 所属项目 UUID（None = 无项目）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_uuid: Option<String>,
+    /// 所属分类 UUID（None = 未分类）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_uuid: Option<String>,
+    /// 循环规则: "none" / "daily" / "weekly" / "monthly"
+    #[serde(default)]
+    pub repeat_kind: String,
+    #[serde(default)]
+    pub repeat_interval: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_weekdays: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_until: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_count: Option<i32>,
+    #[serde(default)]
+    pub tombstone: bool,
+}
+
+/// Bug 12b：任务分类跨端同步条目（v44 引入）。
+///
+/// 不带 tombstone：分类被删时本端任务 category_id 落 NULL，跨端只关心"存在性 + 改名"。
+/// hash 简单按 `name + "\n" + color + "\n" + icon + "\n" + sort_order` 算。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskCategoryManifestEntry {
+    pub stable_id: String,
+    pub name: String,
+    pub content_hash: String,
+    pub color: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub sort_order: i32,
+}
+
+/// 推送结果
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncPushResult {
+    /// 上传新增 / 修改的笔记数
+    pub uploaded: usize,
+    /// 推送删除（tombstone）笔记数
+    pub deleted_remote: usize,
+    /// 跳过（无变更）数
+    pub skipped: usize,
+    /// T-S024: 上传的附件数（远端原先没有，本机新传）
+    pub attachments_uploaded: usize,
+    /// T-S024: 跳过的附件数（has_attachment=true，远端已存在）
+    pub attachments_skipped: usize,
+    /// 错误清单
+    pub errors: Vec<String>,
+}
+
+/// 拉取结果
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncPullResult {
+    /// 拉取新增 / 更新的笔记数
+    pub downloaded: usize,
+    /// 应用远端删除标记到本地的笔记数
+    pub deleted_local: usize,
+    /// 冲突数（远端有变更 + 本地也有变更 → 走 last-write-wins，落败方进 .conflicts/）
+    pub conflicts: usize,
+    /// T-S024: 下载的附件数（远端 manifest 列了但本机没有的）
+    pub attachments_downloaded: usize,
+    /// 因 vault meta 不匹配 / 缺失而**跳过**的加密笔记数。
+    /// 用于让前端在两端 vault salt 不一致时给用户提示，避免"加密笔记看着同步了实则被静默跳过"。
+    /// 旧客户端无此字段反序列化 → 0；前端展示为 0 时不弹提示，>0 时显式告知用户。
+    #[serde(default)]
+    pub encrypted_skipped: usize,
+    /// 错误清单
+    pub errors: Vec<String>,
+}
+
+// ─── M5-2: 外部 MCP server 注册表 ─────────────────────────────────
+
+/// 用户在「设置 → MCP 服务器」里添加的一个外部 MCP server。
+/// 主应用通过 services::mcp_client::McpClientManager spawn 子进程并维持 client。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServer {
+    pub id: i64,
+    /// 用户取的别名（如 "github" / "高德地图"），唯一
+    pub name: String,
+    /// 传输方式："stdio"（v1 仅此一种）
+    pub transport: String,
+    /// 可执行文件路径或命令名
+    pub command: String,
+    /// 命令行参数（前端传 string[]，后端用 JSON 串持久化）
+    pub args: Vec<String>,
+    /// 环境变量（前端传 Record<string, string>）
+    pub env: std::collections::HashMap<String, String>,
+    /// 启用 / 禁用
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// 创建/更新 server 时前端传入的 payload
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerInput {
+    pub name: String,
+    #[serde(default = "default_transport")]
+    pub transport: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+fn default_transport() -> String {
+    "stdio".into()
+}
+fn default_enabled() -> bool {
+    true
+}
+
+// ─── 语音识别（ASR）─────────────────────────────
+//
+// 抽象一层 AsrProvider，先实现阿里云 DashScope（qwen3-asr-flash-filetrans / paraformer-v2）。
+// 配置存到 app_config 表（KV 形式），key 前缀 `asr.*`：
+//   asr.provider / asr.api_key / asr.model / asr.region / asr.enabled
+
+/// ASR 服务商类型
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AsrProviderKind {
+    /// 阿里云百炼 DashScope
+    Dashscope,
+}
+
+impl AsrProviderKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Dashscope => "dashscope",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "dashscope" => Some(Self::Dashscope),
+            _ => None,
+        }
+    }
+}
+
+/// ASR 配置（前端展示与保存共用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AsrConfig {
+    pub provider: AsrProviderKind,
+    /// API Key（明文存 app_config，与现有 ai_models.api_key 风格一致）
+    pub api_key: String,
+    /// 模型 ID，如 `qwen3-asr-flash-filetrans` / `paraformer-v2`
+    pub model: String,
+    /// 区域："beijing"（默认）/ "singapore"
+    pub region: String,
+    pub enabled: bool,
+}
+
+impl Default for AsrConfig {
+    fn default() -> Self {
+        Self {
+            provider: AsrProviderKind::Dashscope,
+            api_key: String::new(),
+            // 同步多模态 API，支持 base64 直传，无需轮询
+            model: "qwen3-asr-flash".into(),
+            region: "beijing".into(),
+            enabled: false,
+        }
+    }
+}
+
+/// 转录请求入参（前端把录音 base64 + mime 传过来）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscribeRequest {
+    /// 音频 base64（不含 data:xxx;base64, 前缀）
+    pub audio_base64: String,
+    /// 音频 MIME，如 "audio/wav" / "audio/mpeg" / "audio/webm;codecs=opus"
+    pub mime: String,
+    /// 语言提示，可选（zh / en / auto）；缺省 auto
+    pub language: Option<String>,
+}
+
+/// 转录结果
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscribeResult {
+    /// 识别出的完整文本
+    pub text: String,
+    /// 端到端耗时（毫秒，含轮询）
+    pub latency_ms: u64,
+    /// 实际使用的模型
+    pub model: String,
+}
+
+/// 连接测试结果（"测试连接"按钮用）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AsrTestResult {
+    pub ok: bool,
+    pub latency_ms: u64,
+    /// 失败时的简短中文原因；成功时为 None
+    pub message: Option<String>,
+}
+
+// ─── 闪卡 + FSRS 复习 ───────────────────────────────────────────
+
+/// 闪卡：正反两面 + FSRS 调度状态。
+///
+/// FSRS state 取值（与 ts-fsrs State 枚举一致）：
+///   0=New（新卡）, 1=Learning（学习中）, 2=Review（复习中）, 3=Relearning（重学）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Card {
+    pub id: i64,
+    /// 关联的笔记 ID（从笔记中提炼时设置；笔记删除后变 NULL，卡片仍可保留）
+    pub note_id: Option<i64>,
+    pub front: String,
+    pub back: String,
+    /// 套牌名，默认 "default"
+    pub deck: String,
+
+    // FSRS 调度状态
+    pub due: String,
+    pub stability: f64,
+    pub difficulty: f64,
+    pub elapsed_days: i32,
+    pub scheduled_days: i32,
+    pub reps: i32,
+    pub lapses: i32,
+    pub state: i32,
+    pub last_review: Option<String>,
+
+    pub is_deleted: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// 创建卡片入参（前端 → Rust）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateCardInput {
+    pub front: String,
+    pub back: String,
+    /// 缺省时使用 "default"
+    pub deck: Option<String>,
+    /// 缺省时不关联笔记
+    pub note_id: Option<i64>,
+}
+
+/// 复习一张卡片入参（前端用 ts-fsrs 算好新状态后传回）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewCardInput {
+    pub card_id: i64,
+    /// 用户评分: 1=Again, 2=Hard, 3=Good, 4=Easy
+    pub rating: i32,
+    /// 前端 ts-fsrs 算出的新调度状态
+    pub state: i32,
+    pub due: String,
+    pub stability: f64,
+    pub difficulty: f64,
+    pub elapsed_days: i32,
+    pub last_elapsed_days: i32,
+    pub scheduled_days: i32,
+}
+
+/// 卡片复习历史（review_log）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardReviewLog {
+    pub id: i64,
+    pub card_id: i64,
+    pub rating: i32,
+    pub state: i32,
+    pub due: String,
+    pub stability: f64,
+    pub difficulty: f64,
+    pub elapsed_days: i32,
+    pub last_elapsed_days: i32,
+    pub scheduled_days: i32,
+    pub review: String,
+}
+
+/// 卡片统计（首页展示"今日待复习/学习中/总数"）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardStats {
+    /// 今天到期（含已过期）的待复习数
+    pub due_today: i64,
+    /// 处于 Learning / Relearning 的卡数
+    pub learning: i64,
+    /// 处于 Review 的卡数
+    pub review: i64,
+    /// 状态 New（从未复习过）的卡数
+    pub new_cards: i64,
+    /// 总卡数（不含已删除）
+    pub total: i64,
+}
+
+// ─── 定时推送（v47 引入） ─────────────────────────
+//
+// 独立子系统：用户维护多条「推送」，每条 = 一段提示词 +（可选）数据源 + 定时规则 + 推送方式。
+// 到点后由后台调度器（services/push/scheduler.rs）让 AI 跑这段提示词，把结果按 channels 推给用户。
+// 刻意不复用 tasks 表：推送没有"完成"概念，循环语义也不同，独立建模避免互相污染。
+// 字段命名沿用本项目惯例：snake_case + 无 rename_all，与前端 TS 接口逐字对齐。
+
+/// 一条定时推送（订阅）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PushJob {
+    pub id: i64,
+    /// 展示名，如"每日励志"
+    pub name: String,
+    /// ★核心：用户维护的提示词，到点交给 AI 执行
+    pub prompt: String,
+    /// 用哪个 AI 模型；None = 用默认模型
+    pub model_id: Option<i64>,
+    /// 数据源类型：MVP 固定 "none"；预留 "rss" / "notes"
+    pub source_kind: String,
+    /// 数据源配置（JSON 字符串）；MVP 为 "{}"
+    pub source_config: String,
+    /// 触发时刻 "HH:MM"，如 "08:00"
+    pub schedule_time: String,
+    /// 循环规则："daily" / "weekly"
+    pub repeat_kind: String,
+    /// 每周哪几天，ISO 1=Mon..7=Sun 逗号分隔；仅 weekly 有意义
+    pub repeat_weekdays: Option<String>,
+    /// 推送方式（JSON 数组字符串），如 ["notification"]
+    pub channels: String,
+    /// 是否启用
+    pub enabled: bool,
+    /// 上次实际运行时刻 'YYYY-MM-DD HH:MM:SS'，用于跨天去重 + 错过补推判断
+    pub last_run_at: Option<String>,
+    /// 下次预计运行时刻 'YYYY-MM-DD HH:MM:SS'，调度器据此 peek + sleep
+    pub next_run_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// 新建推送入参
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreatePushJobInput {
+    pub name: String,
+    pub prompt: String,
+    pub model_id: Option<i64>,
+    /// 缺省按 "none"
+    pub source_kind: Option<String>,
+    /// 缺省按 "{}"
+    pub source_config: Option<String>,
+    pub schedule_time: String,
+    /// 缺省按 "daily"
+    pub repeat_kind: Option<String>,
+    pub repeat_weekdays: Option<String>,
+    /// 缺省按 ["notification"]
+    pub channels: Option<String>,
+    /// 缺省按 true
+    pub enabled: Option<bool>,
+}
+
+/// 更新推送入参（全量覆盖业务字段，调度字段 last_run_at/next_run_at 不由前端改）
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdatePushJobInput {
+    pub name: String,
+    pub prompt: String,
+    pub model_id: Option<i64>,
+    pub source_kind: Option<String>,
+    pub source_config: Option<String>,
+    pub schedule_time: String,
+    pub repeat_kind: Option<String>,
+    pub repeat_weekdays: Option<String>,
+    pub channels: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+/// 一次推送执行记录（成功/失败/空结果），供排错与"查看上次推了什么"
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PushRunLog {
+    pub id: i64,
+    pub job_id: i64,
+    pub run_at: String,
+    /// "success" / "failed" / "empty"
+    pub status: String,
+    /// 生成/抓取到的条目数（MVP 生成型恒为 1 或 0）
+    pub item_count: i32,
+    /// 生成结果快照（成功时为 AI 输出文本）
+    pub payload: Option<String>,
+    /// 失败原因
+    pub error: Option<String>,
+}
+
+/// 居中弹窗页所需的一次性数据（按 run_log id 取，JOIN 出推送名）
+#[derive(Debug, Clone, Serialize)]
+pub struct PushPopupData {
+    /// 推送名（弹窗标题）
+    pub name: String,
+    /// 展示内容：成功为 AI 输出，失败为错误提示
+    pub content: String,
+    pub status: String,
+    pub run_at: String,
+}
+
+// ─── 笔记内容快照 ─────────────────────────────
+
+/// 快照元信息（列表用，**不含正文**）。
+///
+/// 一块白板的快照几十 KB 起步，列表一次拉几十条正文就是好几 MB 的 IPC 负担，
+/// 而列表界面只需要时间和体积 —— 正文按需单条取（`get_note_snapshot`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteSnapshotMeta {
+    pub id: i64,
+    pub note_id: i64,
+    /// 正文字节数，界面上给用户一个"这一版有多大"的直观量
+    pub byte_size: i64,
+    /// 触发来源："auto"（自动保存前）/ "manual"（用户手动存档）/ "before_restore"（回滚前的兜底）
+    pub reason: String,
+    pub created_at: String,
+}
+
+/// 快照完整内容（预览 / 回滚用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteSnapshot {
+    pub id: i64,
+    pub note_id: i64,
+    pub content: String,
+    pub byte_size: i64,
+    pub reason: String,
+    pub created_at: String,
+}
+
+/// 单条笔记的快照占用（设置页"占用最大的笔记"列表用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotNoteUsage {
+    pub note_id: i64,
+    pub title: String,
+    /// "markdown" / "whiteboard"，前端据此决定点进去跳编辑器还是白板页
+    pub note_type: String,
+    pub count: i64,
+    pub byte_size: i64,
+}
+
+/// 全库快照用量总览
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotUsage {
+    pub total_count: i64,
+    pub total_bytes: i64,
+    /// 占用最大的前 N 条笔记（不是全量 —— 几百条明细没人会逐条看）
+    pub top_notes: Vec<SnapshotNoteUsage>,
+}
+
+/// 白板上「笔记卡片」要展示的笔记摘要。
+///
+/// 卡片是活的：每次打开白板都按 note_id 重新取一次，笔记改了卡片跟着变。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteExcerpt {
+    pub note_id: i64,
+    pub title: String,
+    /// 正文摘要（已转纯文本并截断）。笔记不存在 / 已加密时是提示文案
+    pub excerpt: String,
+    /// 笔记已删除或查不到 —— 前端据此把卡片显示成"失效"样式
+    pub missing: bool,
+}

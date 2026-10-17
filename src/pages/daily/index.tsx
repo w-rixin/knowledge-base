@@ -1,0 +1,727 @@
+import { useState, useEffect, useCallback, useRef } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import {
+  Button,
+  DatePicker,
+  Input,
+  Space,
+  Divider,
+  Badge,
+  message,
+  Spin,
+  Tooltip,
+  theme as antdTheme,
+} from "antd";
+import dayjs, { type Dayjs } from "dayjs";
+import {
+  Calendar,
+  ChevronLeft,
+  ChevronRight,
+  Save,
+  Sparkles,
+  ListTree,
+  CalendarCheck,
+} from "lucide-react";
+import { CloseCircleFilled } from "@ant-design/icons";
+import { configApi, dailyApi, linkApi, noteApi, templateApi } from "@/lib/api";
+import { todayYmd } from "@/lib/utils";
+import { MicButton } from "@/components/MicButton";
+import { TiptapEditor } from "@/components/editor";
+import { EditorOutline } from "@/components/editor/EditorOutline";
+import { useAutoSave } from "@/hooks/useAutoSave";
+import { useAppStore } from "@/store";
+import { useAllFeaturesEnabled } from "@/hooks/useFeatureEnabled";
+import { PlanTodayModal } from "@/components/ai/PlanTodayModal";
+import { DailyImportModal } from "@/components/DailyImportModal";
+import { LinkStatusBar } from "@/components/editor/LinkStatusBar";
+import { NoteAiDrawer } from "@/components/ai/NoteAiDrawer";
+import type { Note } from "@/types";
+
+
+/** 格式化日期为中文显示 */
+function formatDateCN(dateStr: string): string {
+  const d = new Date(dateStr + "T00:00:00");
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+}
+
+/** 获取今天日期字符串（本地时区；勿用 UTC 的 toISOString，凌晨会差一天导致重复建日记）。 */
+function todayStr(): string {
+  return todayYmd();
+}
+
+/** HH:mm 格式化保存时间 */
+function formatSavedAt(d: Date): string {
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function DesktopDailyPage() {
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  // URL 是 date 的真相源；缺省时用今天，同时补写进 URL 让 SidePanel 高亮今天
+  const urlDate = searchParams.get("date");
+  const date = urlDate ?? todayStr();
+
+  useEffect(() => {
+    if (!urlDate) {
+      navigate(`/daily?date=${todayStr()}`, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlDate]);
+
+  const [note, setNote] = useState<Note | null>(null);
+  const [title, setTitle] = useState("");
+  const [content, setContent] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [showPlanModal, setShowPlanModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
+  /** 底部链接状态条的刷新信号：保存完成（出链已同步）后自增 */
+  const [linkRefreshTick, setLinkRefreshTick] = useState(0);
+  // 与 notes/editor 一致：选段触发「问 AI」时打开伴生抽屉，把选段当引用挂上
+  const [aiDrawerOpen, setAiDrawerOpen] = useState(false);
+  const [aiSelection, setAiSelection] = useState<string | undefined>(undefined);
+  // 相邻"真实存在"的日记日期（跳过空白日）；按当前 date 拉
+  const [neighbors, setNeighbors] = useState<{ prev: string | null; next: string | null }>({
+    prev: null,
+    next: null,
+  });
+  // DatePicker 弹窗里"哪些天有日记"，按月缓存（key="YYYY-MM"）
+  // 用 Map 而不是平铺 Set：避免跨月切换重复请求
+  const [datesByMonth, setDatesByMonth] = useState<Map<string, Set<string>>>(
+    () => new Map(),
+  );
+  // 正在加载的月份集合（去重并发请求；失败会从这里删除允许重试）
+  const loadingMonthsRef = useRef<Set<string>>(new Set());
+  const { token } = antdTheme.useToken();
+
+  // ── 大纲（与笔记编辑器 notes/editor.tsx 同款实现，桌面日记也能看目录）──
+  // editor 实例来自 TiptapEditor 的 onEditorReady；editorBodyRef 作 IntersectionObserver 的滚动根。
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [editorInstance, setEditorInstance] = useState<any | null>(null);
+  const editorBodyRef = useRef<HTMLDivElement | null>(null);
+  const outlineVisible = useAppStore((s) => s.outlineVisible);
+  const toggleOutline = useAppStore((s) => s.toggleOutline);
+  // 大纲停靠位置（'right' 默认 / 'left'）：与笔记编辑器共用同一 store 偏好
+  const outlinePosition = useAppStore((s) => s.outlinePosition);
+  // 大纲宽度：与笔记编辑器共用同一 localStorage 键，两处宽度记忆一致
+  // （220 的取值理由见 pages/notes/editor.tsx 同名常量；两处必须同值）
+  const OUTLINE_DEFAULT_WIDTH = 220;
+  const [outlineWidth, setOutlineWidth] = useState<number>(() => {
+    const saved = Number(localStorage.getItem("editor.outlineWidth"));
+    return Number.isFinite(saved) && saved >= 140 ? saved : OUTLINE_DEFAULT_WIDTH;
+  });
+  const outlineDragRef = useRef<{
+    startX: number;
+    startWidth: number;
+    latest: number;
+  } | null>(null);
+
+  const isToday = date === todayStr();
+  // "AI 规划今日"按钮依赖 ai + tasks 两个模块同时启用（按钮产物是任务，靠 AI 生成）
+  const planTodayAvailable = useAllFeaturesEnabled(["ai", "tasks"]);
+
+  // 让自动保存的 save 闭包能拿到最新 note / date
+  const noteRef = useRef<Note | null>(note);
+  noteRef.current = note;
+  const dateRef = useRef(date);
+  dateRef.current = date;
+
+  // 套用模板后的"初始内容"指纹：autoSave 用它判断"用户是否真的动过笔"
+  // —— 若 content 仍等于这份初始内容，说明只是程序灌入的模板骨架，不该建档落库。
+  const templateInitialRef = useRef<string | null>(null);
+
+  const loadDaily = useCallback(async (d: string) => {
+    setLoading(true);
+    try {
+      const n = await dailyApi.get(d);
+      if (n) {
+        setNote(n);
+        setTitle(n.title);
+        setContent(n.content);
+        templateInitialRef.current = null;
+      } else {
+        // 该日期还没有日记，仅设置默认标题，不创建数据库记录
+        setNote(null);
+        const defaultTitle = `${d} 的日记`;
+        setTitle(defaultTitle);
+        // 用户在设置里配过"日记默认模板" → 渲染后灌入编辑器（{{date}} 锁到 d）
+        // 任一环节失败都静默回退到空白（模板已删 / config 不存在等都是正常态）
+        let initial = "";
+        try {
+          const v = await configApi.get("daily.default_template_id");
+          const tplId = Number(v);
+          if (Number.isFinite(tplId) && tplId > 0) {
+            initial = await templateApi.renderContent(tplId, defaultTitle, d);
+          }
+        } catch {
+          // ignore
+        }
+        templateInitialRef.current = initial || null;
+        setContent(initial);
+      }
+    } catch (e) {
+      message.error(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadDaily(date);
+  }, [date, loadDaily]);
+
+  // 拉相邻日记日期：按真实存在的日记跳，跳过空白日
+  useEffect(() => {
+    let cancelled = false;
+    dailyApi
+      .getNeighbors(date)
+      .then(([prev, next]) => {
+        if (!cancelled) setNeighbors({ prev, next });
+      })
+      .catch(() => {
+        if (!cancelled) setNeighbors({ prev: null, next: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [date]);
+
+  /**
+   * 加载某月有日记的日期集合（DatePicker 弹窗里的圆点标识）。
+   * - 已加载 / 加载中 → 直接返回不重复请求
+   * - 失败 → 从 loadingMonthsRef 里删除允许重试；不打扰用户（picker 仅缺圆点不影响选日）
+   */
+  const ensureMonthLoaded = useCallback(async (year: number, month: number) => {
+    const key = `${year}-${String(month).padStart(2, "0")}`;
+    if (loadingMonthsRef.current.has(key)) return;
+    loadingMonthsRef.current.add(key);
+    try {
+      const list = await dailyApi.listDates(year, month);
+      setDatesByMonth((prev) => {
+        const next = new Map(prev);
+        next.set(key, new Set(list));
+        return next;
+      });
+    } catch (e) {
+      console.warn("[daily] listDates 失败:", e);
+      loadingMonthsRef.current.delete(key);
+    }
+  }, []);
+
+  // 当前 date 改变 → 预加载该月，让 picker 一打开就能看到圆点
+  // 同时也加载相邻月份的日期数据（用户翻月时常会看上下月，预热避免延迟）
+  useEffect(() => {
+    const d = dayjs(date);
+    void ensureMonthLoaded(d.year(), d.month() + 1);
+    // SidePanel / 自动保存创建新日记 后 bumpNotesRefresh 会触发本组件重渲染，
+    // 但缓存仍在；用 notesRefresh 作 effect 触发器在新建日记后强制 reload 当前月
+  }, [date, ensureMonthLoaded]);
+
+  // 当 SidePanel 提示「笔记列表需要刷新」时（自动保存新建了日记），
+  // 清掉当前月份缓存让下一次 picker 打开重拉
+  const notesRefreshTick = useAppStore((s) => s.notesRefreshTick);
+  useEffect(() => {
+    if (notesRefreshTick === 0) return; // 初始化跳过
+    setDatesByMonth(new Map());
+    loadingMonthsRef.current.clear();
+    const d = dayjs(date);
+    void ensureMonthLoaded(d.year(), d.month() + 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notesRefreshTick]);
+
+  /**
+   * 自动保存：内容变化后 1.2s 防抖入库。
+   *
+   * 创建策略：
+   *  - 还没 DB 记录 & 内容为空 → 什么都不做（避免空草稿污染数据库）
+   *  - 还没 DB 记录 & 内容仍是模板初始骨架 → 同样不建档（用户配了默认模板但今天没动笔）
+   *  - 还没 DB 记录 & 内容非空且偏离模板骨架 → getOrCreate 建记录再 update
+   *  - 已有记录 → 直接 update（包括删到空，允许保存）
+   */
+  const autoSave = useAutoSave({
+    value: { title, content },
+    enabled: !loading,
+    save: async ({ title: t, content: c }) => {
+      const d = dateRef.current;
+      let current = noteRef.current;
+      let isNew = false;
+      if (!current) {
+        if (c.trim().length === 0) return;
+        // 套了默认模板但用户一字未改 → 视作"路过"，不建档
+        if (templateInitialRef.current !== null && c === templateInitialRef.current) {
+          return;
+        }
+        current = await dailyApi.getOrCreate(d);
+        setNote(current);
+        noteRef.current = current;
+        isNew = true;
+      }
+      // 标题是侧边栏「全部」列表的展示项；改了标题才需要让列表重拉（内容变化不影响列表）
+      const titleChanged = current.title !== t;
+      await noteApi.update(current.id, { title: t, content: c });
+      // 同步本地缓存的 note，避免下次保存误判 titleChanged
+      noteRef.current = { ...current, title: t, content: c };
+      // 新建 或 标题变化 → 通知 SidePanel 重拉日期/标题列表
+      if (isNew || titleChanged) {
+        useAppStore.getState().bumpNotesRefresh();
+      }
+      // 同步日记的出链。日记此前**从不**同步出链 —— 写进日记的 [[X]] 不进
+      // note_links，于是日记的链出永远是 0，X 的反链里也看不到这篇日记。
+      // 走 Rust 侧的 rebuildLinks（解析 + 解析目标 + 写表一次完成），
+      // 与同步拉取那条路径共用同一份判定，不会两处口径漂移。
+      // 失败不阻断保存：正文已经落库了，链接是派生数据，下次保存会再试。
+      await linkApi.rebuildLinks(current.id, c).catch(() => {});
+      setLinkRefreshTick((n) => n + 1);
+    },
+  });
+
+  // Ctrl/Cmd + S → 立即保存（跳过防抖）
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        !e.shiftKey &&
+        !e.altKey &&
+        e.key.toLowerCase() === "s"
+      ) {
+        e.preventDefault();
+        void autoSave.flush();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [autoSave]);
+
+  // 切日期前先把当前日期未保存的内容落库，避免跨日期丢失
+  async function goToDate(d: string) {
+    await autoSave.flush();
+    navigate(`/daily?date=${d}`);
+  }
+
+  /**
+   * 日记正文里点击 wiki 双链 → 跳到目标笔记。
+   *
+   * 之前这里没给 TiptapEditor 传 onWikiLinkClick，扩展拿到的回调是 undefined：
+   * handleClick 认出双链、preventDefault 吞掉事件后什么都不做 —— 日记里的双链
+   * 点上去连光标都不动，看起来就是「双链点击完全没反应」。
+   *
+   * 与笔记编辑器口径保持一致：ID 锚点优先 → 规范化精确匹配 → 模糊取最相近；
+   * 跳走之前先 flush 未保存内容，避免日记草稿丢失。重名消歧的 Modal 是笔记页
+   * 特有的交互，日记这边不引入，直接取最近更新的一条。
+   */
+  async function handleWikiLinkClick(wikiTitle: string, wikiId?: number) {
+    try {
+      if (wikiId != null && Number.isFinite(wikiId)) {
+        const target = await noteApi.get(wikiId).catch(() => null);
+        if (target) {
+          await autoSave.flush();
+          navigate(`/notes/${target.id}`);
+          return;
+        }
+        // ID 指向已删除笔记 → 退回按标题找
+      }
+      // 走 title_normalized 精确匹配（不过滤隐藏笔记）
+      const exactId = await linkApi.findIdByTitle(wikiTitle);
+      if (exactId != null) {
+        await autoSave.flush();
+        navigate(`/notes/${exactId}`);
+        return;
+      }
+      const results = await linkApi.searchTargets(wikiTitle, 20);
+      if (results.length > 0) {
+        await autoSave.flush();
+        navigate(`/notes/${results[0].id}`);
+        message.info(`未找到同名笔记，跳转到相近的「${results[0].title}」`);
+        return;
+      }
+      message.warning(`未找到笔记「${wikiTitle}」`);
+    } catch (e) {
+      message.error(`跳转失败: ${e}`);
+    }
+  }
+
+  function renderStatus() {
+    switch (autoSave.status) {
+      case "saving":
+        return <Badge status="processing" text="保存中..." />;
+      case "dirty":
+        return <Badge status="warning" text="编辑中" />;
+      case "saved":
+        return (
+          <Badge
+            status="success"
+            text={
+              autoSave.lastSavedAt
+                ? `已保存 ${formatSavedAt(autoSave.lastSavedAt)}`
+                : "已保存"
+            }
+          />
+        );
+      case "error":
+        return (
+          <span
+            className="cursor-pointer"
+            style={{ color: "#ff4d4f", fontSize: 13 }}
+            onClick={() => void autoSave.flush()}
+            title={autoSave.error ?? ""}
+          >
+            ⚠ 保存失败，点击重试
+          </span>
+        );
+      default:
+        return null;
+    }
+  }
+
+  return (
+    <div className="editor-page">
+      {/* 顶部工具栏 */}
+      <div className="editor-topbar">
+        <Space align="center">
+          <Calendar size={18} />
+          <span style={{ fontWeight: 600, fontSize: 15 }}>日记</span>
+          <Divider
+            type="vertical"
+            style={{ height: 18, margin: "0 8px" }}
+          />
+          <Button
+            size="small"
+            icon={<ChevronLeft size={14} />}
+            // 跳到上一篇真实存在的日记，跳过空白日（更符合"翻日记本"直觉）
+            onClick={() => neighbors.prev && goToDate(neighbors.prev)}
+            disabled={!neighbors.prev}
+            title={neighbors.prev ? `上一篇：${formatDateCN(neighbors.prev)}` : "没有更早的日记"}
+          />
+          <DatePicker
+            value={dayjs(date)}
+            onChange={(d) => d && goToDate(d.format("YYYY-MM-DD"))}
+            allowClear={false}
+            variant="borderless"
+            size="small"
+            format={(v) => formatDateCN(v.format("YYYY-MM-DD"))}
+            // 允许选未来日期：支持提前给某天规划 / 预写日记（后端 validate_date 只校验格式，不拦未来）
+            style={{ fontWeight: 600, padding: "0 4px" }}
+            // 用户在日选模式下翻月 → 拉新月份的"有日记"日期集合
+            onPanelChange={(d, mode) => {
+              if (mode === "date") {
+                void ensureMonthLoaded(d.year(), d.month() + 1);
+              }
+            }}
+            // 给"有日记"的日期单元格加底部圆点（与 Apple Calendar / Notion 一致）
+            cellRender={(current, info) => {
+              if (info.type !== "date") return info.originNode;
+              const d = current as Dayjs;
+              const monthKey = d.format("YYYY-MM");
+              const dateStr = d.format("YYYY-MM-DD");
+              const hasDaily =
+                datesByMonth.get(monthKey)?.has(dateStr) ?? false;
+              if (!hasDaily) return info.originNode;
+              return (
+                // paddingBottom 撑开外层给圆点专属空间；不依赖负 bottom（被 cell 容器裁切风险）
+                <div style={{ position: "relative", paddingBottom: 8 }}>
+                  {info.originNode}
+                  <span
+                    aria-hidden
+                    style={{
+                      position: "absolute",
+                      left: "50%",
+                      bottom: 1,
+                      transform: "translateX(-50%)",
+                      width: 4,
+                      height: 4,
+                      borderRadius: "50%",
+                      background: token.colorPrimary,
+                      pointerEvents: "none",
+                    }}
+                  />
+                </div>
+              );
+            }}
+          />
+          <Button
+            size="small"
+            icon={<ChevronRight size={14} />}
+            onClick={() => neighbors.next && goToDate(neighbors.next)}
+            disabled={!neighbors.next}
+            title={neighbors.next ? `下一篇：${formatDateCN(neighbors.next)}` : "没有更晚的日记"}
+          />
+          {!isToday && (
+            <Button size="small" onClick={() => goToDate(todayStr())}>
+              今天
+            </Button>
+          )}
+          {renderStatus()}
+        </Space>
+        <Space align="center">
+          {isToday && planTodayAvailable && (
+            <Button
+              icon={<Sparkles size={14} />}
+              onClick={() => setShowPlanModal(true)}
+              title="AI 根据今日/昨日笔记 + 待办，给出 3~7 条今日建议"
+            >
+              AI 规划今日
+            </Button>
+          )}
+          <Tooltip title="从「日期文件夹/笔记.md」结构导入历史日记，或把已导入的普通笔记认回日记">
+            <Button
+              icon={<CalendarCheck size={16} />}
+              onClick={() => setShowImportModal(true)}
+            >
+              导入日记
+            </Button>
+          </Tooltip>
+          <Tooltip title={outlineVisible ? "隐藏大纲" : "显示大纲"}>
+            <Button
+              type={outlineVisible ? "primary" : "default"}
+              icon={<ListTree size={16} />}
+              onClick={toggleOutline}
+            />
+          </Tooltip>
+          <Button
+            type="primary"
+            icon={<Save size={16} />}
+            onClick={() => void autoSave.flush()}
+            loading={autoSave.status === "saving"}
+            disabled={
+              autoSave.status === "saved" || autoSave.status === "idle"
+            }
+          >
+            保存
+          </Button>
+        </Space>
+      </div>
+
+      <DailyImportModal
+        open={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        onDone={() => {
+          // 转换后日历圆点要跟着变：清掉按月缓存，让 ensureMonthLoaded 重新拉
+          loadingMonthsRef.current.clear();
+          setDatesByMonth(new Map());
+        }}
+      />
+
+      <PlanTodayModal
+        open={showPlanModal}
+        onClose={() => setShowPlanModal(false)}
+        onSaved={() => {
+          // 有了新待办，刷一下侧边栏紧急待办计数
+          useAppStore.getState().refreshTaskStats();
+        }}
+      />
+
+      {/* 可滚动的编辑主体（大纲打开时变 grid 两列：正文 | 6px 分隔 | 大纲） */}
+      <div
+        className="editor-body"
+        ref={editorBodyRef}
+        data-outline={outlineVisible ? "on" : undefined}
+        data-outline-pos={outlineVisible ? outlinePosition : undefined}
+        style={
+          outlineVisible
+            ? {
+                // 覆盖 CSS 里的兜底列宽（220px）：左置时 大纲 | 6px | 1fr；右置时反之。
+                // DOM 顺序固定为 内容→分隔条→大纲，左置由 CSS order 调换视觉次序。
+                gridTemplateColumns:
+                  outlinePosition === "left"
+                    ? `${outlineWidth}px 6px minmax(0, 1fr)`
+                    : `minmax(0, 1fr) 6px ${outlineWidth}px`,
+              }
+            : undefined
+        }
+      >
+        <div className="editor-content-area">
+          {loading ? (
+            <div className="flex items-center justify-center flex-1">
+              <Spin size="large" />
+            </div>
+          ) : (
+            <>
+              {/* 标题：用 position:relative 父级 + 绝对定位 mic / clear 模拟 suffix。
+                  不直接用 antd Input.suffix / allowClear——两者都会包一层
+                  .ant-input-affix-wrapper 把 borderless 大标题撑成白底大框。 */}
+              <div
+                style={{ position: "relative", marginBottom: 12 }}
+              >
+                <Input
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="日记标题"
+                  variant="borderless"
+                  className="editor-title"
+                  style={{ paddingRight: 64 }}
+                />
+                <div
+                  style={{
+                    position: "absolute",
+                    right: 4,
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                  }}
+                >
+                  {title && (
+                    // 与 antd allowClear 视觉一致：CloseCircleFilled 灰色实心圆 ×，hover 加深
+                    <CloseCircleFilled
+                      onClick={() => setTitle("")}
+                      title="清空"
+                      style={{
+                        cursor: "pointer",
+                        fontSize: 14,
+                        color: "rgba(0, 0, 0, 0.25)",
+                        transition: "color 0.2s",
+                      }}
+                      onMouseEnter={(e) => {
+                        (e.currentTarget as unknown as HTMLElement).style.color =
+                          "rgba(0, 0, 0, 0.45)";
+                      }}
+                      onMouseLeave={(e) => {
+                        (e.currentTarget as unknown as HTMLElement).style.color =
+                          "rgba(0, 0, 0, 0.25)";
+                      }}
+                    />
+                  )}
+                  <MicButton
+                    stripTrailingPunctuation
+                    onTranscribed={(text) =>
+                      setTitle((prev) => (prev ? `${prev} ${text}` : text))
+                    }
+                  />
+                </div>
+              </div>
+
+              {/* 内容编辑区 */}
+              <TiptapEditor
+                content={content}
+                onChange={setContent}
+                placeholder="写点什么..."
+                noteId={note?.id}
+                // 拖/粘贴图片 / 问 AI 时若日记还没创建，按需建档（无需用户手动"保存"）
+                ensureNoteId={async () => {
+                  const n = await ensureDailyNote();
+                  return n.id;
+                }}
+                onAskAi={async (selected) => {
+                  // 与 notes/editor.tsx 行为一致：选段挂到抽屉的"引用 chip"，
+                  // 输入框留空给用户写问题。日记还没建档时先按 date 懒建。
+                  try {
+                    await ensureDailyNote();
+                    setAiSelection(selected);
+                    setAiDrawerOpen(true);
+                  } catch (e) {
+                    message.error(`打开 AI 失败：${e}`);
+                  }
+                }}
+                onWikiLinkClick={handleWikiLinkClick}
+                onEditorReady={setEditorInstance}
+              />
+            </>
+          )}
+        </div>
+
+        {/* 大纲拖拽分隔条：6px 宽，col-resize（与笔记编辑器同款逻辑，
+            共用 editor.outlineWidth 记忆宽度，双击还原默认） */}
+        {outlineVisible && (
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="拖动调整大纲宽度（双击还原默认）"
+            className="editor-outline-splitter"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              outlineDragRef.current = {
+                startX: e.clientX,
+                startWidth: outlineWidth,
+                latest: outlineWidth,
+              };
+              const handleMove = (ev: MouseEvent) => {
+                const ref = outlineDragRef.current;
+                if (!ref) return;
+                // 右置：分隔条在大纲左缘，向左拖 → 变宽；左置方向相反
+                const delta =
+                  outlinePosition === "left"
+                    ? ev.clientX - ref.startX
+                    : ref.startX - ev.clientX;
+                const next = Math.max(140, Math.min(480, ref.startWidth + delta));
+                ref.latest = next;
+                setOutlineWidth(next);
+              };
+              const handleUp = () => {
+                window.removeEventListener("mousemove", handleMove);
+                window.removeEventListener("mouseup", handleUp);
+                const ref = outlineDragRef.current;
+                if (ref) {
+                  localStorage.setItem("editor.outlineWidth", String(ref.latest));
+                  outlineDragRef.current = null;
+                }
+              };
+              window.addEventListener("mousemove", handleMove);
+              window.addEventListener("mouseup", handleUp);
+            }}
+            onDoubleClick={() => {
+              setOutlineWidth(OUTLINE_DEFAULT_WIDTH);
+              localStorage.setItem(
+                "editor.outlineWidth",
+                String(OUTLINE_DEFAULT_WIDTH),
+              );
+            }}
+          />
+        )}
+
+        {/* 大纲面板：sticky 跟随滚动；标题数 < 2 时 EditorOutline 内部自显空态提示 */}
+        {outlineVisible && (
+          <aside className="editor-outline-aside">
+            <EditorOutline
+              editor={editorInstance}
+              scrollRoot={editorBodyRef.current}
+              onHide={toggleOutline}
+            />
+          </aside>
+        )}
+      </div>
+
+      {/* 链接状态条：与笔记编辑器同款，常驻底部不随正文滚动。
+          日记同样支持 [[双链]]，之前只有笔记编辑器能看到链接情况，这里补齐。
+          note 为空（当天还没落库）时组件自己返回 null，不占位。 */}
+      <LinkStatusBar
+        noteId={note?.id}
+        refreshKey={linkRefreshTick}
+        /* 大纲列宽 + 6px 分隔条：状态条据此让出同样的空间，左右沿才对得上卡片 */
+        outlineSpace={outlineVisible ? outlineWidth + 6 : 0}
+        outlinePos={outlineVisible ? outlinePosition : undefined}
+        onNavigate={async (id) => {
+          await autoSave.flush();
+          navigate(`/notes/${id}`);
+        }}
+      />
+
+      {/* 伴生 AI 抽屉：仅在日记 note 已存在时挂载（NoteAiDrawer 需要确切 noteId） */}
+      {note && (
+        <NoteAiDrawer
+          noteId={note.id}
+          open={aiDrawerOpen}
+          onClose={() => setAiDrawerOpen(false)}
+          pendingSelection={aiSelection}
+        />
+      )}
+    </div>
+  );
+
+  /** 取或懒建当天日记（noteRef + state 双写，兼顾闭包内立即可见和 React 重渲染） */
+  async function ensureDailyNote(): Promise<Note> {
+    if (noteRef.current) return noteRef.current;
+    const created = await dailyApi.getOrCreate(dateRef.current);
+    setNote(created);
+    noteRef.current = created;
+    useAppStore.getState().bumpNotesRefresh();
+    return created;
+  }
+}
+
+import { useIsMobile } from "@/hooks/useIsMobile";
+import { MobileDaily } from "./MobileDaily";
+
+export default function DailyPage() {
+  const isMobile = useIsMobile();
+  return isMobile ? <MobileDaily /> : <DesktopDailyPage />;
+}

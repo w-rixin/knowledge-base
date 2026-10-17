@@ -1,0 +1,380 @@
+---
+name: tauri-packaging
+description: |
+  Tauri 打包与分发技能,指导桌面端（Windows/macOS/Linux）与移动端（Android/iOS）的构建、签名和分发。
+
+  触发场景:
+  - 需要构建生产安装包（exe/dmg/deb/apk/aab/ipa）
+  - 需要配置各平台打包参数
+  - 需要代码签名（Windows 证书 / Android keystore / iOS 描述文件）
+  - 需要减小安装包体积
+  - 需要设置应用图标和元数据
+  - 需要打包 Android / iOS App
+
+  触发词: 打包、构建、build、发布、安装包、exe、dmg、deb、apk、aab、ipa、签名、分发、release、android build、ios build、移动端打包
+---
+
+# Tauri 打包与分发
+
+> **本项目同时支持桌面端 + 移动端**：桌面三平台靠 `pnpm tauri build`，Android 靠 `pnpm tauri android build`，iOS 靠 `pnpm tauri ios build`（需 macOS）。
+> 移动端踩坑较多，单独看下方「移动端打包」章节。
+
+## 桌面端构建命令
+
+```bash
+# 构建所有平台安装包
+pnpm tauri build
+
+# 仅构建特定格式
+pnpm tauri build --bundles msi    # Windows MSI
+pnpm tauri build --bundles nsis   # Windows NSIS
+pnpm tauri build --bundles dmg    # macOS DMG
+pnpm tauri build --bundles deb    # Linux DEB
+pnpm tauri build --bundles appimage # Linux AppImage
+
+# Debug 构建(包含 DevTools)
+pnpm tauri build --debug
+```
+
+---
+
+## 打包配置 (tauri.conf.json)
+
+### 基础配置
+
+```json
+{
+  "productName": "MyApp",
+  "version": "1.0.0",
+  "identifier": "com.company.myapp",
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [],
+    "copyright": "Copyright (c) 2026 Company",
+    "category": "Productivity",
+    "shortDescription": "我的桌面应用",
+    "longDescription": "一个使用 Tauri 构建的跨平台桌面应用"
+  }
+}
+```
+
+### Windows 配置
+
+```json
+{
+  "bundle": {
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "",
+      "wix": null,
+      "nsis": {
+        "displayLanguageSelector": true,
+        "languages": ["SimpChinese", "English"],
+        "installerIcon": "icons/icon.ico"
+      }
+    }
+  }
+}
+```
+
+### macOS 配置
+
+```json
+{
+  "bundle": {
+    "macOS": {
+      "entitlements": null,
+      "frameworks": [],
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": null
+    }
+  }
+}
+```
+
+### Linux 配置
+
+```json
+{
+  "bundle": {
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.0-37"],
+        "section": "utility"
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    }
+  }
+}
+```
+
+---
+
+## 图标生成
+
+```bash
+# 从 1024x1024 PNG 生成所有平台图标
+pnpm tauri icon path/to/icon-1024x1024.png
+```
+
+需要准备的图标:
+| 文件 | 尺寸 | 平台 |
+|------|------|------|
+| `icon.ico` | 多尺寸合一 | Windows |
+| `icon.icns` | 多尺寸合一 | macOS |
+| `32x32.png` | 32x32 | 通用 |
+| `128x128.png` | 128x128 | 通用 |
+| `128x128@2x.png` | 256x256 | HiDPI |
+
+---
+
+## 体积优化
+
+```toml
+# src-tauri/Cargo.toml
+[profile.release]
+opt-level = "z"       # 最小体积
+lto = true            # 链接时优化
+codegen-units = 1     # 单代码生成单元
+strip = true          # 剥离调试信息
+panic = "abort"       # abort 而非 unwind
+```
+
+### 典型打包体积
+
+| 平台 | 基础模板 | 中等应用 |
+|------|---------|---------|
+| Windows (.msi) | ~3 MB | ~5-10 MB |
+| macOS (.dmg) | ~5 MB | ~8-15 MB |
+| Linux (.deb) | ~4 MB | ~6-12 MB |
+
+---
+
+## 桌面端输出位置
+
+```
+src-tauri/target/release/bundle/
+├── msi/        → .msi 安装包 (Windows)
+├── nsis/       → .exe 安装程序 (Windows)
+├── dmg/        → .dmg 磁盘映像 (macOS)
+├── macos/      → .app 应用包 (macOS)
+├── deb/        → .deb 包 (Debian/Ubuntu)
+└── appimage/   → .AppImage (通用 Linux)
+```
+
+---
+
+## 便携版（Portable Zip）打包
+
+> **本项目支持便携模式**：exe 同级有 `portable.txt` 哨兵文件就把数据写到安装目录而不是 C 盘 AppData。
+> resolver 在 `src-tauri/src/services/data_dir.rs::DataDirResolver::resolve()` 实现，
+> 优先级：`env > portable > pointer > default`。
+
+### 便携模式触发条件
+
+| 哨兵文件状态 | 数据根目录 |
+|------------|-----------|
+| `<exe同级>/portable.txt` 不存在 | 走默认（C 盘 AppData）或指针文件 |
+| `<exe同级>/portable.txt` 存在 + 内容空 | `<exe同级>/data/` |
+| `<exe同级>/portable.txt` 存在 + 绝对路径内容 | 该绝对路径 |
+| `<exe同级>/portable.txt` 存在 + 相对路径内容 | `<exe同级>/<相对路径>/` |
+
+### 打 portable.zip 的方法
+
+不需要改 tauri.conf.json / NSIS 配置。只要：
+
+1. 用正常的 `pnpm tauri build` 或 CI 出官方 NSIS 安装包
+2. 用 7-Zip 解压 NSIS exe（NSIS 内部本质是 7z）拿到程序文件目录
+3. 加一个空的 `portable.txt`
+4. zip 打包
+
+详细步骤见 `release-publish` 技能的「便携版（Portable Zip）」章节。
+
+### 不做的事
+
+- ❌ **不改 NSIS installMode 为 currentUser**：会破坏老用户升级路径
+- ❌ **不在 installer-hooks.nsi 里自动写 portable.txt**：增加分支复杂度，老用户升级风险
+- ❌ **不给 portable.zip 接 updater**：便携版升级靠用户重新下载解压覆盖
+
+---
+
+## 🤖 移动端打包（Android）
+
+### dev 模式 vs build 模式（先搞清楚这个）
+
+| 模式 | 命令 | webview 加载来源 | 是否依赖电脑 | 用途 |
+|------|------|-----------------|------------|------|
+| **dev** | `pnpm tauri android dev` | `http://<电脑IP>:1421`（vite live server） | ✅ 必须连电脑（同 Wi-Fi 或 adb reverse），hot reload | 日常开发 |
+| **build** | `pnpm tauri android build` | `tauri://localhost`（APK 内打包好的静态资源） | ❌ 完全独立，断 USB / 关电脑都能用 | 测试 / 发布 |
+
+> 关键：发布版（build 模式）APK 把 `frontendDist`（`dist/`）和 `libknowledge_base_lib.so` 都打进 APK，invoke 走 webview↔JNI 桥，**不走任何网络**。dev 模式那个 `http://192.168.x.x:1421` 连不上的错误只在 dev 模式有。
+
+### 构建命令
+
+```bash
+# debug APK（含 debuginfo，体积大 ~300MB+，可直接 adb install）
+pnpm tauri android build --debug --apk
+# release APK（LTO + strip，体积小 ~50-100MB，需签名才能上架）
+pnpm tauri android build --apk
+# AAB（Google Play 上架格式）
+pnpm tauri android build --aab
+# 只构建某个 ABI（加快编译，去掉 universal 多 ABI）
+pnpm tauri android build --debug --apk --target aarch64
+```
+
+### 🔴 项目路径含中文 → 必须设 CARGO_TARGET_DIR
+
+本项目路径 `E:\my\桌面软件tauri\knowledge_base` 含中文，Android NDK 的 `ld.lld` 在 Windows 下用 ANSI codepage 解析路径，遇到中文会报：
+
+```
+ld.lld: error: cannot open ...knowledge_base_lib.*.rcgu.o : unspecified system_category error
+```
+
+**所有 `tauri android` 命令必须带 `CARGO_TARGET_DIR` 指到纯 ASCII 路径**（用 inline `env VAR=val`，不要 `export`，否则 background wrapper 会吞掉）：
+
+```bash
+mkdir -p /c/cargo-target/kb-android
+env CARGO_TARGET_DIR="C:\\cargo-target\\kb-android" pnpm tauri android build --debug --apk
+```
+
+> `subst K:` / `mklink /J` 都不行 —— tauri-cli 的 mobile 模块会 `canonicalize` 还原虚拟盘符，触发 `AssetDirOutsideOfAppRoot`。只能改 cargo 编译输出目录。详见 `bug-detective` 技能。
+
+### APK / AAB 输出位置
+
+```
+src-tauri/gen/android/app/build/outputs/
+├── apk/
+│   ├── universal/debug/app-universal-debug.apk   ← 4 ABI 合一（体积最大）
+│   ├── arm64/debug/app-arm64-debug.apk           ← 只 arm64（现代手机用这个）
+│   ├── universal/release/app-universal-release.apk
+│   └── ...
+└── bundle/
+    └── universalRelease/app-universal-release.aab ← 传 Google Play
+```
+
+装机：`adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`
+
+### Android 签名 — 本项目已配好（T-M019 一期）
+
+debug APK 用 Android SDK 自带的 debug keystore 自动签名（同一台机器固定，但 CI runner 的 debug keystore 跟本地不一样，debug→debug 跨机器更新会签名不匹配）。release 用本项目自己的 keystore：
+
+- **keystore**：`src-tauri/gen/android/kb-release.jks`（alias `kb`，RSA 2048，有效期到 2053；**已 .gitignore**，密码见 `key.properties` / 维护者密码管理器 / memory `project_android_keystore.md`）
+- **配置**：`src-tauri/gen/android/key.properties`（也 .gitignore）→ `app/build.gradle.kts` 的 `signingConfigs.release` 读它：
+  - `key.properties` 存在 → `pnpm tauri android build --apk/--aab` 自动用 `kb-release.jks` 签名
+  - 不存在（如别人 fresh clone）→ release 不签名（仅 `assembleRelease` 不报错），debug 不受影响
+- **CI 上**：`.jks`（base64）+ storePassword/keyPassword/keyAlias 已放 GitHub Secrets（主仓 + 备用仓都配了），`android.yml` 的 release 路径解码还原 `kb-release.jks` + `key.properties` 后再 `tauri android build --apk --aab`（已接好）
+
+```bash
+# 验签：看 release 变体用的是不是 kb-release.jks
+cd src-tauri/gen/android && ./gradlew :app:signingReport | grep -A4 Release
+```
+
+> 🔴 **更新签名一致性铁律**：第一个分发给用户的 release APK 用了 `kb-release.jks` → 此后所有版本必须用同一个 keystore，否则用户"检查更新→下载新 APK"会因签名不匹配装不上（`INSTALL_FAILED_UPDATE_INCOMPATIBLE`，只能卸载重装丢数据）。keystore 丢了 = 永远无法给已安装用户推更新。`.jks` + 两个密码务必备份（云盘 + 密码管理器）。
+>
+> 现在手机上装的是「本地 debug APK」，将来换成 release APK 时，老用户需先卸载再装（debug↔release 签名不同）；之后 release→release 才一致。
+
+### AndroidManifest 权限（与 capabilities 是两套）
+
+`src-tauri/gen/android/app/src/main/AndroidManifest.xml` 里的 `<uses-permission>` 是 **Android 系统层权限**，跟 `src-tauri/capabilities/*.json` 的 Tauri 权限是两回事，**两边都要声明**：
+
+| 功能 | AndroidManifest `<uses-permission>` | 备注 |
+|------|-------------------------------------|------|
+| 联网（dev server / WebDAV / AI API） | `android.permission.INTERNET` | tauri 默认已有 |
+| 扫码（WebView getUserMedia 调摄像头） | `android.permission.CAMERA` | 不声明则 `onPermissionRequest` 里申请运行时权限被系统直接拒，弹 `NotAllowedError` |
+| 语音录入（getUserMedia 录音） | `android.permission.RECORD_AUDIO` + `MODIFY_AUDIO_SETTINGS` | 同上 |
+
+> ⚠️ `pnpm tauri android init` 会覆盖 `gen/android/` 下大部分文件，**手改的 AndroidManifest / strings.xml / 图标会丢**，改完要么不再 init，要么记下手改内容重新打。
+
+### 图标 / 应用名同步（不会自动跟 PC 同步）
+
+- PC 端图标源：`src-tauri/icons/`（`icon.png` 512×512 + `tauri icon` 生成的全套）
+- Android 用：`src-tauri/gen/android/app/src/main/res/mipmap-*/` —— **`tauri android init` 时从 `src-tauri/icons/android/` 拷一份，之后不会自动跟 PC 同步**
+- 改图标：把整个 `src-tauri/icons/android/`（含 `mipmap-*` 和 `values/ic_launcher_background.xml`，**别漏 values 子目录**否则 Gradle 报 `resource color/ic_launcher_background not found`）拷到 `gen/android/.../res/`
+- 应用名：`src-tauri/gen/android/app/src/main/res/values/strings.xml` 的 `app_name` / `main_activity_title`（默认是 `productName`，本项目手改为「知识库」）
+
+### 软键盘 / viewport
+
+- `AndroidManifest.xml` activity 需 `android:windowSoftInputMode="adjustResize"`，否则配合 `enableEdgeToEdge()` 时 input 获得焦点也不弹键盘
+- `index.html` viewport 建议 `width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover`
+
+---
+
+## 🍎 移动端打包（iOS，需 macOS）
+
+```bash
+pnpm tauri ios init        # 一次性，生成 src-tauri/gen/apple/
+pnpm tauri ios dev         # 模拟器 / 真机 dev
+pnpm tauri ios build       # 生成 .ipa（需 Apple Developer Program 账号 + 描述文件）
+```
+
+- 签名走 Xcode 的 Signing & Capabilities（Team + Provisioning Profile），不像 Android 用 keystore
+- 上架走 TestFlight / App Store Connect
+- 本项目 iOS 链路尚未跑通（无 Mac 设备），相关任务见 `docs/tasks/mobile-migration-tasks.md` T-M005/T-M016/T-M018
+
+---
+
+## 版本管理（桌面 / 移动端两条独立版本线）
+
+| 版本线 | 改哪里 | tag | CI workflow | 更新源 |
+|--------|--------|-----|-------------|--------|
+| **桌面**（1.x）| 三处同步：`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json` 的 version | `v*.*.*`（例 `v1.9.0`）| `release.yml` | `update.json` |
+| **移动端（Android）**（从 0.1.0 起）| **只改一处**：`src-tauri/tauri.android.conf.json` 的 `"version"` | `mobile-v*.*.*`（例 `mobile-v0.1.0`）| `android.yml` | `update-mobile.json` |
+
+> Tauri 2 构建 Android 时自动把 `tauri.android.conf.json` 合并覆盖到 `tauri.conf.json`，所以 Android APK 的
+> versionName 和编译进去的 `package_info().version` 都用这个独立的移动版本号，跟桌面 1.x 解耦。
+> **不要把移动版本号往回调**（Tauri 从它推 Android `versionCode`，倒退会让用户装不上）。
+
+```bash
+# 桌面（三处）
+package.json:           "version": "1.0.0"
+src-tauri/Cargo.toml:   version = "1.0.0"
+src-tauri/tauri.conf.json: "version": "1.0.0"
+# 移动端（一处）
+src-tauri/tauri.android.conf.json: "version": "0.1.0"
+```
+
+---
+
+## CI 自动构建（推荐）
+
+- **桌面三平台**：`.github/workflows/release.yml`，推送 `v*.*.*` Tag 后自动构建 Windows/macOS/Linux 安装包。用 `/release` 命令一键发布，详见 `release-publish` 技能。
+- **Android**：`.github/workflows/android.yml` —— 触发方式：`workflow_dispatch`（手动，可选 debug / release）或推 `mobile-v*.*.*` tag（**普通 push 到 master 不触发**；前缀 `mobile-` 与桌面 `v*.*.*` 区分，互不打架）：
+  - `debug`：SDK debug keystore 自签名 → APK（侧载，仅 workflow_dispatch 选 debug 时）
+  - `release`（tag 触发 / workflow_dispatch 选 release）：从 Secrets 还原 `kb-release.jks` + `key.properties` → `tauri android build --apk --aab` 正式签名 → 产物起稳定名 `Knowledge.Base_<移动版本>_android-arm64.apk`（+ `.aab`，移动版本读 `tauri.android.conf.json`）→ tag 触发时附到本仓库 GitHub Release 草稿（tag = `mobile-v<移动版本>`）；同时设 `TAURI_SIGNING_PRIVATE_KEY`
+  - ⚠️ 被 tag 的那个 commit 消息**不能含 `[skip ci]`**，否则 tag push 也会被跳过
+  - 6 个 Secrets（`ANDROID_KEYSTORE_BASE64` / `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD` / `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`）在主 `bkywksj/knowledge-base` 已配（切备用 CI 仓时需在新仓补配）
+  - **App 内"检查更新"闭环**：`release-publish` 技能「移动端（Android）独立发布」流程把 release APK 放进 `releases/mobile-v<版本>/` + 生成 `update-mobile.json`（指向 release 仓 raw / R2 上的 APK），App 的 `check_mobile_update`（`src-tauri/src/commands/mobile_update.rs`）读它拿直链。
+- **iOS**：CI 尚未接（需 Apple Developer 账号 + macOS runner，T-M020 待办）。
+
+---
+
+## 常见错误
+
+| 错误做法 | 正确做法 |
+|---------|---------|
+| 不配置 release profile | 添加 LTO + strip 优化体积 |
+| 图标尺寸不全 | 使用 `tauri icon` 命令自动生成 |
+| 版本号不同步 | 3 处版本号保持一致 |
+| 不测试安装包 | 每次发布前在干净环境安装测试 |
+| 不设置应用标识 | identifier 使用反向域名格式 |
+| Rust 中启动子进程未设 `CREATE_NO_WINDOW` | 打包后变 GUI 进程，所有 `Command::new()` 必须设 `creation_flags(0x08000000)` |
+| `productName` 含中文导致 WiX MSI 打包失败 | 改用 NSIS (`"targets": ["nsis"]`) 或改 productName 为纯 ASCII |
+| `bundle.targets` 设为 `"all"` 在 CI 上出错 | CI 中通过 `--bundles` 参数指定，本地可用 `["nsis"]` |
+| **Android：项目路径含中文直接 `tauri android build`** | 必须 `env CARGO_TARGET_DIR="C:\\cargo-target\\<name>-android"` 前缀（NDK ld.lld 不认非 ASCII 路径） |
+| **以为发布 APK 还要连电脑** | `tauri android build` 出的 APK 是独立的（`tauri://localhost` 读 APK 内资源），只有 `tauri android dev` 模式才连 dev server |
+| **手改 `gen/android/` 后又跑 `tauri android init`** | init 会覆盖 AndroidManifest / strings.xml / 图标，手改的全丢；改完别再 init，或记下手改内容重新打 |
+| **Android 权限只在 capabilities 里声明** | AndroidManifest `<uses-permission>` 和 Tauri capabilities 是两套，摄像头/录音/联网两边都要声明 |
+| **同步 Android 图标只拷 `mipmap-*`** | 必须连 `values/ic_launcher_background.xml` 一起拷，否则 Gradle 报 `resource color/ic_launcher_background not found` |
+| **release APK 用 debug keystore** | 上架前必须用自己的 keystore（`key.properties` + `signingConfigs`），debug 签名不能上架且 keystore 丢了无法更新已上架应用 |
+| **input 获焦不弹键盘（Android）** | activity 加 `android:windowSoftInputMode="adjustResize"` |

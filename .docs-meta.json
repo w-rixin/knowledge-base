@@ -1,0 +1,109 @@
+{
+  "version": "1.0.0",
+  "docsProject": "knowledge-base-docs",
+  "docsLocation": "sibling",
+  "docsPath": "../knowledge-base-docs",
+  "themeColor": "#7c3aed",
+  "lastSyncCommit": "46bc2c1",
+  "lastSyncTime": "2026-04-30T07:30:00Z",
+  "coveredSections": ["guide", "features"],
+  "updateHistory": [
+    {
+      "commit": "ab3d107",
+      "time": "2026-04-22T06:05:24Z",
+      "type": "adopt",
+      "affectedDocs": [],
+      "sourceChanges": [],
+      "note": "接入已有文档站点 ../knowledge-base-docs；以 v1.0.0 发布 commit (ab3d107) 作为同步基线"
+    },
+    {
+      "commit": "ebb535d13dff0b84af2a787de1579a0c7ebb7462",
+      "time": "2026-04-22T06:05:24Z",
+      "type": "incremental",
+      "affectedDocs": ["features/ai-qa.md"],
+      "sourceChanges": [
+        "src-tauri/src/services/ai.rs",
+        "src-tauri/src/database/ai.rs"
+      ],
+      "note": "同步 RAG 上下文窗口改进（4000 字符命中居中窗口）"
+    },
+    {
+      "commit": "ebb535d13dff0b84af2a787de1579a0c7ebb7462",
+      "time": "2026-04-22T06:05:24Z",
+      "type": "audit",
+      "affectedDocs": [
+        "index.md",
+        "features/ai-qa.md",
+        "features/tags-folders.md",
+        "features/import-export.md",
+        "features/tasks.md",
+        "features/trash.md",
+        "features/daily-notes.md",
+        ".vitepress/config.ts"
+      ],
+      "sourceChanges": [],
+      "note": "文档/代码一致性审计：\n1. 修正 ai-qa.md + index.md 的「向量索引」误述 → 实为 FTS5+bigram 关键词 RAG，详述检索方式、排序策略、与向量 RAG 差异\n2. 新建 features/tasks.md、features/trash.md、features/daily-notes.md 补齐已有功能的文档\n3. features/import-export.md 追加「孤儿图片清理」小节\n4. features/tags-folders.md 追加「跨页面实时同步」小节\n5. .vitepress/config.ts 组织与效率侧边栏新增 3 个条目\n6. index.md 首页 features 新增「任务管理 + 到点提醒」卡片"
+    },
+    {
+      "commit": "eb4d17a",
+      "time": "2026-04-22T08:20:00Z",
+      "type": "incremental",
+      "affectedDocs": [
+        ".vitepress/config.ts",
+        "download.md",
+        "faq.md"
+      ],
+      "sourceChanges": [],
+      "note": "修正残留的 v0.2.0 版本号示例 → v1.1.0：\n1. .vitepress/config.ts 结构化数据 softwareVersion 兜底值\n2. download.md 镜像表 R2 链接示例\n3. faq.md 三镜像对比表 R2 链接示例\n（保留各处「v0.2.0+」历史起始版本标记不变）"
+    },
+    {
+      "commit": "e749742",
+      "time": "2026-04-23T09:45:00Z",
+      "type": "incremental",
+      "affectedDocs": [
+        ".vitepress/config.ts"
+      ],
+      "sourceChanges": [
+        "LICENSE",
+        "COMMERCIAL-LICENSE.md",
+        "CONTRIBUTING.md",
+        ".github/CLA.md"
+      ],
+      "note": "源码仓 bkywksj/knowledge-base 于 2026-04-23 正式开源（AGPL-3.0 + 商业授权双许可），恢复文档站 navbar 右上角指向源码仓的 GitHub 图标（revert 13c2704）。主项目同步变更：添加 AGPL-3.0 LICENSE、COMMERCIAL-LICENSE.md 商业授权说明、CONTRIBUTING.md 贡献指南（含 CLA）、.github/CLA.md 完整协议、PR/Issue 模板、CLA Assistant 配置。"
+    },
+    {
+      "commit": "9fa269e",
+      "time": "2026-04-23T10:00:00Z",
+      "type": "audit",
+      "affectedDocs": [
+        "faq.md"
+      ],
+      "sourceChanges": [
+        "LICENSE",
+        "COMMERCIAL-LICENSE.md",
+        "CONTRIBUTING.md"
+      ],
+      "note": "文档站一致性审计：源码仓开源后 FAQ 需同步更新：\n1. 「商业使用有限制吗」重写：由原「私有软件、代码不可转售」改为「AGPL-3.0 + 商业授权双许可」场景矩阵\n2. 「Bug 反馈在哪」移除「源码仓私有需访问申请」说明，移除邮件通道（统一走 GitHub Issue 模板）\n3. 「可以贡献代码吗」重写：指向 CONTRIBUTING.md + CLA 说明 + 5 步贡献流程"
+    },
+    {
+      "commit": "46bc2c1",
+      "time": "2026-04-30T07:30:00Z",
+      "type": "incremental",
+      "affectedDocs": [
+        "sponsor.md",
+        "features/markdown-editor.md",
+        "features/tasks.md",
+        ".vitepress/config.ts",
+        "public/donate-qr.png"
+      ],
+      "sourceChanges": [
+        "src/components/notes/MindMapView.tsx",
+        "src/pages/notes/editor.tsx",
+        "src/pages/tasks/index.tsx",
+        "src-tauri/src/services/popout_window.rs",
+        "src-tauri/src/commands/notes.rs"
+      ],
+      "note": "同步多项新功能 + 加入赞赏页：\n1. 新建 sponsor.md（赞赏码 + B 站 / GitHub / 知识星球链接）+ navbar 加入「赞赏」入口\n2. features/markdown-editor.md 追加「思维导图视图」「在新窗口打开（多屏对照）」两节\n3. features/tasks.md 追加「子任务（步骤）」「任务详情查看（只读）」两节、属性表加子任务字段\n4. public/donate-qr.png 上传赞赏码图片"
+    }
+  ]
+}

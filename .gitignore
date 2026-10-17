@@ -1,0 +1,48 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Tauri signing keys (NEVER commit private keys)
+src-tauri/keys/
+
+# Release config (contains local paths)
+.claude/release-config.json
+
+# 设计稿/原型/临时输出（不进仓库）
+output/
+
+# B 站调试产物（本地保留，不进任何远程仓库）
+bili_*.json
+.claude/scheduled_tasks.lock
+
+# 白板字体（14MB，由 vite.config.ts 的 kb-excalidraw-assets 插件
+# 从 node_modules/@excalidraw/excalidraw 自动同步，不进仓库）
+public/excalidraw/
+
+# Rust 构建产物（可达数十 GB；本地/云端构建均不入库）
+# src-tauri/target 同时覆盖 workspace 内 kb-core / mcp 子 crate 的产物
+src-tauri/target/
+target/
+# sidecar 二进制（由 pnpm build:mcp 生成，各平台 triple 后缀）
+src-tauri/binaries/

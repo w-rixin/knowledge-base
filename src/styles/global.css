@@ -1,0 +1,2973 @@
+@import "tailwindcss";
+@import "./themes.css";
+/* T-011: KaTeX 公式渲染 — Mathematics 扩展 + 行内 $...$ / 块级 $$...$$ */
+@import "katex/dist/katex.min.css";
+
+/* ═══════════════════════════════════════════════════════════
+   Safari 15.x / macOS 12 Monterey WKWebView fallback
+   ═══════════════════════════════════════════════════════════
+   Tailwind v4 输出的 --color-* 用 oklch()，Safari 15 不识别会让整条声明
+   丢弃 → 变量为空 → bg-blue-500/text-gray-500 等 utility 全部失效 → 白屏。
+   现代浏览器（Safari 16.4+ / Chrome 111+ / Firefox 113+）@supports not
+   求值 false，整块跳过，零运行时开销。
+   覆盖范围：项目实际用到的色板（slate/gray/blue/violet/emerald/sky/amber）
+   及 antd token 应急色（极端情况下 ConfigProvider 注入晚于首屏渲染）。
+   themes.css 的 --kb-* 主题色板用 hex/rgba，不依赖 oklch，无需兜底。
+   ═══════════════════════════════════════════════════════════ */
+@supports not (color: oklch(0% 0 0)) {
+  :root {
+    --color-white: #ffffff;
+    --color-black: #000000;
+    /* gray —— 项目大量用 text-gray-400/500、bg-gray-50/100、border-gray-100 */
+    --color-gray-50: #f9fafb;
+    --color-gray-100: #f3f4f6;
+    --color-gray-200: #e5e7eb;
+    --color-gray-300: #d1d5db;
+    --color-gray-400: #9ca3af;
+    --color-gray-500: #6b7280;
+    --color-gray-600: #4b5563;
+    --color-gray-700: #374151;
+    --color-gray-800: #1f2937;
+    --color-gray-900: #111827;
+    /* slate —— Home/Dashboard 用 text-slate-400/500 */
+    --color-slate-300: #cbd5e1;
+    --color-slate-400: #94a3b8;
+    --color-slate-500: #64748b;
+    /* blue/sky —— 链接、强调、提示色 */
+    --color-blue-400: #60a5fa;
+    --color-blue-500: #3b82f6;
+    --color-blue-600: #2563eb;
+    --color-sky-500: #0ea5e9;
+    /* 语义色板 —— ImportPreviewModal 等 */
+    --color-violet-500: #8b5cf6;
+    --color-emerald-500: #10b981;
+    --color-amber-500: #f59e0b;
+    --color-red-500: #ef4444;
+    --color-green-500: #22c55e;
+  }
+
+  /* 项目内自定义 class 大量用 color-mix(in srgb, ...) 做半透明叠加，
+     Safari 15 不支持 color-mix → 整条 background/border 声明丢弃。
+     高频场景（编辑器代码块/视频块/工具栏）这里给静态 RGBA 兜底，
+     不影响现代浏览器（@supports not 已守门）。 */
+  .code-block-enhanced,
+  .tiptap-video-block {
+    background: rgba(0, 0, 0, 0.035);
+    border-color: rgba(0, 0, 0, 0.08);
+  }
+  .code-block-toolbar,
+  .tiptap-video-toolbar {
+    background: rgba(0, 0, 0, 0.02);
+    border-bottom-color: rgba(0, 0, 0, 0.06);
+  }
+  [data-theme-category="dark"] .code-block-enhanced,
+  [data-theme-category="dark"] .tiptap-video-block {
+    background: rgba(255, 255, 255, 0.04);
+    border-color: rgba(255, 255, 255, 0.12);
+  }
+  [data-theme-category="dark"] .code-block-toolbar,
+  [data-theme-category="dark"] .tiptap-video-toolbar {
+    background: rgba(255, 255, 255, 0.05);
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+  }
+  /* Callout 4 类（color-mix 失效时退化为单色淡底） */
+  .tiptap-callout[data-callout="info"]    { background: rgba(22, 119, 255, 0.08); }
+  .tiptap-callout[data-callout="tip"]     { background: rgba(82, 196, 26, 0.10); }
+  .tiptap-callout[data-callout="warning"] { background: rgba(250, 173, 20, 0.10); }
+  .tiptap-callout[data-callout="danger"]  { background: rgba(255, 77, 79, 0.10); }
+  /* 视频时间戳 chip */
+  .video-ts-chip {
+    background: rgba(22, 119, 255, 0.12);
+    border-color: rgba(22, 119, 255, 0.30);
+  }
+  .video-ts-chip:hover {
+    background: rgba(22, 119, 255, 0.22);
+  }
+  /* Emoji 选择器激活态 */
+  .emoji-cat-btn.active {
+    background: rgba(22, 119, 255, 0.12);
+  }
+}
+
+:root {
+  --sidebar-width: 220px;
+  --header-height: 48px;
+
+  /* 界面缩放因子：由 store/applyUiScale 在运行时覆盖（0.75 ~ 2.0），
+     默认 1.0 保持与历史像素值一致。下方所有 --kb-* token 都基于这个因子计算。
+     AntD 组件由 ConfigProvider 直接缩放（见 src/App.tsx），自定义 CSS 走这套 token。 */
+  --ui-scale: 1;
+
+  /* 字号 token —— 编辑器以外的自定义文本元素统一走这里，避免硬编码 px 不随缩放。
+     fallback `var(--ui-scale, 1)` 是双保险：万一 :root 未声明也不会让 calc 失效。 */
+  --kb-font-xs: calc(11px * var(--ui-scale, 1));
+  --kb-font-sm: calc(12px * var(--ui-scale, 1));
+  --kb-font-base: calc(13px * var(--ui-scale, 1));
+  --kb-font-lg: calc(15px * var(--ui-scale, 1));
+  --kb-font-xl: calc(18px * var(--ui-scale, 1));
+  --kb-font-title: calc(28px * var(--ui-scale, 1));
+
+  /* 间距 token —— 自定义组件 padding/margin/gap 用，AntD 内置的 padding 已由 token 覆盖 */
+  --kb-space-xs: calc(4px * var(--ui-scale, 1));
+  --kb-space-sm: calc(6px * var(--ui-scale, 1));
+  --kb-space-md: calc(8px * var(--ui-scale, 1));
+  --kb-space-lg: calc(12px * var(--ui-scale, 1));
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+/**
+ * SidePanel 出现动画。
+ * 只动 opacity + transform，不触发 reflow，避免主区跟着重新布局造成的卡顿感。
+ * 用 cubic-bezier 收尾平缓，比线性更自然。
+ */
+@keyframes sidePanelEnter {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.side-panel-enter {
+  animation: sidePanelEnter 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  /* 提前告诉浏览器走 compositor，减少首帧抖动 */
+  will-change: opacity, transform;
+}
+
+/* 自定义滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.25);
+}
+
+/* 暗色模式滚动条 — 见 themes.css */
+
+/* ─── Lucide 图标垂直居中 ──────────────────────── */
+
+.lucide {
+  vertical-align: middle;
+}
+
+/* Ant Design Segmented 图标居中 */
+.ant-segmented-item-label {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ─── 暗色模式卡片增强 — 见 themes.css ────────── */
+
+/* ─── 侧边栏 Menu 背景继承 ─────────────────────── */
+
+.ant-layout-sider .ant-menu {
+  background: transparent !important;
+}
+
+/* 暗色模式 Menu — 见 themes.css */
+
+/* ─── 侧边栏文件夹树：整行点击区 ─────────────── */
+
+.sidebar-folder-tree .ant-tree-node-content-wrapper {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  padding: 0 4px !important;
+}
+.sidebar-folder-tree .ant-tree-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* 节点紧贴左缘 + 顶部一点空隙避免选中态贴住"文件夹"小节标题 */
+.sidebar-folder-tree .ant-tree-list-holder-inner {
+  padding-left: 2px;
+  padding-top: 6px;
+}
+
+/* 每级缩进 antd 默认 24px → 压到 10px，4-5 级嵌套都能装下 */
+.sidebar-folder-tree .ant-tree-indent-unit {
+  width: 10px;
+}
+
+/* switcher（展开/收起箭头）槽位 antd 默认 24×24，过宽 + 黑实心三角太显眼。
+   缩到 16×22 + 居中。叶节点的 noop 槽位同步缩窄保持对齐。 */
+.sidebar-folder-tree .ant-tree-switcher {
+  width: 16px;
+  height: 22px;
+  line-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--ant-color-text-tertiary, #8c8c8c);
+  background: transparent !important;
+  border-radius: 4px;
+  position: relative;
+}
+.sidebar-folder-tree .ant-tree-switcher-noop {
+  width: 16px;
+}
+.sidebar-folder-tree .ant-tree-switcher .anticon {
+  font-size: 11px;
+}
+/* 清掉 antd 默认在 switcher 上的指引线伪元素（连接父子节点的那条灰线），
+   它会以 ::before/::after 的形式画出小圆/竖线，跟 lucide 自定义箭头视觉错位。 */
+.sidebar-folder-tree .ant-tree-switcher::before,
+.sidebar-folder-tree .ant-tree-switcher::after {
+  display: none !important;
+}
+.sidebar-folder-tree .ant-tree-switcher .ant-tree-switcher-leaf-line {
+  display: none !important;
+}
+/* 自定义 hover：覆盖 16×22 范围而非默认的 24×24，与 chevron 视觉对齐 */
+.sidebar-folder-tree .ant-tree-switcher:hover {
+  background: var(--ant-color-fill-tertiary, rgba(0, 0, 0, 0.04)) !important;
+}
+
+/* 行整体压紧（默认 28-32px 行高在密集嵌套时太松） */
+.sidebar-folder-tree .ant-tree-treenode {
+  padding-top: 1px;
+  padding-bottom: 1px;
+  width: 100%;
+  align-items: center;
+}
+
+/* ─── Sider 拖拽调宽期间的性能优化 ─────────────
+ * 拖动时 Sider 宽度每帧变化，默认会触发 Sider 内 Sidebar 整棵子树 reflow。
+ * 用 CSS contain 把 layout/paint 隔离在 Sider 内，will-change: width 告诉
+ * 浏览器提前为宽度变化准备合成层，避免每帧重新布局外层 Layout。
+ * cursor / user-select 由 JS 在 document.body 上加 col-resize；这里也兜底
+ * 禁掉 transition 免得将来谁给 Sider 加 transition 回归性能。 */
+.sidebar-resizing .ant-layout-sider {
+  contain: layout paint;
+  will-change: width;
+  transition: none !important;
+}
+
+/* ─── 笔记编辑器页面布局（Typora 风格） ────────── */
+
+/* editor-page 用 absolute 占满整个 Content（含 padding），需父级 position:relative。
+   两个绕不开的约束同时满足：
+   1) Content 是 overflow:auto 的滚动容器 — height:calc(100%+48px) 这种"撑出去"的
+      hack 会让 Content 永远溢出 48px、显示淡紫隐形滚动条，盖住 .editor-body 的滚动条。
+   2) light-glass 主题 body 是紫色渐变 + Content 透明 — 任何让 editor-page 不覆盖
+      Content padding 区域（含上下 24px）的写法，都会让紫色横条从 padding 透出。
+   absolute + inset:0 不参与父 layout（不触发 Content 溢出），且 containing block 是
+   父 padding-box，自然把 Content 全部 padding 都覆盖掉。 */
+.ant-layout-content {
+  position: relative;
+}
+.editor-page {
+  display: flex;
+  flex-direction: column;
+  position: absolute;
+  inset: 0;
+}
+
+.editor-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  /* 窄窗口下按钮太多放不下时，让右侧按钮组整体折到第二行，而不是把左侧
+     "更新于 X / 保存状态" 挤成竖排乱码（每个汉字单独一行）。 */
+  flex-wrap: wrap;
+  row-gap: 4px;
+  /* 左右 32px：editor-page 的 margin:-24px 把 topbar 横向扩到 Content padding 外，
+     这里需多给 24px 抵消，再留 8px 让"返回 / 删除"按钮不贴边 */
+  padding: 8px 32px;
+  border-bottom: 1px solid var(--ant-color-border, #d9d9d9);
+  background: var(--ant-color-bg-container, #fff);
+  flex-shrink: 0;
+}
+/* 左侧"返回 / 更新于 / 保存状态"组：永不被压缩，文字不折行 */
+.editor-topbar > .ant-space:first-child {
+  flex-shrink: 0;
+}
+.editor-topbar > .ant-space:first-child .ant-typography {
+  white-space: nowrap;
+}
+
+/* 编辑器顶部左侧：返回按钮 + 右边竖向堆叠的小字（更新时间/保存状态） */
+.editor-topbar__left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.editor-topbar__meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 1px;
+  line-height: 1.2;
+  /* 不折行，溢出更小（保存状态最长就 "已自动保存 1 分钟前"） */
+}
+.editor-topbar__meta .ant-typography {
+  white-space: nowrap;
+}
+
+.editor-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--ant-color-bg-container, #fff);
+  /* 大纲打开时变 2 列：主内容 + 右侧 sticky 大纲；关闭时退回单列 */
+  display: block;
+}
+.editor-body[data-outline="on"] {
+  display: grid;
+  /* 220px 是首帧兜底，真实列宽由页面内联 style 覆盖（用户可拖拽 + localStorage 记忆）。
+     与 OUTLINE_DEFAULT_WIDTH 保持同值，避免首帧闪一下窄列再跳宽。 */
+  grid-template-columns: minmax(0, 1fr) 220px;
+  align-items: start;
+}
+
+/* 大纲左置（data-outline-pos="left"）：DOM 顺序固定为 内容→分隔条→大纲，
+   用 grid order 把视觉次序换成 大纲→分隔条→内容（列模板已在内联 style 翻转）；
+   并把面板内边距与分隔线翻到右侧，使分隔线贴着正文那一侧。 */
+.editor-body[data-outline-pos="left"] > .editor-content-area {
+  order: 3;
+}
+.editor-body[data-outline-pos="left"] > .editor-outline-splitter {
+  order: 2;
+}
+.editor-body[data-outline-pos="left"] > .editor-outline-aside {
+  order: 1;
+  padding: 24px 0 24px 12px;
+}
+.editor-body[data-outline-pos="left"] .editor-outline {
+  border-left: none;
+  border-right: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  padding-left: 0;
+  padding-right: 10px;
+}
+
+
+.editor-content-area {
+  /* 底部 10vh 空白：兼顾大纲跳转的 scrollIntoView 余量与视觉紧凑感；
+     原值 40vh / 20vh 离反向链接 / 字数统计区过远，最终降到 10vh。
+     --outline-tail-space 由 EditorOutline 按需写入：仅当"最后一个标题之后的正文不足
+     一屏"时补足缺口，让尾部标题也能被滚到顶（否则 scrollTop 被 clamp，点了不动）。
+     用 calc 纯增量叠加而非 max()：组件是按"当前尾巴还差多少"算的增量，max() 会把
+     10vh 吸收进去导致每次少补 10vh，要多轮才收敛。不需要时为 0，即退回原来的 10vh。 */
+  padding: 24px 48px calc(10vh + var(--outline-tail-space, 0px));
+  width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  /* 阅读列宽：--editor-reading-width 由 store(applyEditorLayout) 写入。
+     未设置（"不限制"）时 max-width:none → 退回老的铺满行为，仍受下方大屏媒体查询约束。
+     设置后在所有宽度下居中成一列，解决"行过长像 txt"。 */
+  max-width: var(--editor-reading-width, none);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* 大纲开启时：正文列比阅读列宽（默认 820）宽出来的空白原本被 auto margin 左右平分，
+   于是正文和大纲之间白白夹了几十像素死空白（中间并无任何内容，只有 6px 拖拽条）。
+   改成"朝大纲那侧只留固定呼吸距离，剩余空白全给另一侧"，缝隙立刻收窄。
+   用户明确要求：仅在隐藏大纲时才要求两侧空白一致，开着大纲允许不对称。
+
+   width 必须显式减掉呼吸距离：基础规则的 width:100% 会吃满整轨，再叠加固定 margin
+   就溢出轨道；而改成 width:auto 更糟 —— auto margin 会禁用 grid 的 stretch 对齐，
+   正文直接塌成 shrink-to-fit（实测只剩 122px）。calc 是唯一两头都不踩的写法。 */
+.editor-body[data-outline="on"] > .editor-content-area {
+  width: calc(100% - var(--editor-outline-gutter, 24px));
+  /* 正文可越过"阅读列宽"去吃掉剩下的死白，左右各留一个呼吸距离即可：
+       max(阅读列宽, min(填满轨道, 上限))
+     - 内层 min：撑满轨道减两侧呼吸，但不超过 --editor-outline-max-width（超宽屏防"一行横扫"）
+     - 外层 max：永远不低于用户设定的阅读列宽，上限不会反向把正文压窄
+     两层保证 min ≤ max 恒成立，不会出现 clamp 参数颠倒的未定义行为。
+
+     上限取 1600 而非拍脑袋的数：项目里 1600 已是既有基准 —— setEditorReadingWidth 的
+     clamp 上界、以及下方 @media(min-width:1800px) 的默认阅读宽度都用它。4K 最大化
+     （编辑区 ≈1613）时够正文铺满（1324），左侧死白从 69 收到 24。
+
+     注意：阅读列宽是持久化偏好（tauri-plugin-store 存，启动回填），改代码里的默认值
+     对老用户无效，所以只能在版面层放宽，不能靠调默认值解决左侧空白。 */
+  max-width: max(
+    var(--editor-reading-width, 820px),
+    min(
+      calc(100% - var(--editor-outline-gutter, 24px) * 2),
+      var(--editor-outline-max-width, 1600px)
+    )
+  );
+  margin-left: auto;
+  margin-right: var(--editor-outline-gutter, 24px);
+}
+/* 大纲左置：呼吸距离跟着翻到左侧（此规则必须排在上面那条之后，两者特异性相同靠顺序取胜） */
+.editor-body[data-outline-pos="left"] > .editor-content-area {
+  margin-left: var(--editor-outline-gutter, 24px);
+  margin-right: auto;
+}
+
+/* 隐藏大纲：同样按可用宽度填充（公式与上面一致），但左右 margin 保持 auto → 两侧严格对称。
+   原先由 editor.tsx 内联算 maxWidth = 阅读列宽 + 大纲宽 + 6，是个不随窗口变化的固定值，
+   4K 最大化时正文只有 996，两侧各空 320px。改到 CSS 后宽度跟着窗口走，日记页也一并受益
+   （它此前没有那段补偿逻辑，隐藏大纲时一直被卡在阅读列宽）。 */
+.editor-body:not([data-outline="on"]) > .editor-content-area {
+  max-width: max(
+    var(--editor-reading-width, 820px),
+    min(
+      calc(100% - var(--editor-outline-gutter, 24px) * 2),
+      var(--editor-outline-max-width, 1600px)
+    )
+  );
+}
+
+/* 大屏阅读宽度上限：仅在"不限制"（未设 --editor-reading-width）时生效——
+   用 var(...) 兜底值实现：用户显式设了列宽 → 取用户值，没设 → 取 1600/1900。
+   - 1800px+: 1600 阅读宽度
+   - 2200px+: 1900 上限
+   大纲打开时，编辑器主体在 grid 1fr 槽内继续居中，大纲仍贴右侧。
+   工具栏的 negative margin -48px 仍能正确撑到 content-area 边缘。 */
+@media (min-width: 1800px) {
+  .editor-content-area {
+    max-width: var(--editor-reading-width, 1600px);
+  }
+}
+@media (min-width: 2200px) {
+  .editor-content-area {
+    max-width: var(--editor-reading-width, 1900px);
+  }
+}
+
+/* ───────────────────────────────────────────────────────────
+   编辑器版面观感（由 store applyEditorLayout 写 :root data-* 属性驱动）
+   目标：摆脱"书写手感像 txt"，靠拢 OneNote / Notion 的"在纸上写"质感。
+   全部用主题 token（--ant-color-*）+ color-mix，亮/暗主题自动适配。
+   ─────────────────────────────────────────────────────────── */
+
+/* 纸张卡片：写作列变白卡（边框 + 阴影 + 圆角），外层滚动容器垫一层浅灰底衬托。
+   只在开关开启时生效，不影响默认 / 玻璃主题等其它观感。 */
+:root[data-editor-paper="1"] .editor-body {
+  /* 用 AntD 的"页面层"背景 token 当衬底：亮色=浅灰、暗色=更深，纸张都能正确浮起。
+     token 缺失时回退到 text 4% 混色。 */
+  background: var(
+    --ant-color-bg-layout,
+    color-mix(in srgb, var(--ant-color-text, #000) 4%, var(--ant-color-bg-container, #fff))
+  );
+}
+:root[data-editor-paper="1"] .editor-content-area {
+  background: var(--ant-color-bg-container, #fff);
+  border: 1px solid color-mix(in srgb, var(--ant-color-text, #000) 7%, transparent);
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 10px 30px rgba(0, 0, 0, 0.06);
+  margin-top: 20px;
+  /* 保留基础规则的 padding-bottom:10vh：大纲 scrollIntoView 依赖这段滚动余量，
+     卡片底部略空属"一页纸"的正常观感，不另压低。 */
+}
+/* sticky 工具栏在纸张顶端时圆角跟随卡片，避免方角戳破圆角 */
+:root[data-editor-paper="1"] .editor-content-area .tiptap-toolbar {
+  border-top-left-radius: 12px;
+  border-top-right-radius: 12px;
+}
+
+/* 背景纹理：横线 / 网格。画在 .tiptap（正文层），随内容滚动。
+   行距节奏 = 字号 × 行距倍数，营造笔记本横线观感（不强制与每行文字像素级对齐）。 */
+:root[data-editor-rule="lines"] .editor-content-area .tiptap {
+  background-image: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--ant-color-text, #000) 7%, transparent) 1px,
+    transparent 1px
+  );
+  background-size: 100% calc(var(--editor-font-size, 15px) * var(--editor-line-height, 1.8));
+  background-position: 0 calc(var(--editor-font-size, 15px) * var(--editor-line-height, 1.8) - 1px);
+}
+:root[data-editor-rule="grid"] .editor-content-area .tiptap {
+  background-image:
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--ant-color-text, #000) 6%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      to right,
+      color-mix(in srgb, var(--ant-color-text, #000) 6%, transparent) 1px,
+      transparent 1px
+    );
+  background-size:
+    100% calc(var(--editor-font-size, 15px) * var(--editor-line-height, 1.8)),
+    calc(var(--editor-font-size, 15px) * var(--editor-line-height, 1.8)) 100%;
+}
+
+/* 首行缩进：仅顶层段落（不动列表 / 引用 / 表格内段落）。
+   2em ≈ 中文 2 字符宽度，符合中文写作习惯。空段落 text-indent 无副作用。 */
+:root[data-editor-indent="1"] .editor-content-area .tiptap > p {
+  text-indent: 2em;
+}
+
+/* 标题自动编号 + 层级彩虹配色：data-editor-heading-number="1" 时生效。
+
+   ⚠️ 编号文本本身**不再由 CSS counter 生成**，改成 JS 计算 + ProseMirror Decoration
+   （见 components/editor/HeadingNumber.ts、lib/headingNumber.ts）。原因：
+     · ::before 的内容进不了选区/剪贴板 → 复制、导出全丢编号
+     · JS 拿不到 → 大纲面板显示不出编号
+     · 折叠标题时 `.kb-heading-folded { display:none }` 会让被折叠的标题
+       不参与 counter-increment/reset（CSS 规范），于是下级编号不再随上级重置
+   这里只保留 CSS 该干的两件事：层级配色 + 悬挂缩进。
+
+   悬挂缩进（padding-left 与 text-indent 等值反号）：首行仍从原左边界起排（编号在最左），
+   标题换行后第二行与首行**文字**对齐，而不是顶到编号正下方。两者互相抵消，
+   折叠 chevron（margin-left:-22px）的落点与改造前完全一致。 */
+:root[data-editor-heading-number="1"] .editor-content-area .tiptap h1 {
+  color: #e8590c;
+  padding-left: 1.5em;
+  text-indent: -1.5em;
+}
+:root[data-editor-heading-number="1"] .editor-content-area .tiptap h2 {
+  color: #e67700;
+  padding-left: 2.4em;
+  text-indent: -2.4em;
+}
+:root[data-editor-heading-number="1"] .editor-content-area .tiptap h3 {
+  color: #2f9e44;
+  padding-left: 3.2em;
+  text-indent: -3.2em;
+}
+:root[data-editor-heading-number="1"] .editor-content-area .tiptap h4 {
+  color: #1971c2;
+  padding-left: 4em;
+  text-indent: -4em;
+}
+:root[data-editor-heading-number="1"] .editor-content-area .tiptap h5 {
+  color: #7048e8;
+  padding-left: 4.8em;
+  text-indent: -4.8em;
+}
+:root[data-editor-heading-number="1"] .editor-content-area .tiptap h6 {
+  color: #c2255c;
+  padding-left: 5.6em;
+  text-indent: -5.6em;
+}
+
+/* 标题被设成居中 / 右对齐时关掉悬挂缩进：居中是按内容盒算的，负 text-indent 会把
+   编号推到容器外。这类标题回退成"编号紧跟文字"，不做悬挂。
+   （TextAlign 扩展把对齐渲染成行内 style，故用属性选择器命中。） */
+:root[data-editor-heading-number="1"]
+  .editor-content-area
+  .tiptap
+  :is(h1, h2, h3, h4, h5, h6)[style*="text-align: center"],
+:root[data-editor-heading-number="1"]
+  .editor-content-area
+  .tiptap
+  :is(h1, h2, h3, h4, h5, h6)[style*="text-align: right"] {
+  padding-left: 0;
+  text-indent: 0;
+}
+
+/* 编号 widget 本体。min-width 让同级编号右侧对齐（"1.1" 与 "1.10" 后的文字不错位），
+   与上面各级 padding-left 相差 0.3em，正好留给 margin-right 做编号与文字的间距。 */
+.kb-hnum {
+  display: inline-block;
+  margin-right: 0.3em;
+  font-weight: 700;
+  opacity: 0.85;
+  user-select: none;
+  text-indent: 0; /* 不继承标题的负缩进，否则编号自身会被再拉一次 */
+}
+.kb-hnum[data-level="1"] { min-width: 1.2em; }
+.kb-hnum[data-level="2"] { min-width: 2.1em; }
+.kb-hnum[data-level="3"] { min-width: 2.9em; font-weight: 600; }
+.kb-hnum[data-level="4"] { min-width: 3.7em; font-weight: 600; }
+.kb-hnum[data-level="5"] { min-width: 4.5em; font-weight: 600; }
+.kb-hnum[data-level="6"] { min-width: 5.3em; font-weight: 600; }
+
+/* 自带手写编号的标题：不叠加自动编号，但仍占计数位 —— 后面的标题会跳号。
+   给一条很淡的左侧竖线作提示（hover 才显形，平时零干扰），配合 title 气泡说明
+   为什么跳号。不改文字颜色 / 字重，避免和层级彩虹配色打架。
+   悬挂缩进对这类标题不生效（没有编号 widget），所以竖线贴着 padding 左边缘画。 */
+:root[data-editor-heading-number="1"] .editor-content-area .tiptap .kb-hnum-manual {
+  position: relative;
+}
+:root[data-editor-heading-number="1"]
+  .editor-content-area
+  .tiptap
+  .kb-hnum-manual::after {
+  content: "";
+  position: absolute;
+  left: -0.5em;
+  top: 0.15em;
+  bottom: 0.15em;
+  width: 2px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--ant-color-text, #000) 18%, transparent);
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+}
+/* 鼠标进入正文区就显形（而不是精确悬停到标题上）——标题本身有较大的
+   padding-left/负 text-indent，逐个精确 hover 很难命中；进正文即显形更好发现，
+   透明度又足够低，不构成干扰。 */
+:root[data-editor-heading-number="1"]
+  .editor-content-area
+  .tiptap:hover
+  .kb-hnum-manual::after {
+  opacity: 1;
+}
+
+/* 大纲面板里的编号：与正文取自同一份数据（HeadingNumber 插件），
+   tabular-nums 让多位数编号右侧对齐，条目文字不参差。 */
+.editor-outline__num {
+  margin-right: 4px;
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 层级引线（data-editor-guide-line="1"）：列表每嵌套一层，该层 ul/ol 自己画一条竖线，
+   天然形成"每级一条"的引导线（Obsidian 同款），无需 JS 也无需知道嵌套深度。
+   任务列表（taskList）没有 marker、缩进规则也不同，竖线位置对不上，排除。 */
+:root[data-editor-guide-line="1"] .editor-content-area .tiptap ul:not([data-type="taskList"]),
+:root[data-editor-guide-line="1"] .editor-content-area .tiptap ol {
+  position: relative;
+}
+:root[data-editor-guide-line="1"]
+  .editor-content-area
+  .tiptap
+  ul:not([data-type="taskList"])::before,
+:root[data-editor-guide-line="1"] .editor-content-area .tiptap ol::before {
+  content: "";
+  position: absolute;
+  /* 竖线横坐标：默认按无序列表的圆点算（见下方 ol 覆盖） */
+  left: var(--kb-guide-line-x, 0.5em);
+  top: 0.25em;
+  bottom: 0.25em;
+  width: 1px;
+  background: color-mix(in srgb, var(--ant-color-text, #000) 14%, transparent);
+  pointer-events: none;
+}
+/* 有序列表的竖线要往左让 —— 但**光把竖线移到 0 是不够的**（曾这么修过一版，
+   两位数编号照样被穿，用户二次反馈）。原因：`left: 0` 是相对 ol 的 **padding box**
+   左边缘，而 marker 右对齐到 **content box** 左边缘（= padding-left 处）再向左延伸，
+   所以 marker 能用的空间**恰好等于 padding-left**。15px 字号下实测：
+     padding-left 1.5em = 22.5px
+     "1."  = 12.4px  → 余 10px，安全
+     "10." = 21.2px  → 只余 1.3px，再算上 marker 与内容间的间隙就已经压线
+     "100."= 30.0px  → 直接越过竖线 7.5px
+   即：**只要 marker 比 padding-left 宽就必然重叠**，与竖线画在 0 还是 0.5em 无关。
+
+   正解是把 marker 的可用空间开够。这里刻意**只在引线开启时**加宽，
+   没开引线的用户缩进保持原样（1.5em），零副作用。
+   2.8em = 42px 可容纳到四位数（"1000." = 38.8px），够用。
+
+   ⚠️ 不要改成 `list-style:none` + CSS counter 自绘 marker：counter 读不到
+   `<ol start="98">` 属性（attr() 在 counter-reset 里无效），会悄悄破坏
+   自定义起始编号，且 marker 不再是原生的，复制/导出/无障碍都要跟着改。 */
+:root[data-editor-guide-line="1"] .editor-content-area .tiptap ol {
+  --kb-guide-line-x: 0;
+  padding-left: 2.8em;
+}
+
+/* Mermaid 预览块：右上角"全屏"按钮，hover preview 时显形 */
+.mermaid-preview .mermaid-preview__fullscreen-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--ant-color-text, #000) 10%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--ant-color-bg-container, #fff) 92%, transparent);
+  color: var(--ant-color-text-secondary, #666);
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 0.18s, transform 0.18s, background 0.12s;
+  z-index: 2;
+}
+.mermaid-preview:hover .mermaid-preview__fullscreen-btn {
+  opacity: 1;
+  transform: translateY(0);
+}
+.mermaid-preview__fullscreen-btn:hover {
+  background: color-mix(in srgb, var(--ant-color-text, #000) 5%, var(--ant-color-bg-container, #fff));
+  color: var(--ant-color-text);
+}
+
+/* 图片 + 图注（FigureExtension 渲染的 <figure> 块） */
+.tiptap-figure {
+  margin: 12px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.tiptap-figure img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+.tiptap-figure figcaption {
+  margin-top: var(--kb-space-sm);
+  font-size: var(--kb-font-base);
+  color: var(--ant-color-text-tertiary, #8c8c8c);
+  text-align: center;
+  font-style: italic;
+  line-height: 1.5;
+  max-width: 90%;
+}
+
+/* 右侧大纲面板：sticky 在滚动容器内跟随滚动 */
+.editor-outline-aside {
+  position: sticky;
+  top: 24px;
+  align-self: start;
+  padding: 24px 12px 24px 0;
+  /* 关键：让标题列表自身可滚（避免大纲过长撑开视口） */
+  max-height: calc(100vh - 140px);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+/* 大纲点击 → scrollIntoView 兜底路径用：留出 sticky 工具栏 + 8px 呼吸的避让空间。
+   优先逻辑（EditorOutline.handleJump）会动态查询工具栏实际高度，这里只是兜底。 */
+.editor-content-area .tiptap h1,
+.editor-content-area .tiptap h2,
+.editor-content-area .tiptap h3,
+.editor-content-area .tiptap h4,
+.editor-content-area .tiptap h5,
+.editor-content-area .tiptap h6 {
+  scroll-margin-top: 88px;
+}
+
+.editor-outline {
+  font-size: var(--kb-font-base);
+  line-height: 1.55;
+  color: var(--ant-color-text-secondary, #555);
+  border-left: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  padding-left: 10px;
+}
+.editor-outline__header {
+  display: flex;
+  align-items: center;
+  gap: var(--kb-space-sm);
+  font-size: var(--kb-font-sm);
+  font-weight: 600;
+  margin-bottom: var(--kb-space-sm);
+  user-select: none;
+}
+.editor-outline__hint {
+  font-size: var(--kb-font-xs);
+  margin-top: var(--kb-space-xs);
+  line-height: 1.5;
+}
+.editor-outline__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.editor-outline__item {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 3px 6px 3px 8px;
+  margin: 2px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.editor-outline__item:hover {
+  background: color-mix(in srgb, var(--ant-color-text, #000) 5%, transparent);
+}
+
+/* 大纲隐藏小眼睛：常态隐形，hover 整个大纲面板时淡入。
+   故意做的克制 —— 大纲是阅读辅助控件，不该常驻按钮抢视觉。 */
+.editor-outline__hide-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 4px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.12s ease, color 0.12s ease;
+}
+.editor-outline-aside:hover .editor-outline__hide-btn {
+  opacity: 1;
+}
+.editor-outline__hide-btn:hover {
+  background: color-mix(in srgb, var(--ant-color-text, #000) 8%, transparent);
+  color: var(--ant-color-text) !important;
+}
+
+/* 大纲左侧拖拽分隔条：6px 宽，col-resize；只靠光标提示，不加 hover 背景色 */
+.editor-outline-splitter {
+  align-self: stretch;
+  cursor: col-resize;
+  background: transparent;
+  flex-shrink: 0;
+}
+
+.editor-title .ant-input {
+  font-size: var(--kb-font-title) !important;
+  font-weight: 700 !important;
+  padding: var(--kb-space-lg) 0 !important;
+  line-height: 1.4 !important;
+}
+
+
+.editor-meta {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  margin-bottom: 16px;
+}
+
+/* ─── Tiptap 编辑器样式 ─────────────────────────── */
+
+.tiptap-wrapper {
+  border: 1px solid var(--ant-color-border, #d9d9d9);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* 编辑器页面内的 tiptap 无边框样式 + 撑满剩余高度 */
+.editor-content-area .tiptap-wrapper {
+  border: none;
+  border-radius: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  /* 解除 .tiptap-wrapper 默认的 overflow:hidden，
+     否则会截断 sticky 参考链，导致工具栏在长文档里无法吸顶 */
+  overflow: visible;
+}
+
+.editor-content-area .tiptap-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.editor-content-area .tiptap-content .tiptap {
+  flex: 1;
+}
+
+.tiptap-toolbar {
+  display: flex;
+  align-items: center;
+  /* 全量显示所有分组：放不下就自由换行成多行，不折叠、不横向滚动。
+     ⚠️ 配合 EditorToolbar 的「按钮摊平成直接子元素」渲染：分组一旦被包成一层
+     inline-flex，下面的 flex:0 0 auto 会让它整组换行，在上一行右端撕出大空洞
+     （实测颜色/字体/字号/行高那组约 300px，能白掉近 280px）。别再把分组包回去。 */
+  flex-wrap: wrap;
+  /* 列间距：连续激活按钮（B/I/U 等）实色背景紧贴不好看，留 3px 让胶囊感分明 */
+  column-gap: 3px;
+  row-gap: 4px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  /* 与正文同色实底：去掉透明 + 磨砂，避免滚动时正文（代码块/表格）透上来撞色 */
+  background: var(--ant-color-bg-container, #fff);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+/* flex 子项（按钮分组 span / divider）不参与收缩，保持原始尺寸 */
+.tiptap-toolbar > * {
+  flex: 0 0 auto;
+}
+
+/* 编辑器页面内的 toolbar 全宽吸顶。
+   🔴 左右内边距刻意小于正文的 48（.editor-content-area 的 padding）：工具栏按钮全量显示、
+   总宽约 1780 逻辑像素，每行可用宽 ≈ 窗口宽 − 609（导航栏 + 笔记面板 + 大纲面板 + 本内边距 ×2）。
+   默认窗口 1524 下每行 ~915，两行容量 1830 刚好装下；两边各多让 36px（改回 48）就会掉到 3 行。
+   代价是按钮比正文更贴左边缘，属于用观感换一行的取舍。
+   ⚠️ 这条与 services/window_size.rs 的 DEFAULT_WIDTH 是同一笔账，加按钮前两边一起算。 */
+.editor-content-area .tiptap-toolbar {
+  margin: 0 -48px;
+  padding: 6px 12px;
+  border-left: none;
+  border-right: none;
+  border-top: none;
+}
+
+/* 工具栏按钮：圆润、无边框、轻量
+ * display:inline-flex + align-items:center 强制内容垂直居中 ——
+ * 修复带小三角的 dropdown 按钮（callout / 代码块 / 表格 / 段落 / 字号 / 行高）
+ * 因 lucide SVG 基线对齐造成的偏上/偏下问题。
+ */
+.tiptap-toolbar .ant-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  line-height: 1;
+  border: none !important;
+  border-radius: 6px;
+  background: transparent !important;
+  color: var(--ant-color-text-secondary, #666);
+  box-shadow: none !important;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+/* icon prop 模式（callout / 代码块 / 表格）的 wrapper 也对齐 */
+.tiptap-toolbar .ant-btn .ant-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+}
+
+.tiptap-toolbar .ant-btn:hover:not(:disabled) {
+  background: var(--ant-color-fill-tertiary, rgba(0, 0, 0, 0.04)) !important;
+  color: var(--ant-color-text, #222) !important;
+}
+
+.tiptap-toolbar .ant-btn:disabled {
+  opacity: 0.35;
+}
+
+/* 活动态：实色主题色背景 + 白字（亮/暗主题统一，"按下"高亮感强）
+ * 用 .tiptap-toolbar 后代选择器拉高特异性（0,3,0），稳压 antd 默认 .ant-btn-text 系列
+ * 圆角 8px：让连续激活的 B/I/U 看起来像独立胶囊而不是连成一长条
+ * background-clip: content-box + padding 2px：紫色块比按钮小一圈，hit area 和图标位置不变 */
+.tiptap-toolbar .toolbar-btn-active,
+.tiptap-toolbar .toolbar-btn-active.ant-btn {
+  color: #ffffff !important;
+  background: var(--kb-primary, var(--ant-color-primary, #1677ff)) content-box !important;
+  border-color: transparent !important;
+  border-radius: 8px !important;
+  padding: 2px !important;
+}
+
+.tiptap-toolbar .toolbar-btn-active:hover:not(:disabled),
+.tiptap-toolbar .toolbar-btn-active.ant-btn:hover:not(:disabled) {
+  color: #ffffff !important;
+  /* hover 时主题色叠 12% 黑加深，给"按下更深"的反馈 */
+  background: color-mix(in srgb, var(--kb-primary, var(--ant-color-primary, #1677ff)) 88%, #000) content-box !important;
+  border-color: transparent !important;
+}
+
+/* 暗色模式工具栏 — 见 themes.css（用 55% 透明，避免暗底上太刺眼） */
+
+/* ─── AI 写作 sticky bar ─────────────────────────────────────
+ * 紧贴 EditorToolbar 正下方的次级工具栏，选中文字时滑入、取消选中滑出。
+ *
+ * 为什么钉在顶部而不是浮在选区附近？
+ *   - 豆包 / 划词翻译这类系统级悬浮窗会贴在选区上方
+ *   - 它们是独立 OS 窗口，CSS z-index 跨窗口无效，永远盖在 WebView 之上
+ *   - 改钉编辑器顶部 → 位置静态 → 物理错开它们 → 不抢点击区域
+ *
+ * 折叠时 max-height: 0 + overflow: hidden 不占空间；展开时 max-height: 40px。
+ * 结果面板用 absolute top:100% 浮在 bar 下方，不挤压编辑器内容（不会引起跳动）。
+ */
+.kb-ai-bar {
+  position: sticky;
+  /* 优先用 JS 测量的 toolbar 真实高度（ResizeObserver 写入），
+     fallback 40px：toolbar 单行时 28px 按钮 + 12px padding */
+  top: var(--kb-toolbar-h, 40px);
+  /* 低于 EditorToolbar 的 z-index:10，确保 toolbar 始终在最上层 */
+  z-index: 9;
+  flex-shrink: 0;
+  /* 用 height（具体值）而不是 max-height（约束）：
+     具体 height 能让浏览器正确建立 sticky 的参考帧，
+     max-height 在转场期间常常让 sticky 失效（高度先被算成 0） */
+  height: 40px;
+  opacity: 1;
+  overflow: visible;
+  transition: height 200ms ease-out, opacity 180ms ease-out;
+}
+.kb-ai-bar[data-visible="false"] {
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.kb-ai-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 14px;
+  white-space: nowrap;
+  overflow-x: auto;
+  height: 40px;
+  /* 跟 EditorToolbar 同样的半透明 + 磨砂底，视觉上和 toolbar 融为一体 */
+  background: color-mix(in srgb, var(--ant-color-bg-container, #fff) 85%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+/* AI bar 出现时，去掉 EditorToolbar 底部分割线，让两者视觉无缝衔接 */
+.tiptap-wrapper:has(.kb-ai-bar[data-visible="true"]) .tiptap-toolbar {
+  border-bottom-color: transparent;
+}
+/* 隐藏 row 内横向滚动条，但保留滚动能力（按钮太多时可滑动） */
+.kb-ai-bar-row::-webkit-scrollbar {
+  height: 0;
+  background: transparent;
+}
+/* 编辑器页面内：跟 EditorToolbar 一样左右拉伸 -48px，撑满主区域。
+   内边距与工具栏保持同值（12），否则两条横条的按钮起始位置会错开一截。 */
+.editor-content-area .kb-ai-bar-row {
+  margin: 0 -48px;
+  padding: 6px 12px;
+}
+/* 结果面板：浮在 bar 下方，不挤压编辑器内容 */
+.kb-ai-bar-result-overlay {
+  position: absolute;
+  top: 100%;
+  left: 14px;
+  margin-top: 6px;
+  max-width: 480px;
+  min-width: 280px;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.1);
+  z-index: 11;
+}
+.editor-content-area .kb-ai-bar-result-overlay {
+  left: 48px;
+}
+
+/**
+ * AI 浮动工具栏 — 贴在选区右下方一整条，单行不换行。
+ * - 容器 position: fixed 由内联 style + selectionRange 坐标驱动
+ * - flex-nowrap + overflow-x: auto：按钮太多时容器内部横向滚动，永远不换行
+ * - max-width 由 inline style 控制（视口宽 - 24px 与 720 取小），防止伸出屏幕
+ */
+.kb-ai-floating-toolbar {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  white-space: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+}
+.kb-ai-floating-toolbar::-webkit-scrollbar {
+  height: 0;
+  background: transparent;
+}
+
+.tiptap-content .tiptap {
+  outline: none;
+  padding: 20px 0;
+  min-height: 400px;
+  /* 字体/字号/行距由 store 驱动写入 :root CSS 变量；未设置时用默认 */
+  font-family: var(--editor-font-family, inherit);
+  font-size: var(--editor-font-size, 15px);
+  line-height: var(--editor-line-height, 1.8);
+  /* 极轻字间距：让中文不再"挤成一坨"，更接近 OneNote 的舒展感（代码处下方复位） */
+  letter-spacing: 0.01em;
+}
+/* 等宽 / 代码场景复位字间距，避免 token 对齐被破坏 */
+.tiptap code,
+.tiptap pre,
+.tiptap kbd {
+  letter-spacing: normal;
+}
+
+/* 非编辑器页面的 tiptap 保持内边距 */
+:not(.editor-content-area) > .tiptap-wrapper .tiptap-content .tiptap {
+  padding: 16px 20px;
+}
+
+/* 标题（H1–H6，Notion 风层级 — 更明显的视觉对比）
+
+   字体：默认 inherit（= 跟随正文的 --editor-font-family），用户在设置里单独指定
+   「标题字体」后由 store 写入 --editor-heading-font-family 覆盖。变量只在用户
+   真的选了非「跟随正文」时才存在，所以升级前后默认表现完全一致。 */
+.tiptap h1,
+.tiptap h2,
+.tiptap h3,
+.tiptap h4,
+.tiptap h5,
+.tiptap h6 {
+  font-family: var(--editor-heading-font-family, inherit);
+}
+
+.tiptap h1 { font-size: 1.875em; font-weight: 700; margin: 0.7em 0 0.4em; line-height: 1.3; }
+.tiptap h2 { font-size: 1.5em;   font-weight: 700; margin: 0.6em 0 0.3em; line-height: 1.3; }
+.tiptap h3 { font-size: 1.25em;  font-weight: 600; margin: 0.5em 0 0.25em; line-height: 1.35; }
+.tiptap h4 { font-size: 1.125em; font-weight: 600; margin: 0.45em 0 0.2em; line-height: 1.4; color: var(--ant-color-text, #222); }
+.tiptap h5 { font-size: 1em;     font-weight: 600; margin: 0.4em 0 0.2em; line-height: 1.4; color: var(--ant-color-text-secondary, #555); }
+.tiptap h6 { font-size: 0.92em;  font-weight: 600; margin: 0.35em 0 0.18em; line-height: 1.4; color: var(--ant-color-text-tertiary, #888); text-transform: uppercase; letter-spacing: 0.04em; }
+
+/* 段落：0.45em 比原 0.3em 多一点呼吸，段间更清晰、不再像记事本贴行 */
+.tiptap p { margin: 0.45em 0; }
+
+/* 列表 */
+.tiptap ul { list-style: disc; padding-left: 1.5em; }
+.tiptap ol { list-style: decimal; padding-left: 1.5em; }
+.tiptap li { margin: 0.15em 0; }
+.tiptap li p { margin: 0; }
+
+/* 任务列表 */
+.tiptap ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0;
+}
+.tiptap ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.tiptap ul[data-type="taskList"] li > label {
+  margin-top: 3px;
+}
+.tiptap ul[data-type="taskList"] li > div {
+  flex: 1;
+}
+.tiptap ul[data-type="taskList"] li[data-checked="true"] > div {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+/* 引用 */
+.tiptap blockquote {
+  border-left: 3px solid var(--ant-color-primary, #1677ff);
+  padding-left: 1em;
+  margin: 0.5em 0;
+  color: var(--ant-color-text-secondary, #666);
+}
+
+/* 代码块：透明磨砂底 + 细边线，消除灰色突兀感 */
+.tiptap pre {
+  background: color-mix(in srgb, var(--ant-color-text, #000) 3.5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ant-color-text, #000) 8%, transparent);
+  border-radius: 8px;
+  padding: 14px 18px;
+  margin: 0.6em 0;
+  overflow-x: auto;
+  font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace;
+  /* 代码块字号：用户在设置里调过则读 --editor-code-font-size（绝对 px，全文统一生效）；
+     未设置时回退 0.9em（相对正文，老行为）。仿语雀「一处设置全文代码块字号」。 */
+  font-size: var(--editor-code-font-size, 0.9em);
+  /* 代码行高的**唯一真源**：行号槽（.code-block-line-gutter）要按它算每行盒高，
+     两边写死同一个数字迟早对不上。改这里即可，gutter 会跟着走。 */
+  --code-line-height: 1.6;
+  line-height: var(--code-line-height);
+}
+.tiptap pre code {
+  background: transparent;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  font-size: inherit;
+  color: inherit;
+}
+
+/* ─── T-010 代码块语法高亮（lowlight 产出 .hljs-* token） ───
+   亮色默认；深色主题在下方做覆盖。
+   颜色挑选原则：
+   - 与正文 `--ant-color-text` 保持适当对比度（>= 4.5:1 in 浅色背景）
+   - 不用纯黑 / 纯白，留呼吸感；语义上：紫=控制流、蓝=类型/函数、青=变量、绿=字符串、橙=数字、灰=注释 */
+.tiptap pre code .hljs-keyword,
+.tiptap pre code .hljs-selector-tag,
+.tiptap pre code .hljs-section,
+.ai-markdown pre code .hljs-keyword,
+.ai-markdown pre code .hljs-selector-tag,
+.ai-markdown pre code .hljs-section { color: #8250df; font-weight: 600; }
+.tiptap pre code .hljs-built_in,
+.tiptap pre code .hljs-type,
+.tiptap pre code .hljs-class .hljs-title,
+.tiptap pre code .hljs-title.class_,
+.tiptap pre code .hljs-title.function_,
+.tiptap pre code .hljs-title,
+.ai-markdown pre code .hljs-built_in,
+.ai-markdown pre code .hljs-type,
+.ai-markdown pre code .hljs-title { color: #0550ae; }
+.tiptap pre code .hljs-string,
+.tiptap pre code .hljs-regexp,
+.tiptap pre code .hljs-attr,
+.tiptap pre code .hljs-attribute,
+.ai-markdown pre code .hljs-string,
+.ai-markdown pre code .hljs-regexp,
+.ai-markdown pre code .hljs-attr,
+.ai-markdown pre code .hljs-attribute { color: #0a7d3b; }
+.tiptap pre code .hljs-number,
+.tiptap pre code .hljs-literal,
+.tiptap pre code .hljs-meta,
+.tiptap pre code .hljs-link,
+.ai-markdown pre code .hljs-number,
+.ai-markdown pre code .hljs-literal,
+.ai-markdown pre code .hljs-meta,
+.ai-markdown pre code .hljs-link { color: #b45309; }
+.tiptap pre code .hljs-variable,
+.tiptap pre code .hljs-template-variable,
+.tiptap pre code .hljs-name,
+.tiptap pre code .hljs-symbol,
+.tiptap pre code .hljs-bullet,
+.tiptap pre code .hljs-tag,
+.tiptap pre code .hljs-selector-class,
+.tiptap pre code .hljs-selector-id,
+.ai-markdown pre code .hljs-variable,
+.ai-markdown pre code .hljs-template-variable,
+.ai-markdown pre code .hljs-name,
+.ai-markdown pre code .hljs-symbol,
+.ai-markdown pre code .hljs-tag,
+.ai-markdown pre code .hljs-selector-class,
+.ai-markdown pre code .hljs-selector-id { color: #116329; }
+.tiptap pre code .hljs-comment,
+.tiptap pre code .hljs-quote,
+.tiptap pre code .hljs-doctag,
+.ai-markdown pre code .hljs-comment,
+.ai-markdown pre code .hljs-quote,
+.ai-markdown pre code .hljs-doctag { color: #6e7781; font-style: italic; }
+.tiptap pre code .hljs-emphasis,
+.ai-markdown pre code .hljs-emphasis { font-style: italic; }
+.tiptap pre code .hljs-strong,
+.ai-markdown pre code .hljs-strong { font-weight: bold; }
+.tiptap pre code .hljs-deletion,
+.ai-markdown pre code .hljs-deletion {
+  color: #82071e;
+  background-color: rgba(255, 129, 130, 0.18);
+}
+.tiptap pre code .hljs-addition,
+.ai-markdown pre code .hljs-addition {
+  color: #116329;
+  background-color: rgba(46, 160, 67, 0.18);
+}
+
+/* 深色主题下的高对比覆盖（覆盖 dark-mocha / dark-starry） */
+[data-theme="dark-mocha"] .tiptap pre code .hljs-keyword,
+[data-theme="dark-mocha"] .tiptap pre code .hljs-selector-tag,
+[data-theme="dark-mocha"] .tiptap pre code .hljs-section,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-keyword,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-selector-tag,
+[data-theme="dark-starry"] .tiptap pre code .hljs-keyword,
+[data-theme="dark-starry"] .tiptap pre code .hljs-selector-tag,
+[data-theme="dark-starry"] .tiptap pre code .hljs-section,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-keyword,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-selector-tag { color: #d2a8ff; }
+[data-theme="dark-mocha"] .tiptap pre code .hljs-built_in,
+[data-theme="dark-mocha"] .tiptap pre code .hljs-type,
+[data-theme="dark-mocha"] .tiptap pre code .hljs-title,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-built_in,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-type,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-title,
+[data-theme="dark-starry"] .tiptap pre code .hljs-built_in,
+[data-theme="dark-starry"] .tiptap pre code .hljs-type,
+[data-theme="dark-starry"] .tiptap pre code .hljs-title,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-built_in,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-type,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-title { color: #79c0ff; }
+[data-theme="dark-mocha"] .tiptap pre code .hljs-string,
+[data-theme="dark-mocha"] .tiptap pre code .hljs-regexp,
+[data-theme="dark-mocha"] .tiptap pre code .hljs-attr,
+[data-theme="dark-mocha"] .tiptap pre code .hljs-attribute,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-string,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-regexp,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-attr,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-attribute,
+[data-theme="dark-starry"] .tiptap pre code .hljs-string,
+[data-theme="dark-starry"] .tiptap pre code .hljs-regexp,
+[data-theme="dark-starry"] .tiptap pre code .hljs-attr,
+[data-theme="dark-starry"] .tiptap pre code .hljs-attribute,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-string,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-regexp,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-attr,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-attribute { color: #a5d6ff; }
+[data-theme="dark-mocha"] .tiptap pre code .hljs-number,
+[data-theme="dark-mocha"] .tiptap pre code .hljs-literal,
+[data-theme="dark-mocha"] .tiptap pre code .hljs-meta,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-number,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-literal,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-meta,
+[data-theme="dark-starry"] .tiptap pre code .hljs-number,
+[data-theme="dark-starry"] .tiptap pre code .hljs-literal,
+[data-theme="dark-starry"] .tiptap pre code .hljs-meta,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-number,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-literal,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-meta { color: #ffa657; }
+[data-theme="dark-mocha"] .tiptap pre code .hljs-variable,
+[data-theme="dark-mocha"] .tiptap pre code .hljs-template-variable,
+[data-theme="dark-mocha"] .tiptap pre code .hljs-name,
+[data-theme="dark-mocha"] .tiptap pre code .hljs-symbol,
+[data-theme="dark-mocha"] .tiptap pre code .hljs-tag,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-variable,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-template-variable,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-name,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-symbol,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-tag,
+[data-theme="dark-starry"] .tiptap pre code .hljs-variable,
+[data-theme="dark-starry"] .tiptap pre code .hljs-template-variable,
+[data-theme="dark-starry"] .tiptap pre code .hljs-name,
+[data-theme="dark-starry"] .tiptap pre code .hljs-symbol,
+[data-theme="dark-starry"] .tiptap pre code .hljs-tag,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-variable,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-template-variable,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-name,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-symbol,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-tag { color: #7ee787; }
+[data-theme="dark-mocha"] .tiptap pre code .hljs-comment,
+[data-theme="dark-mocha"] .tiptap pre code .hljs-quote,
+[data-theme="dark-mocha"] .tiptap pre code .hljs-doctag,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-comment,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-quote,
+[data-theme="dark-mocha"] .ai-markdown pre code .hljs-doctag,
+[data-theme="dark-starry"] .tiptap pre code .hljs-comment,
+[data-theme="dark-starry"] .tiptap pre code .hljs-quote,
+[data-theme="dark-starry"] .tiptap pre code .hljs-doctag,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-comment,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-quote,
+[data-theme="dark-starry"] .ai-markdown pre code .hljs-doctag { color: #8b949e; }
+
+/* 行内代码：低对比淡色，和正文融合 */
+.tiptap code {
+  background: color-mix(in srgb, var(--ant-color-text, #000) 6%, transparent);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.88em;
+  font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace;
+}
+
+/* 高亮 */
+.tiptap mark {
+  background: #fff3bf;
+  padding: 1px 2px;
+  border-radius: 2px;
+}
+/* 暗色模式 mark — 见 themes.css */
+
+/* 链接 */
+.tiptap-link {
+  color: var(--ant-color-primary, #1677ff);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* 内联 wiki 链接 [[标题]] — Ctrl/Cmd + 点击跳转
+   fallback：同 table th，避免 macOS Safari/WKWebView 老版本 color-mix 异常时
+   回落到 user-agent 深色背景把蓝字盖掉。RGBA 用 antd 默认主色 #1677ff 透明值 */
+.tiptap .wiki-link {
+  color: var(--ant-color-primary, #1677ff);
+  background: rgba(22, 119, 255, 0.08);
+  background: color-mix(in srgb, var(--ant-color-primary, #1677ff) 8%, transparent);
+  border-radius: 3px;
+  padding: 0 2px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.tiptap .wiki-link:hover {
+  background: rgba(22, 119, 255, 0.18);
+  background: color-mix(in srgb, var(--ant-color-primary, #1677ff) 18%, transparent);
+  text-decoration: underline;
+}
+
+/* 带 ID 锚点 `[[标题|123]]` 中的 `|123` 段：视觉隐藏，保留字符
+   字符仍在文档内（光标按字符顺序穿越、复制粘贴一并带走），
+   只是渲染时占 0 宽，用户看到的是 `[[标题]]`。
+   ID 是稳定锚点，目标笔记改名/重名都不影响反链解析。 */
+.tiptap .wiki-link-id-anchor {
+  font-size: 0;
+  /* font-size:0 而不是 display:none：后者会让 ProseMirror 计算光标位置时
+     完全跳过这段，导致选区边界异常；font-size:0 保持文档结构同时 0 宽。 */
+}
+
+/* 笔记 Tab 栏的滚动容器 — 隐藏 webkit 滚动条 */
+.tabbar-scroller::-webkit-scrollbar {
+  display: none;
+}
+
+/* Tippy.js wiki-suggestion 主题 — 去掉默认黑色背景/边距 */
+.tippy-box[data-theme~="wiki-suggestion"] {
+  background: transparent;
+  color: inherit;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
+}
+.tippy-box[data-theme~="wiki-suggestion"] > .tippy-content {
+  background: transparent;
+  padding: 0;
+}
+.tippy-box[data-theme~="wiki-suggestion"] > .tippy-arrow {
+  display: none;
+}
+
+/* Tippy.js slash-command 主题 — 与 wiki-suggestion 同款透明壳 */
+.tippy-box[data-theme~="slash-command"] {
+  background: transparent;
+  color: inherit;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
+}
+.tippy-box[data-theme~="slash-command"] > .tippy-content {
+  background: transparent;
+  padding: 0;
+}
+.tippy-box[data-theme~="slash-command"] > .tippy-arrow {
+  display: none;
+}
+
+/* 分割线 */
+.tiptap hr {
+  border: none;
+  border-top: 1px solid var(--ant-color-border, #d9d9d9);
+  margin: 1em 0;
+}
+
+/* 图片（支持拖拽调整尺寸） */
+.tiptap img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  margin: 0.5em 0;
+  /* 提示「双击可放大查看大图」（含表格 / figure 内的图）*/
+  cursor: zoom-in;
+}
+/* ── tiptap-extension-resize-image 的图片在窄列/窄内容区里横向溢出的修复 ──
+   实测 DOM（图片在分栏的某一列里）：
+     <div style="display:flex" contenteditable="false" draggable="true">          NodeView 外壳
+       └ <div style="position: relative; ...; width: 1200px;">                    ← 目标宽度写这层（容器）
+           ├ <img width="1200" style="width: 1200px;">                            ← 主图，自带 inline width
+           ├ <div style="position: absolute; ...; width: 100px; ...">…</div>      ← 选中态的对齐工具条（别动它）
+           └ <div style="position: absolute; width: 9px; ...">×4</div>            ← 选中态的 4 个缩放手柄（别动它）
+
+   关键点：
+   1) 用 [contenteditable="false"][draggable="true"] 作锚点（ProseMirror NodeView 通用签名），
+      不依赖 .tiptap 这种可能对不上的根类名。
+   2) 只钳「容器」—— 它的特征是 position: relative + 显式 width；用 [style*="position: relative"]
+      把那两个 position: absolute 的浮层（工具条/手柄）排除掉，免得误伤。
+   3) 容器：max-width:100%（永不超出父级）+ min-width:0（它是 display:flex 的 flex item，
+      默认 min-width:auto≈图片原宽 1200px 会顶住不收缩，必须改 0）。
+   4) 主图：width:100%，永远只填满"已被钳过"的容器，不再自报 1200px。小图同理（容器 300px → 图 300px）。 */
+[contenteditable="false"][draggable="true"] div[style*="position: relative"][style*="width"],
+.tiptap div[style*="position: relative"][style*="width"],
+.ProseMirror div[style*="position: relative"][style*="width"] {
+  max-width: 100% !important;
+  min-width: 0 !important;
+  box-sizing: border-box;
+}
+[contenteditable="false"][draggable="true"] div[style*="position: relative"][style*="width"] > img,
+.tiptap div[style*="position: relative"][style*="width"] > img,
+.ProseMirror div[style*="position: relative"][style*="width"] > img {
+  display: block;
+  width: 100% !important;
+  height: auto !important;
+}
+/* ── 未选中态图片溢出修复 ──
+   tiptap-extension-resize-image 的容器 `position: relative` 只在图片「选中」时
+   才加（和虚线选中框一起 setAttribute）；未选中态容器只剩 `width: 1200px`，
+   上面那条依赖 `position: relative` 的规则就不命中 → 保存重进（图片默认未选中）
+   宽图把编辑框撑破。这里改用 `:has(> img)` 精确锁定「直接包着 img 的容器 div」，
+   不依赖选中态，也排除选中态那两个 position:absolute 的浮层（工具条/手柄不含 img）。 */
+[contenteditable="false"][draggable="true"] div[style*="width"]:has(> img),
+.tiptap div[style*="width"]:has(> img),
+.ProseMirror div[style*="width"]:has(> img) {
+  max-width: 100% !important;
+  min-width: 0 !important;
+  box-sizing: border-box;
+}
+[contenteditable="false"][draggable="true"] div[style*="width"]:has(> img) > img,
+.tiptap div[style*="width"]:has(> img) > img,
+.ProseMirror div[style*="width"]:has(> img) > img {
+  display: block;
+  width: 100% !important;
+  height: auto !important;
+}
+/* 普通 img / figure：不超出即可 */
+.tiptap img, .ProseMirror img, .tiptap-content img,
+.tiptap figure, .ProseMirror figure, .tiptap-content figure {
+  max-width: 100% !important;
+  height: auto;
+}
+
+/* ── 自绘图片 NodeView（ImageResizeNodeView）─────────────────────
+   选中态的 4 角缩放手柄 / 对齐·1:1 工具条由 React 组件内联绝对定位渲染，
+   这里只管基础排版：外层 block 控制上下间距 + 对齐(flex 的 justifyContent)，
+   frame 收紧到图片宽度且永不溢出窄列/内容区。 */
+.kb-image-block {
+  margin: 0.5em 0;
+}
+.kb-image-frame {
+  max-width: 100%;
+}
+.tiptap .kb-image-frame > img.kb-image-img,
+.ProseMirror .kb-image-frame > img.kb-image-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  /* 间距交给 .kb-image-block 统一控制，覆盖 .tiptap img 的默认上下 margin */
+  margin: 0;
+  border-radius: 6px;
+  /* 双击放大（ImageLightbox）；拖拽缩放手柄有各自的方向 cursor */
+  cursor: zoom-in;
+}
+
+/* 图片 resize 暗色 — 见 themes.css */
+
+/* 表格 */
+/* 表格外层包裹：prosemirror-tables 自动生成 div.tableWrapper，并在 TableView 里
+   按列宽给 <table> 写内联 width / min-width = 各列宽之和（见 @tiptap/extension-table
+   TableView.ts）。一旦这个总宽超过编辑区（尤其大纲打开、1fr 变窄时），wrapper 默认
+   overflow:visible 会让表格直接撑破布局、溢出盖到大纲上（首列还被 table-layout:fixed
+   挤成单字竖排）。这里把溢出收进 wrapper 内部横向滚动，表格永远不超出正文列宽。 */
+.tiptap .tableWrapper {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.tiptap table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.5em 0;
+  table-layout: fixed;
+  overflow: hidden;
+}
+
+.tiptap table td,
+.tiptap table th {
+  border: 1px solid var(--ant-color-border, #d9d9d9);
+  padding: 6px 10px;
+  vertical-align: top;
+  position: relative;
+  min-width: 60px;
+}
+
+.tiptap table th {
+  /* 与 .code-block-toolbar 同源（亮色 2% 文本叠加），统一表头/代码块工具栏视觉调性。
+     fallback：macOS Safari/WKWebView 早期版本对 color-mix 透明叠加渲染异常时会
+     回落到 user-agent 默认深色 ButtonFace 把字盖掉，先给一个明确的浅灰 RGBA */
+  background: rgba(0, 0, 0, 0.02);
+  background: color-mix(in srgb, var(--ant-color-text, #000) 2%, transparent);
+  color: var(--ant-color-text, #000);
+  font-weight: 600;
+}
+.tiptap table td {
+  color: var(--ant-color-text, #000);
+}
+
+/* 暗色模式表格 — 见 themes.css */
+
+/* 表格选中单元格高亮 */
+.tiptap table td.selectedCell,
+.tiptap table th.selectedCell {
+  background: var(--ant-color-primary-bg, #e6f4ff);
+}
+
+/* 暗色模式选中 — 见 themes.css */
+
+/* 表格列拖拽调整宽度手柄 */
+.tiptap .column-resize-handle {
+  position: absolute;
+  right: -2px;
+  top: 0;
+  bottom: -2px;
+  width: 4px;
+  background-color: var(--ant-color-primary, #1677ff);
+  pointer-events: none;
+}
+
+.tiptap.resize-cursor {
+  cursor: col-resize;
+}
+
+/* 占位符 */
+.tiptap p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: var(--ant-color-text-quaternary, #bbb);
+  pointer-events: none;
+  height: 0;
+}
+
+/* ─── AI 消息 Markdown 样式 ──────────────────────── */
+
+.ai-markdown h1 { font-size: 1.3em; font-weight: 700; margin: 0.5em 0 0.3em; }
+.ai-markdown h2 { font-size: 1.15em; font-weight: 600; margin: 0.4em 0 0.2em; }
+.ai-markdown h3 { font-size: 1.05em; font-weight: 600; margin: 0.3em 0 0.15em; }
+.ai-markdown h4 { font-size: 1em; font-weight: 600; margin: 0.2em 0 0.1em; }
+.ai-markdown p { margin: 0.3em 0; }
+.ai-markdown ul { list-style: disc; padding-left: 1.5em; margin: 0.3em 0; }
+.ai-markdown ol { list-style: decimal; padding-left: 1.5em; margin: 0.3em 0; }
+.ai-markdown li { margin: 0.1em 0; }
+.ai-markdown li > p { margin: 0; }
+.ai-markdown blockquote {
+  border-left: 3px solid var(--ant-color-primary, #1677ff);
+  padding-left: 0.8em;
+  margin: 0.4em 0;
+  color: var(--ant-color-text-secondary, #666);
+}
+.ai-markdown pre {
+  background: color-mix(in srgb, var(--ant-color-text, #000) 3.5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ant-color-text, #000) 8%, transparent);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 0.4em 0;
+  overflow-x: auto;
+  font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace;
+  font-size: 0.85em;
+  line-height: 1.55;
+}
+.ai-markdown pre code {
+  background: transparent;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  font-size: inherit;
+}
+.ai-markdown code {
+  background: color-mix(in srgb, var(--ant-color-text, #000) 6%, transparent);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.85em;
+  font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace;
+}
+/* 模型常用 `---` 分段：上下留同样的空白，线色跟卡片内其他分隔线一致（更浅），
+   否则一根深色线紧贴下一段，读起来像断开的两张卡片 */
+.ai-markdown hr {
+  border: none;
+  border-top: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  margin: 14px 0;
+}
+.ai-markdown strong { font-weight: 600; }
+.ai-markdown a { color: var(--ant-color-primary, #1677ff); }
+.ai-markdown > *:first-child { margin-top: 0; }
+.ai-markdown > *:last-child { margin-bottom: 0; }
+
+/* ─── 笔记列表视图：去掉 Table 行分割线 ───────────────
+   把表格行做成"无横线纯白卡片"，和分页条共享连续白底。
+   只在 .notes-list-flat 下生效，避免影响其他页面的 Table。 */
+.notes-list-flat .ant-table-tbody > tr > td {
+  border-bottom: 0 !important;
+}
+
+/* 右键菜单指向的行：高亮底色画在 <tr> 上（见 pages/notes onRow），
+   这里把 td 底色清空让它透出来 —— antd 会给 hover / 勾选行的 td 单独上底色，
+   不清掉就会把 tr 的主色淡底整片盖住，等于没有右键反馈。 */
+.notes-list-flat .ant-table-tbody > tr.is-ctx-active > td {
+  background: transparent !important;
+}
+
+/* 设置页：左侧锚点导航 + 右侧内容区 两栏布局。
+   左侧 sticky 跟随主区滚动；右侧内容区铺到接近主区域宽度，
+   两侧仅留 12px 内边距避免贴边。整体不再硬限 max-width，
+   随主内容区自适应（外层 AppLayout 已限 viewport）。 */
+.anchor-page-layout {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 0 12px;
+}
+.anchor-page-nav {
+  width: 150px;
+  flex-shrink: 0;
+  position: sticky;
+  top: 16px;
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  font-size: 13px;
+}
+.anchor-page-nav ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.anchor-page-nav li {
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.65));
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.anchor-page-nav li:hover {
+  background: var(--ant-color-fill-tertiary, rgba(0, 0, 0, 0.04));
+}
+.anchor-page-nav li[data-active] {
+  background: var(--ant-color-fill-secondary, rgba(0, 0, 0, 0.06));
+  color: var(--ant-color-primary, #1677ff);
+  font-weight: 500;
+}
+.anchor-page-content {
+  flex: 1;
+  min-width: 0;
+  /* 不再硬限 672：让内容跟着主区域宽度自然铺开，超宽屏走外层 1280 兜底 */
+}
+/* 视口窄时降级：导航折叠成水平横滚条 */
+@media (max-width: 720px) {
+  .anchor-page-layout {
+    flex-direction: column;
+  }
+  .anchor-page-nav {
+    width: 100%;
+    position: static;
+    max-height: none;
+  }
+  .anchor-page-nav ul {
+    display: flex;
+    overflow-x: auto;
+    gap: 4px;
+  }
+  .anchor-page-content {
+    max-width: none;
+  }
+}
+
+/* AI 模型添加/编辑弹窗：表单字段较多，紧凑化所有 Form.Item 占用空间。
+   目标是在主流屏幕（13" 1366×768 及以上）下不出现滚动条。
+   配合 Modal 的 maxHeight 兜底，超大字段量时仍可滚动。 */
+
+/* 1. extra 提示文字缩小（默认 14px → 11.5px），多条堆叠节省纵向空间 */
+.ai-model-modal .ant-form-item-extra {
+  font-size: 11.5px;
+  line-height: 1.4;
+  margin-top: 1px;
+}
+
+/* 2. 字段间距继续压缩（默认 margin-bottom 24px → 6px） */
+.ai-model-modal .ant-form-item {
+  margin-bottom: 6px;
+}
+
+/* 3. label 区域瘦身（默认 padding 0 0 8px → 0 0 2px；字号 14 → 12.5） */
+.ai-model-modal .ant-form-item-label {
+  padding-bottom: 2px;
+}
+.ai-model-modal .ant-form-item-label > label {
+  font-size: 12.5px;
+  height: auto;
+}
+
+/* 4. 输入控件高度压到 28px（默认 32px）—— input/select/picker 全覆盖 */
+.ai-model-modal .ant-input,
+.ai-model-modal .ant-input-number,
+.ai-model-modal .ant-input-number-input,
+.ai-model-modal .ant-input-affix-wrapper,
+.ai-model-modal .ant-select-single .ant-select-selector,
+.ai-model-modal .ant-select-single.ant-select-show-arrow .ant-select-selection-item,
+.ai-model-modal .ant-select-single.ant-select-show-arrow .ant-select-selection-search-input,
+.ai-model-modal .ant-picker {
+  height: 28px;
+  min-height: 28px;
+}
+.ai-model-modal .ant-select-single .ant-select-selector .ant-select-selection-search-input,
+.ai-model-modal .ant-select-single .ant-select-selector .ant-select-selection-item {
+  line-height: 26px;
+}
+.ai-model-modal .ant-input,
+.ai-model-modal .ant-select-single .ant-select-selection-item {
+  font-size: 13px;
+}
+
+/* 修复：Input.Password / 任何 affix-wrapper 内嵌的 <input> 不应被外层 28px
+   高度规则压住，否则会把 wrapper 的 padding 吃掉，placeholder 被挤到底部。
+   这里明确把内层 input 还原为 auto 高度 + 0 内边距，由外层 wrapper 的
+   padding（默认 4px 11px）控制视觉居中。 */
+.ai-model-modal .ant-input-affix-wrapper > input.ant-input {
+  height: auto;
+  min-height: 0;
+  padding: 0;
+  line-height: 1.5715;
+}
+
+/* 5. Modal body 上下内边距继续压（默认 24px → 12px） */
+.ai-model-modal .ant-modal-body {
+  padding-top: 12px;
+  padding-bottom: 4px;
+}
+
+/* 设置页跳转高亮：从其他页面带锚点跳过来时短暂闪烁定位目标 */
+.settings-target-flash {
+  border-radius: 8px;
+  animation: settings-target-flash 1.6s ease-out;
+}
+@keyframes settings-target-flash {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(22, 119, 255, 0);
+  }
+  25% {
+    box-shadow: 0 0 0 4px rgba(22, 119, 255, 0.35);
+  }
+}
+
+/* ─── 代码块增强（CodeBlockEnhanced）：toolbar + 行号 + 自动换行 ─── */
+
+/* NodeView 外壳：把 toolbar 和 pre 收进同一个圆角容器 */
+.code-block-enhanced {
+  margin: 0.6em 0;
+  border: 1px solid color-mix(in srgb, var(--ant-color-text, #000) 8%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ant-color-text, #000) 3.5%, transparent);
+  overflow: hidden;
+}
+
+/* 顶部 toolbar */
+.code-block-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ant-color-text, #000) 6%, transparent);
+  background: color-mix(in srgb, var(--ant-color-text, #000) 2%, transparent);
+  user-select: none;
+}
+
+.code-block-toolbar-spacer {
+  flex: 1;
+}
+
+.code-block-title {
+  max-width: 240px;
+  font-size: 12px !important;
+  font-weight: 500;
+  color: var(--ant-color-text) !important;
+}
+
+.code-block-lang {
+  min-width: 110px;
+  font-size: 12px !important;
+}
+.code-block-lang .ant-select-selection-item {
+  font-size: 12px !important;
+  color: var(--ant-color-text-secondary) !important;
+}
+
+.code-block-wrap-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ant-color-text-secondary);
+}
+.code-block-wrap-label {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 单代码块字号控件：与自动换行控件同源风格 */
+.code-block-fontsize-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ant-color-text-secondary);
+}
+.code-block-fontsize {
+  min-width: 56px;
+  font-size: 12px !important;
+}
+.code-block-fontsize .ant-select-selection-item {
+  font-size: 12px !important;
+  color: var(--ant-color-text-secondary) !important;
+}
+
+/* 代码块内的 pre：去掉外层圆角/边框（外壳已有），保留内边距 */
+.code-block-enhanced pre {
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  margin: 0 !important;
+  padding: 12px 16px !important;
+  position: relative; /* 给 gutter absolute 锚点 */
+}
+
+/* 启用行号时：给 code 左侧留出行号宽度 + 安全间距，避免与 gutter 重叠
+   注意：JSX 里 showLineNumbers=true 时不设 data-line-numbers 属性（默认就是开），
+   只有显式关闭时才设 data-line-numbers="false"。所以选择器用 :not(="false") 兜底。 */
+.code-block-enhanced:not([data-line-numbers="false"]) pre {
+  /* gutter 占 3.5em（含内 padding 和 border），再给 code 12px 起始空隙 */
+  padding-left: calc(3.5em + 12px) !important;
+}
+
+.code-block-line-gutter {
+  position: absolute;
+  left: 0;
+  top: 12px;
+  bottom: 12px;
+  width: 3.5em;
+  box-sizing: border-box; /* width 含 padding/border，避免外溢挤到代码 */
+  padding-right: 10px;
+  text-align: right;
+  color: var(--ant-color-text-tertiary, #999);
+  font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace;
+  /* 🔴 行号字号相对**代码字号**的缩放。gutter 是 <pre> 的子元素（见
+     CodeBlockEnhanced.tsx 的 CodeLineGutter 挂载位置），而 pre 自己已经是
+     0.9em 了，所以这里的 em 是叠在它上面**再乘一次**，不是相对正文。
+     行盒高度必须把这个系数除回去，否则每行差 10%、几十行后行号与代码整整
+     错开好几行（实拍：28 行代码对上了 31 个行号）。 */
+  --code-gutter-scale: 0.9;
+  font-size: calc(1em * var(--code-gutter-scale));
+  line-height: calc(var(--code-line-height, 1.6) / var(--code-gutter-scale));
+  user-select: none;
+  pointer-events: none;
+  border-right: 1px solid color-mix(in srgb, var(--ant-color-text, #000) 6%, transparent);
+  white-space: pre;
+}
+.code-block-line-gutter > div {
+  /* 每行盒高必须等于代码行盒高 = 代码字号 × --code-line-height。
+     此处 1em = gutter 自身字号 = 代码字号 × --code-gutter-scale，
+     所以要除以 scale 才抵消掉上面那次缩放。 */
+  height: calc(1em * var(--code-line-height, 1.6) / var(--code-gutter-scale));
+}
+
+/* 自动换行模式 */
+.code-block-enhanced[data-wrap="true"] pre {
+  overflow-x: hidden;
+}
+.code-block-enhanced[data-wrap="true"] pre code {
+  white-space: pre-wrap !important;
+  word-break: break-word;
+}
+
+/* 暗色主题：toolbar 背景 + 边框颜色微调（现有 .tiptap pre 颜色已在暗色模式下兼容） */
+[data-theme-category="dark"] .code-block-enhanced {
+  border-color: color-mix(in srgb, var(--ant-color-text, #fff) 12%, transparent);
+}
+[data-theme-category="dark"] .code-block-toolbar {
+  background: color-mix(in srgb, var(--ant-color-text, #fff) 5%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--ant-color-text, #fff) 8%, transparent);
+}
+
+/* ─── 查找替换：命中高亮 ───────────────────────────────────────── */
+.kb-search-match {
+  background-color: color-mix(in srgb, #faad14 35%, transparent);
+  border-radius: 2px;
+}
+.kb-search-active {
+  background-color: color-mix(in srgb, #fa8c16 65%, transparent);
+  outline: 1px solid #fa8c16;
+  outline-offset: 0;
+}
+[data-theme-category="dark"] .kb-search-match {
+  background-color: color-mix(in srgb, #faad14 30%, transparent);
+}
+[data-theme-category="dark"] .kb-search-active {
+  background-color: color-mix(in srgb, #fa8c16 55%, transparent);
+}
+/* 多词查找：不同 term 不同色（与浮条 chip 共享变量） */
+:root {
+  --kb-search-chip-bg-0: color-mix(in srgb, #faad14 22%, transparent);
+  --kb-search-chip-bg-1: color-mix(in srgb, #52c41a 22%, transparent);
+  --kb-search-chip-bg-2: color-mix(in srgb, #1677ff 22%, transparent);
+  --kb-search-chip-bg-3: color-mix(in srgb, #eb2f96 22%, transparent);
+  --kb-search-chip-bg-4: color-mix(in srgb, #722ed1 22%, transparent);
+  --kb-search-chip-bg-5: color-mix(in srgb, #13c2c2 22%, transparent);
+}
+.kb-search-match-0 { background-color: color-mix(in srgb, #faad14 35%, transparent); }
+.kb-search-match-1 { background-color: color-mix(in srgb, #52c41a 35%, transparent); }
+.kb-search-match-2 { background-color: color-mix(in srgb, #1677ff 32%, transparent); }
+.kb-search-match-3 { background-color: color-mix(in srgb, #eb2f96 32%, transparent); }
+.kb-search-match-4 { background-color: color-mix(in srgb, #722ed1 32%, transparent); }
+.kb-search-match-5 { background-color: color-mix(in srgb, #13c2c2 35%, transparent); }
+[data-theme-category="dark"] .kb-search-match-0 { background-color: color-mix(in srgb, #faad14 30%, transparent); }
+[data-theme-category="dark"] .kb-search-match-1 { background-color: color-mix(in srgb, #52c41a 28%, transparent); }
+[data-theme-category="dark"] .kb-search-match-2 { background-color: color-mix(in srgb, #1677ff 28%, transparent); }
+[data-theme-category="dark"] .kb-search-match-3 { background-color: color-mix(in srgb, #eb2f96 28%, transparent); }
+[data-theme-category="dark"] .kb-search-match-4 { background-color: color-mix(in srgb, #722ed1 28%, transparent); }
+[data-theme-category="dark"] .kb-search-match-5 { background-color: color-mix(in srgb, #13c2c2 30%, transparent); }
+/* active 永远叠加在 match-N 之后，保留橙色高亮 + outline */
+.kb-search-match.kb-search-active,
+.kb-search-match-0.kb-search-active,
+.kb-search-match-1.kb-search-active,
+.kb-search-match-2.kb-search-active,
+.kb-search-match-3.kb-search-active,
+.kb-search-match-4.kb-search-active,
+.kb-search-match-5.kb-search-active {
+  background-color: color-mix(in srgb, #fa8c16 65%, transparent);
+  outline: 1px solid #fa8c16;
+  outline-offset: 0;
+}
+[data-theme-category="dark"] .kb-search-match.kb-search-active,
+[data-theme-category="dark"] .kb-search-match-0.kb-search-active,
+[data-theme-category="dark"] .kb-search-match-1.kb-search-active,
+[data-theme-category="dark"] .kb-search-match-2.kb-search-active,
+[data-theme-category="dark"] .kb-search-match-3.kb-search-active,
+[data-theme-category="dark"] .kb-search-match-4.kb-search-active,
+[data-theme-category="dark"] .kb-search-match-5.kb-search-active {
+  background-color: color-mix(in srgb, #fa8c16 55%, transparent);
+}
+
+/* ─── 视频块（带 toolbar + 高亮动画） ───────────────────────────── */
+.tiptap-video-block {
+  border: 1px solid color-mix(in srgb, var(--ant-color-text, #000) 8%, transparent);
+  border-radius: 6px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--ant-color-text, #000) 2%, transparent);
+  margin: 12px 0;
+  transition: box-shadow 0.3s, border-color 0.3s;
+}
+.tiptap-video-block[data-highlight="true"] {
+  border-color: var(--ant-color-primary, #1677ff);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ant-color-primary, #1677ff) 25%, transparent);
+  animation: video-highlight-pulse 1.2s ease-out;
+}
+@keyframes video-highlight-pulse {
+  0%   { box-shadow: 0 0 0 0   color-mix(in srgb, var(--ant-color-primary, #1677ff) 50%, transparent); }
+  60%  { box-shadow: 0 0 0 8px color-mix(in srgb, var(--ant-color-primary, #1677ff) 0%, transparent); }
+  100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--ant-color-primary, #1677ff) 25%, transparent); }
+}
+.tiptap-video-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ant-color-text, #000) 6%, transparent);
+  background: color-mix(in srgb, var(--ant-color-text, #000) 3%, transparent);
+  font-size: 12px;
+  user-select: none;
+}
+.tiptap-video-label {
+  font-weight: 500;
+  color: var(--ant-color-text-secondary, #666);
+}
+.tiptap-video-label-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.tiptap-video-toolbar-spacer { flex: 1; }
+.tiptap-video {
+  display: block;
+  width: 100%;
+  max-height: 480px;
+  background: #000;
+}
+
+/* ─── 嵌入网络视频（B站 / YouTube / 腾讯 / 优酷） ─────────────────── */
+.tiptap-embed-video-block {
+  border: 1px solid color-mix(in srgb, var(--ant-color-text, #000) 8%, transparent);
+  border-radius: 6px;
+  overflow: hidden;
+  margin: 0.6em 0;
+}
+.tiptap-embed-video-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: color-mix(in srgb, var(--ant-color-text, #000) 3%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--ant-color-text, #000) 6%, transparent);
+  font-size: 12px;
+  user-select: none;
+}
+.tiptap-embed-video-label {
+  font-weight: 500;
+  color: var(--ant-color-text-secondary, #666);
+  white-space: nowrap;
+}
+.tiptap-embed-video-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: transparent;
+  border: none;
+  color: var(--ant-color-primary, #1677ff);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+  max-width: 60%;
+  overflow: hidden;
+}
+.tiptap-embed-video-link:hover { text-decoration: underline; }
+.tiptap-embed-video-link-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tiptap-embed-video-toolbar-spacer { flex: 1; }
+/* 16:9 响应式容器，iframe 撑满 */
+.tiptap-embed-video-frame {
+  position: relative;
+  width: 100%;
+  padding-top: 56.25%;
+  background: #000;
+}
+.tiptap-embed-video-frame > iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+.tiptap-embed-video-error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 13px;
+  gap: 4px;
+}
+[data-theme-category="dark"] .tiptap-embed-video-block {
+  border-color: color-mix(in srgb, var(--ant-color-text, #fff) 12%, transparent);
+}
+[data-theme-category="dark"] .tiptap-embed-video-toolbar {
+  background: color-mix(in srgb, var(--ant-color-text, #fff) 5%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--ant-color-text, #fff) 8%, transparent);
+}
+
+/* ─── 视频时间戳 chip ──────────────────────────────────────────── */
+.video-ts-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  margin: 0 2px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--ant-color-primary, #1677ff) 12%, transparent);
+  color: var(--ant-color-primary, #1677ff);
+  font-size: 0.92em;
+  cursor: pointer;
+  user-select: none;
+  border: 1px solid color-mix(in srgb, var(--ant-color-primary, #1677ff) 30%, transparent);
+  white-space: nowrap;
+  transition: background 0.15s, transform 0.05s;
+}
+.video-ts-chip:hover {
+  background: color-mix(in srgb, var(--ant-color-primary, #1677ff) 22%, transparent);
+}
+.video-ts-chip:active { transform: translateY(1px); }
+.video-ts-chip.ProseMirror-selectednode {
+  outline: 2px solid var(--ant-color-primary, #1677ff);
+  outline-offset: 1px;
+}
+.video-ts-chip-broken {
+  background: color-mix(in srgb, var(--ant-color-text, #000) 8%, transparent);
+  color: var(--ant-color-text-quaternary, #999);
+  border-color: color-mix(in srgb, var(--ant-color-text, #000) 15%, transparent);
+  text-decoration: line-through;
+}
+/* A→B 区间时间戳：用紫色区分于单点（蓝色），数字等宽避免跳动 */
+.video-ts-chip-range {
+  background: color-mix(in srgb, #722ed1 12%, transparent);
+  color: #722ed1;
+  border-color: color-mix(in srgb, #722ed1 32%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+.video-ts-chip-range:hover {
+  background: color-mix(in srgb, #722ed1 22%, transparent);
+}
+[data-theme-category="dark"] .video-ts-chip-range {
+  color: #b37feb;
+}
+/* 加区间「两次打点」进行中：起点按钮 + 取消 X 成组 */
+.tiptap-video-range-pending {
+  display: inline-flex;
+  align-items: center;
+}
+
+[data-theme-category="dark"] .tiptap-video-block {
+  border-color: color-mix(in srgb, var(--ant-color-text, #fff) 12%, transparent);
+}
+[data-theme-category="dark"] .tiptap-video-toolbar {
+  background: color-mix(in srgb, var(--ant-color-text, #fff) 5%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--ant-color-text, #fff) 8%, transparent);
+}
+
+/* ─── Callout / 提示框（4 种类型） ─────────────────────────── */
+.tiptap-callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  margin: 12px 0;
+  border-left: 4px solid var(--callout-accent, #1677ff);
+  border-radius: 6px;
+  background: var(--callout-bg, color-mix(in srgb, #1677ff 6%, transparent));
+}
+.tiptap-callout[data-callout="info"]    { --callout-accent: #1677ff; --callout-bg: color-mix(in srgb, #1677ff 8%, transparent); }
+.tiptap-callout[data-callout="tip"]     { --callout-accent: #52c41a; --callout-bg: color-mix(in srgb, #52c41a 10%, transparent); }
+.tiptap-callout[data-callout="warning"] { --callout-accent: #faad14; --callout-bg: color-mix(in srgb, #faad14 10%, transparent); }
+.tiptap-callout[data-callout="danger"]  { --callout-accent: #ff4d4f; --callout-bg: color-mix(in srgb, #ff4d4f 10%, transparent); }
+
+.tiptap-callout-icon {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin-top: 2px;
+  font-size: 18px;
+  cursor: pointer;
+  user-select: none;
+  line-height: 1;
+}
+.tiptap-callout-icon:hover {
+  filter: brightness(1.1);
+}
+
+.tiptap-callout-body {
+  flex: 1;
+  min-width: 0;
+}
+.tiptap-callout-body > p:first-child { margin-top: 0; }
+.tiptap-callout-body > p:last-child { margin-bottom: 0; }
+
+/* ─── Toggle 折叠块 ─────────────────────────────────────── */
+.tiptap-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 8px 0;
+}
+.tiptap-toggle-arrow {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--ant-color-text-secondary, #666);
+  margin-top: 2px;
+  user-select: none;
+}
+.tiptap-toggle-arrow:hover {
+  background: var(--ant-color-fill-tertiary, rgba(0, 0, 0, 0.04));
+}
+.tiptap-toggle-children {
+  flex: 1;
+  min-width: 0;
+}
+.tiptap-toggle summary {
+  display: block;
+  font-weight: 500;
+  cursor: text;
+  padding: 2px 0;
+  outline: none;
+  list-style: none;
+}
+.tiptap-toggle summary::-webkit-details-marker {
+  display: none;
+}
+.tiptap-toggle [data-toggle-content] {
+  padding-left: 4px;
+  margin-top: 4px;
+  border-left: 2px solid var(--ant-color-border-secondary, #f0f0f0);
+  padding-left: 12px;
+}
+.tiptap-toggle[data-open="false"] [data-toggle-content] {
+  display: none;
+}
+
+/* ─── Columns 分栏布局（2–5 列并排） ───────────────────────────────
+   编辑器里 columns 节点的真实 DOM 层级（@tiptap/react NodeView 会多包好几层）：
+     <div class="react-renderer node-columns">              ← columns 节点的 PM dom
+       <div class="tiptap-columns-block">                   ← NodeViewWrapper（外框+顶栏）
+         <div class="tiptap-columns-bar">…</div>
+         <div class="tiptap-columns-row" data-node-view-content style="white-space:pre-wrap">  ← NodeViewContent 外壳
+           <div data-node-view-content-react style="white-space:inherit">                       ← ★ 真正的"行容器"，flex 打这里
+             <div class="react-renderer node-column">…</div>    ← ★ 每一列的 PM dom = flex item（不是 .tiptap-column！）
+               <div class="tiptap-column">…</div>               ←   NodeViewWrapper（边框/×按钮）
+   ↑ 之前 bug：把 flex:1 / min-width:0 打在 .tiptap-column 上，但它不是 flex item（外面还套着 .react-renderer.node-column），
+     列没法按比例收缩 → 列里塞个宽图片就把整列撑爆 → 整个分栏块横向溢出。
+   ↓ 正解：行容器([data-node-view-content-react]) 设 flex；它的【直接子元素】（= .react-renderer.node-column）才是 flex item，
+     给它们 flex:1 1 0% + min-width:0，列宽就纯按"行宽/列数"算，跟内容无关，宽图片也撑不破。 */
+.tiptap-columns,
+.tiptap-columns-row > [data-node-view-content-react],
+.tiptap-columns-row > div {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  gap: 16px;
+  align-items: flex-start;
+  width: 100%;
+}
+/* 行容器的直接子元素（每一列的 PM dom = .react-renderer.node-column）才是真正的 flex item */
+.tiptap-columns-row > [data-node-view-content-react] > *,
+.tiptap-columns-row > div > *,
+.tiptap-columns > .tiptap-column {
+  flex: 1 1 0% !important;
+  min-width: 0 !important;
+  box-sizing: border-box;
+}
+.tiptap-columns { margin: 12px 0; }
+.tiptap-columns-block {
+  margin: 14px 0;
+  border: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  border-radius: 8px;
+  padding: 4px 8px 8px;
+  box-sizing: border-box;
+}
+.tiptap-columns-row { white-space: normal; }
+
+/* 顶部常驻操作栏：左标识 + 右按钮（加列 / 删除整块） */
+.tiptap-columns-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 22px;
+  margin-bottom: 4px;
+  user-select: none;
+}
+.tiptap-columns-bar-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--ant-color-text-quaternary, #bbb);
+}
+.tiptap-columns-bar-actions {
+  display: inline-flex;
+  gap: 2px;
+}
+.tiptap-columns-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  color: var(--ant-color-text-tertiary, #999);
+}
+.tiptap-columns-btn:hover {
+  background: var(--ant-color-fill-tertiary, rgba(0, 0, 0, 0.06));
+  color: var(--ant-color-text-secondary, #666);
+}
+.tiptap-columns-btn-danger:hover {
+  background: color-mix(in srgb, #ff4d4f 14%, transparent);
+  color: #ff4d4f;
+}
+[data-theme-category="dark"] .tiptap-columns-block {
+  border-color: color-mix(in srgb, var(--ant-color-text, #fff) 12%, transparent);
+}
+
+.tiptap-column {
+  /* flex-basis:0 + grow:1 = 各列等宽，不被内容撑开；min-width:0 允许收缩到内容以下 */
+  flex: 1 1 0%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  position: relative;
+  /* 编辑时给一条淡边框，空列也能看见落点；导出 HTML 自带 class 但无此样式无妨 */
+  border: 1px dashed var(--ant-color-border-secondary, #f0f0f0);
+  border-radius: 6px;
+  padding: 6px 10px;
+  transition: border-color 0.15s;
+}
+
+/* 每列右上角「×」删除此列：平时隐藏，hover 该列时淡入 */
+.tiptap-column-del {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 4px;
+  background: var(--ant-color-bg-elevated, #fff);
+  box-shadow: 0 0 0 1px var(--ant-color-border-secondary, #f0f0f0);
+  color: var(--ant-color-text-tertiary, #999);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s;
+  z-index: 1;
+}
+.tiptap-column:hover > .tiptap-column-del {
+  opacity: 1;
+  pointer-events: auto;
+}
+.tiptap-column-del:hover {
+  background: color-mix(in srgb, #ff4d4f 14%, transparent);
+  color: #ff4d4f;
+}
+.tiptap-column:hover,
+.tiptap-column:focus-within {
+  border-color: var(--ant-color-border, #d9d9d9);
+}
+/* 列内首尾块去掉外边距（NodeView 下真正的段落在 [data-node-view-content-react] 里） */
+.tiptap-column > :first-child,
+.tiptap-column [data-node-view-content-react] > :first-child { margin-top: 0; }
+.tiptap-column > :last-child,
+.tiptap-column [data-node-view-content-react] > :last-child { margin-bottom: 0; }
+/* 列内图片自适应列宽 */
+.tiptap-column img,
+.tiptap-column .tiptap-image-resize,
+.tiptap-column figure { max-width: 100%; }
+
+/* ─── 更新徽章：下载中图标上下轻柔浮动（替代生硬的旋转） ───────── */
+@keyframes kb-update-float {
+  0%, 100% { transform: translateY(-1.5px); }
+  50%      { transform: translateY(1.5px); }
+}
+.kb-update-float {
+  animation: kb-update-float 1.1s ease-in-out infinite;
+  /* will-change 提示合成层，浮动更顺滑 */
+  will-change: transform;
+}
+
+[data-theme-category="dark"] .tiptap-column {
+  border-color: color-mix(in srgb, var(--ant-color-text, #fff) 12%, transparent);
+}
+[data-theme-category="dark"] .tiptap-column:hover,
+[data-theme-category="dark"] .tiptap-column:focus-within {
+  border-color: color-mix(in srgb, var(--ant-color-text, #fff) 24%, transparent);
+}
+
+
+/* ─── Emoji 选择器分类条 + 网格 ──────────────────── */
+.emoji-cat-bar {
+  display: flex;
+  gap: 2px;
+  padding: 4px 2px;
+  border-bottom: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  margin-bottom: 4px;
+}
+.emoji-cat-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--ant-color-text-secondary, #666);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  line-height: 1;
+  white-space: nowrap;
+  transition: background 0.1s, color 0.1s;
+}
+.emoji-cat-btn:hover {
+  background: var(--ant-color-fill-tertiary, rgba(0, 0, 0, 0.05));
+}
+.emoji-cat-btn.active {
+  background: color-mix(in srgb, var(--ant-color-primary, #1677ff) 12%, transparent);
+  color: var(--ant-color-primary, #1677ff);
+  font-weight: 500;
+}
+
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 2px;
+  padding: 2px;
+}
+.emoji-grid-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 38px;
+  font-size: 22px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  line-height: 1;
+  transition: background 0.1s;
+}
+.emoji-grid-item:hover {
+  background: var(--ant-color-fill-tertiary, rgba(0, 0, 0, 0.06));
+}
+.emoji-grid-item:active {
+  background: var(--ant-color-fill-secondary, rgba(0, 0, 0, 0.1));
+}
+
+/* AI 写作菜单"伪选区"高亮：编辑器失焦后浏览器原生 ::selection 不再显示，
+   靠这条装饰让用户在 Popover / 流式 / 结果区显示期间仍能看到选段范围 */
+.kb-fake-selection {
+  background-color: rgba(59, 130, 246, 0.28);
+  border-radius: 1px;
+}
+[data-theme-category="dark"] .kb-fake-selection {
+  background-color: rgba(96, 165, 250, 0.32);
+}
+
+/* HeadingFold：H1–H3 左侧的折叠 chevron，hover 行出现，已折叠常亮 + 旋转 */
+.kb-heading-fold-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 4px;
+  margin-left: -22px; /* 视觉上挂在标题左侧外，不挤占文字位置 */
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--ant-color-text-quaternary, #bfbfbf);
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s, transform 0.12s;
+  border-radius: 4px;
+  vertical-align: middle;
+  user-select: none;
+}
+.tiptap-wrapper h1:hover > .kb-heading-fold-chevron,
+.tiptap-wrapper h2:hover > .kb-heading-fold-chevron,
+.tiptap-wrapper h3:hover > .kb-heading-fold-chevron {
+  opacity: 0.55;
+}
+.kb-heading-fold-chevron:hover {
+  opacity: 1 !important;
+  color: var(--ant-color-text-secondary, #595959);
+  background: var(--ant-color-fill-tertiary, rgba(0, 0, 0, 0.06));
+}
+.kb-heading-fold-chevron.is-folded {
+  opacity: 1;
+  color: var(--ant-color-primary, #1677ff);
+  transform: rotate(-90deg); /* 折叠态箭头朝右，与 Notion/Obsidian 一致 */
+}
+
+/* 折叠态的"管辖范围"内容：直接 display:none 避免占位与误点 */
+.kb-heading-folded {
+  display: none !important;
+}
+
+/* 文件夹下拉树里的"设为默认"图钉按钮：行 hover 才出现，已默认常亮主题色 */
+.kb-folder-pin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: 4px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--ant-color-text-quaternary, #bfbfbf);
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s, background-color 0.12s;
+  border-radius: 4px;
+}
+.kb-folder-tree-row:hover .kb-folder-pin {
+  opacity: 1;
+}
+.kb-folder-pin:hover {
+  background: var(--ant-color-fill-tertiary, rgba(0, 0, 0, 0.06));
+  color: var(--ant-color-text-secondary, #595959);
+}
+.kb-folder-pin.active {
+  opacity: 1;
+  color: var(--ant-color-primary, #1677ff);
+}
+
+/* ─── 批注 mark ──────────────────────────────────────
+ * 视觉：浅黄底高亮 + 下划虚线，鼠标悬停显示原生 tooltip（来自 title 属性）。
+ * 与 highlight mark（纯背景色）区分：批注必须有下划虚线，让用户一眼看出"这是有注释的，不是普通高亮"。
+ */
+.kb-annotation {
+  background: rgba(255, 234, 0, 0.35);
+  border-bottom: 1px dashed rgba(195, 157, 0, 0.85);
+  cursor: help;
+  padding: 0 1px;
+  border-radius: 2px;
+}
+[data-theme="dark"] .kb-annotation,
+.dark .kb-annotation {
+  background: rgba(255, 234, 0, 0.18);
+  border-bottom-color: rgba(253, 230, 75, 0.7);
+}
+
+/* ── CodeMirror MergeView（DiffMergeModal：对比/合并弹窗）──
+ * MergeView 自带 baseTheme 强制内部 .cm-editor / .cm-scroller 为 height:auto + overflow-y:visible，
+ * 即两侧编辑器长到内容全高、自己不滚；整块由外层 host div（DiffMergeModal 里设了 overflow:auto）统一滚。
+ * 所以这里不要再给 .cm-mergeView* 设 height，会跟它打架、把内容裁掉。 */
+.cm-mergeView {
+  width: 100%;
+}
+
+/* ── 侧边栏 / 锚点导航 / 卡片标题：禁止鼠标拖选文本（纯导航 & 标题区，拖选只会显得乱） ── */
+.activity-bar,
+.anchor-page-nav,
+.ant-card-head-title {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* ── AI 回复里的 GFM 表格 / 删除线 / 任务列表 样式
+ *    （react-markdown + remark-gfm 渲染后没默认样式，要在 .ai-markdown 容器下补） ── */
+.ai-markdown table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 13px;
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+.ai-markdown thead {
+  background: var(--ant-color-fill-quaternary, rgba(0, 0, 0, 0.04));
+}
+.ai-markdown th,
+.ai-markdown td {
+  border: 1px solid var(--ant-color-border-secondary, #e5e7eb);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.ai-markdown th {
+  font-weight: 600;
+}
+.ai-markdown del {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+.ai-markdown ul li input[type="checkbox"] {
+  margin-right: 6px;
+}
+
+/* ─── 标签面板：行 hover / 选中 / 右键 态统一为同形状圆角 ──
+ * 原本两层各画各的背景——antd Tree wrapper 默认 hover 画"直角灰矩形"，
+ * 自定义 div 画"圆角浅紫矩形"，形状/颜色对不上看着别扭。
+ * 解决方案：把 antd 默认 hover 背景去掉，统一交给 .tag-row 画，
+ * hover / active / 右键三态都用同样的圆角 + 同色系深浅变化。 */
+.tags-tree-panel .ant-tree-node-content-wrapper {
+  padding: 0 !important;
+}
+.tags-tree-panel .ant-tree-node-content-wrapper:hover {
+  background: transparent !important;
+}
+.tags-tree-panel .ant-tree-node-content-wrapper.ant-tree-node-selected {
+  background: transparent !important;
+}
+
+.tags-tree-panel .tag-row {
+  border-radius: 4px;
+  color: var(--ant-color-text, #000);
+  outline: 1px solid transparent;
+  outline-offset: -1px;
+  transition: background 0.15s ease, outline 0.1s ease, color 0.15s ease;
+}
+.tags-tree-panel .tag-row:hover {
+  background: var(--ant-control-item-bg-hover, rgba(0, 0, 0, 0.04));
+}
+.tags-tree-panel .tag-row.is-active {
+  background: var(--ant-color-primary-bg, rgba(22, 119, 255, 0.1));
+  color: var(--ant-color-primary, #1677ff);
+  font-weight: 500;
+}
+.tags-tree-panel .tag-row.is-active:hover {
+  /* hover 在 active 上叠加更深一点，区分"已选 vs 已选悬停" */
+  background: var(--ant-color-primary-bg-hover, var(--ant-color-primary-bg, rgba(22, 119, 255, 0.16)));
+}
+.tags-tree-panel .tag-row.is-ctx-active {
+  outline-color: var(--ant-color-primary, #1677ff);
+}
+
+/* ── 定时推送弹窗的 Markdown 排版（react-markdown 输出，补回 Tailwind preflight 清掉的间距/项目符号） ── */
+.kb-md > :first-child {
+  margin-top: 0;
+}
+.kb-md > :last-child {
+  margin-bottom: 0;
+}
+.kb-md p {
+  margin: 0 0 0.6em;
+}
+.kb-md strong {
+  font-weight: 600;
+}
+.kb-md em {
+  font-style: italic;
+}
+.kb-md h1,
+.kb-md h2,
+.kb-md h3,
+.kb-md h4 {
+  margin: 0.8em 0 0.4em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.kb-md h1 { font-size: 1.3em; }
+.kb-md h2 { font-size: 1.18em; }
+.kb-md h3 { font-size: 1.08em; }
+.kb-md ul,
+.kb-md ol {
+  margin: 0 0 0.6em;
+  padding-left: 1.4em;
+}
+.kb-md ul { list-style: disc; }
+.kb-md ol { list-style: decimal; }
+.kb-md li { margin: 0.2em 0; }
+.kb-md a {
+  color: var(--ant-color-primary, #1677ff);
+  text-decoration: underline;
+}
+.kb-md code {
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  background: var(--ant-color-fill-secondary, rgba(0, 0, 0, 0.06));
+  font-size: 0.92em;
+}
+.kb-md pre {
+  margin: 0 0 0.6em;
+  padding: 0.7em 0.9em;
+  border-radius: 8px;
+  overflow: auto;
+  background: var(--ant-color-fill-secondary, rgba(0, 0, 0, 0.06));
+}
+.kb-md pre code {
+  padding: 0;
+  background: transparent;
+}
+.kb-md blockquote {
+  margin: 0 0 0.6em;
+  padding-left: 0.8em;
+  border-left: 3px solid var(--ant-color-border, #e5e7eb);
+  color: var(--ant-color-text-secondary, #666);
+}
+.kb-md table {
+  border-collapse: collapse;
+  margin: 0 0 0.6em;
+}
+.kb-md th,
+.kb-md td {
+  border: 1px solid var(--ant-color-border, #e5e7eb);
+  padding: 0.3em 0.6em;
+}
+
+/* ── 移动端底部动作面板（ActionSheet）动画 ── */
+@keyframes kbFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes kbSheetUp {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+/* ── 编辑器底部「链接状态条」──────────────────────────────
+   常驻一条横条显示 链出 / 链入 / 断链 计数，点击展开明细。
+   放在编辑主体**外面**（不随正文滚动）：笔记编辑器的内容区有 10vh 的
+   padding-bottom，挂在滚动内容里的话会被推到离视觉底部很远的地方。
+
+   代价是它拿不到 grid 的正文轨道宽 —— 挂在外面，100% 是整页宽，而卡片的
+   100% 是轨道宽（整页 - 大纲 - 6px 分隔条）。原来直接全宽平铺，于是左沿比
+   卡片靠左、右沿一路压到大纲底下，白底又与卡片同色，看着像卡片漏出来一圈。
+
+   解法分两层：
+     · .kb-link-status-dock —— 全宽，用 padding 把大纲列那段吃掉，
+       让里层的包含块宽度 == 卡片的 grid 轨道宽
+     · .kb-link-status-bar  —— 逐字复刻 .editor-content-area 的宽度公式，
+       于是左右沿与卡片严格对齐（随大纲宽 / 阅读列宽 / 窗口宽自适应）
+   ⚠️ 改 .editor-content-area 的宽度公式时，这里必须同步改，否则会错开。 */
+.kb-link-status-dock {
+  flex-shrink: 0;
+  /* 大纲在右：右侧留出大纲列；关闭大纲时变量为 0，等于不留 */
+  padding-right: var(--kb-status-outline-space, 0px);
+
+  /* 🔴 背景必须与 .editor-body 逐条同步 —— dock 在 .editor-body **外面**，
+     两者各自成一层。主题（如 light-glass 的 rgba(255,255,255,.5)）是叠在页面
+     渐变上的半透明层，dock 不叠就会露出原始渐变，于是状态条上沿横着断出一条
+     色带（实测左侧 rgb(239,240,252) → rgb(228,229,253)，肉眼可见）。
+     themes.css 里 4 个主题的 .editor-body 背景规则也都带上了本类名。 */
+  background: var(--ant-color-bg-container, #fff);
+}
+.kb-link-status-dock[data-outline-pos="left"] {
+  padding-right: 0;
+  padding-left: var(--kb-status-outline-space, 0px);
+}
+
+.kb-link-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  padding: 4px 16px;
+  border-top: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  font-size: 12px;
+  color: var(--ant-color-text-tertiary, #999);
+
+  /* ↓ 与 .editor-content-area 同宽同位（公式见上方警示） */
+  width: 100%;
+  max-width: max(
+    var(--editor-reading-width, 820px),
+    min(
+      calc(100% - var(--editor-outline-gutter, 24px) * 2),
+      var(--editor-outline-max-width, 1600px)
+    )
+  );
+  margin-left: auto;
+  margin-right: auto;
+}
+/* 大纲开启：卡片朝大纲那侧只留固定呼吸距离，剩余空白全给另一侧（非对称）*/
+.kb-link-status-dock[data-outline-pos] > .kb-link-status-bar {
+  width: calc(100% - var(--editor-outline-gutter, 24px));
+  margin-left: auto;
+  margin-right: var(--editor-outline-gutter, 24px);
+}
+.kb-link-status-dock[data-outline-pos="left"] > .kb-link-status-bar {
+  margin-left: var(--editor-outline-gutter, 24px);
+  margin-right: auto;
+}
+
+/* 纸张模式：状态条穿上卡片的皮，成为纸的底栏（白底 + 侧/底边框 + 下圆角）。
+   卡片在滚动容器内、状态条在容器外，但卡片被 .editor-body 的 overflow 裁在
+   同一条底边上，两者紧邻 —— 补上边框和圆角后视觉上就是一张纸。 */
+:root[data-editor-paper="1"] .kb-link-status-bar {
+  background: var(--ant-color-bg-container, #fff);
+  border: 1px solid color-mix(in srgb, var(--ant-color-text, #000) 7%, transparent);
+  /* 顶边保留浅分隔线（与卡片同色边框太重，压不住"纸内分栏"的感觉） */
+  border-top-color: var(--ant-color-border-secondary, #f0f0f0);
+  border-radius: 0 0 12px 12px;
+  /* 与卡片**逐层一致**。曾漏掉 0 1px 3px 那层，接缝处露出亮边（Δ=8）。
+     也试过去掉 0 10px 30px 的 y 偏移想让侧翼投影更快满值，实测更差：接缝 Δ 6→7，
+     且无偏移的投影会向上溢到卡片底部把它糊灰（252→249）—— 状态条在 DOM 里靠后，
+     投影会盖住卡片。照抄是最优解。
+     残留：紧贴卡片左右沿约 10px 内仍有 Δ≈6（约 2%）的投影浓度差 —— 卡片是高元素、
+     到接缝处投影已满强度，状态条只有 30px 高追不上。两个独立元素各自投影的固有
+     差异，除非合并成一个元素，否则消不掉。 */
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 10px 30px rgba(0, 0, 0, 0.06);
+}
+/* 纸的下沿改成方角：底栏接在它下面，两个圆角叠在一起会掐出个腰 */
+:root[data-editor-paper="1"] .editor-content-area {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+/* 纸张模式下 .editor-body 换成"页面层"衬底，dock 跟着换，色带才不会重新出现 */
+:root[data-editor-paper="1"] .kb-link-status-dock {
+  background: var(
+    --ant-color-bg-layout,
+    color-mix(in srgb, var(--ant-color-text, #000) 4%, var(--ant-color-bg-container, #fff))
+  );
+}
+
+.kb-link-status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.kb-link-status-item:hover {
+  background: var(--ant-color-fill-tertiary, rgba(0, 0, 0, 0.06));
+  color: var(--ant-color-text, #333);
+}
+
+/* 断链用警示色：它代表"有东西坏了"，不该和普通计数一个观感 */
+.kb-link-status-broken {
+  color: var(--ant-color-warning, #faad14);
+}
+.kb-link-status-broken:hover {
+  color: var(--ant-color-warning, #faad14);
+  background: var(--ant-color-warning-bg, rgba(250, 173, 20, 0.1));
+}
+
+/* 明细浮层里的一行 */
+.kb-link-status-row {
+  padding: 5px 8px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kb-link-status-row:hover {
+  background: var(--ant-color-fill-tertiary, rgba(0, 0, 0, 0.06));
+}
+
+/* 笔记列表表头的列宽拖动把手：8px 热区贴在表头右缘内侧，平时只露一条淡线，悬停变主色。
+   必须放在表头内部、不能往外溢出：带 ellipsis 的列表头是 overflow:hidden，溢出的部分会被裁掉点不到 */
+.kb-col-resize-handle {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  z-index: 2;
+}
+.kb-col-resize-handle::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 25%;
+  bottom: 25%;
+  width: 1px;
+  background: var(--ant-color-border-secondary, rgba(0, 0, 0, 0.12));
+}
+.kb-col-resize-handle:hover::after {
+  width: 3px;
+  border-radius: 2px;
+  background: var(--ant-color-primary, #1677ff);
+}
+
+/* ─── 侧栏目录树层级连线（设置里开启，加在 .sidebar-folder-tree 上的 .kb-tree-guides） ───
+   rc-tree 在每个节点前放 N 个 .ant-tree-indent-unit（N = 节点深度），第 j 个对应第 j 层祖先。
+   缩进单位被压到 10px、箭头槽位 16px（箭头中心在 8px），所以竖线画在每个 unit 的 left:8px，
+   正好落在对应祖先的箭头正下方，贯穿该祖先的所有子孙行。 */
+.sidebar-folder-tree.kb-tree-guides .ant-tree-indent {
+  align-self: stretch;
+  display: flex;
+}
+.sidebar-folder-tree.kb-tree-guides .ant-tree-indent-unit {
+  position: relative;
+}
+.sidebar-folder-tree.kb-tree-guides .ant-tree-indent-unit::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  left: 8px;
+  border-left: 1px dotted var(--ant-color-text-quaternary, rgba(128, 128, 128, 0.55));
+}
+/* 到本节点的短横线：从父层竖线连到箭头左缘（笔记叶子没有箭头，连得长一点）。
+   只给有缩进的节点画（根级没有父线可连）；用 :not(:empty) 而不是 :has()，老 WebView 也认。
+   上面 .sidebar-folder-tree 的规则把 switcher 的 ::before 整个藏了，这里用更高的特异性请出来并重置。 */
+.sidebar-folder-tree.kb-tree-guides .ant-tree-indent:not(:empty) ~ .ant-tree-switcher::before {
+  display: block !important;
+  content: "";
+  position: absolute;
+  inset: auto;
+  left: -2px;
+  top: 50%;
+  bottom: auto;
+  width: 6px;
+  height: 0;
+  margin: 0;
+  transform: none;
+  background: none;
+  border: 0;
+  border-top: 1px dotted var(--ant-color-text-quaternary, rgba(128, 128, 128, 0.55));
+}
+.sidebar-folder-tree.kb-tree-guides .ant-tree-indent:not(:empty) ~ .ant-tree-switcher-noop::before {
+  width: 14px;
+}

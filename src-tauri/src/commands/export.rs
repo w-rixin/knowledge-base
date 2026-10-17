@@ -1,0 +1,268 @@
+use std::path::PathBuf;
+
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use tauri::AppHandle;
+
+use crate::models::{ExportResult, SingleExportResult};
+use crate::services;
+use crate::services::export_html::{ExportFonts, HtmlExportResult, ResolvedAssetUrl};
+use crate::services::export_merge::{MergeExportResult, MergeFormat};
+// Word 导出仅桌面端（docx_rs 移动端编译失败）
+#[cfg(desktop)]
+use crate::services::export_word::WordExportResult;
+use crate::state::AppState;
+
+/// 批量导出笔记为 Markdown 文件
+///
+/// 入参 `output_dir` 是用户选择的父目录；服务会在其下自动创建一层
+/// `知识库导出_YYYYMMDD_HHmmss/` 作为实际导出根（结果中的 `root_dir`）。
+///
+/// `recursive`：指定 `folder_id` 时是否连子文件夹一起导出。缺省 `false` 保持老调用方行为不变。
+#[tauri::command]
+pub fn export_notes(
+    state: tauri::State<'_, AppState>,
+    app: AppHandle,
+    output_dir: String,
+    folder_id: Option<i64>,
+    recursive: Option<bool>,
+) -> Result<ExportResult, String> {
+    services::export::ExportService::export_notes(
+        &state.db,
+        &state.data_dir,
+        &output_dir,
+        folder_id,
+        recursive.unwrap_or(false),
+        &app,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// 合并导出：把一个文件夹（或全库）合成**单个**带章节结构的文件
+///
+/// 与 `export_notes` 的区别：那个导出"一堆散 .md"（备份/迁移），这个导出
+/// "一份带目录和章节层级的文档"（交付：发同事 / 打印 / 存档）。
+///
+/// - `target_path`: 用户在 save dialog 选定的最终文件路径（含扩展名）
+/// - `format`: `markdown` / `html` / `word`（word 仅桌面端）
+/// - `root_title`: 文档顶层标题，一般传文件夹名
+#[tauri::command]
+pub fn export_folder_merged(
+    state: tauri::State<'_, AppState>,
+    folder_id: Option<i64>,
+    recursive: Option<bool>,
+    root_title: String,
+    target_path: String,
+    format: MergeFormat,
+    fonts: Option<ExportFonts>,
+) -> Result<MergeExportResult, String> {
+    services::export_merge::MergeExportService::export_merged(
+        &state.db,
+        &state.data_dir,
+        folder_id,
+        recursive.unwrap_or(true),
+        &root_title,
+        &PathBuf::from(&target_path),
+        format,
+        fonts.as_ref(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// 导出单篇笔记为 Markdown 文件
+///
+/// 入参 `parent_dir` 是用户选择的父目录。
+/// - `single_file = false`/缺省：在其下建一层 `{标题}/` 子目录，放 `{标题}.md` + `assets/`。
+/// - `single_file = true`：不建目录，图片/附件 base64 内嵌，直接在 `parent_dir` 下写单个 `{标题}.md`。
+///
+/// - `id`: 笔记 ID
+/// - `parent_dir`: 用户选择的父目录路径
+/// - `single_file`: 是否导出为单文件（不生成文件夹），缺省 false 保持原行为
+#[tauri::command]
+pub fn export_single_note(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    parent_dir: String,
+    single_file: Option<bool>,
+) -> Result<SingleExportResult, String> {
+    services::export::ExportService::export_single_note(
+        &state.db,
+        &state.data_dir,
+        id,
+        &parent_dir,
+        single_file.unwrap_or(false),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// T-020 导出单条笔记为 Word（.docx）
+///
+/// `target_path` 是用户在 save dialog 选定的最终 .docx 路径
+/// 仅桌面端：docx_rs 移动端编译失败
+#[cfg(desktop)]
+#[tauri::command]
+pub fn export_single_note_to_word(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    target_path: String,
+    // 前端编辑器实时 DOM（已内嵌资源）。给了就用它，能带上只活在渲染层的
+    // 标题自动编号；不给则退回 markdown 重渲（批量导出等场景）。
+    body_html: Option<String>,
+    // 用户设置里的正文 / 标题字体；只在转换器路径生效（见 service 注释）
+    fonts: Option<ExportFonts>,
+) -> Result<WordExportResult, String> {
+    let note = state
+        .db
+        .get_note(id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("笔记 {} 不存在", id))?;
+
+    let assets_root = state.data_dir.clone();
+    let target = PathBuf::from(&target_path);
+
+    services::export_word::WordExportService::export_single_best_effort(
+        &note.title,
+        &note.content,
+        &target,
+        &assets_root,
+        body_html.as_deref(),
+        fonts.as_ref(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// T-020 导出单条笔记为 HTML（单文件，图片内嵌 base64，可独立分享）
+#[tauri::command]
+pub fn export_single_note_to_html(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    target_path: String,
+    // 同 export_single_note_to_word：前端 DOM 优先，缺省退回 markdown 重渲
+    body_html: Option<String>,
+    // 用户设置里的正文 / 标题字体；缺省则用模板自带的通用中文字体链
+    fonts: Option<ExportFonts>,
+) -> Result<HtmlExportResult, String> {
+    let note = state
+        .db
+        .get_note(id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("笔记 {} 不存在", id))?;
+
+    let assets_root = state.data_dir.clone();
+    let target = PathBuf::from(&target_path);
+
+    match body_html.as_deref() {
+        Some(body) => services::export_html::HtmlExportService::export_single_from_html(
+            &note.title,
+            body,
+            &target,
+            &assets_root,
+            fonts.as_ref(),
+        ),
+        None => services::export_html::HtmlExportService::export_single(
+            &note.title,
+            &note.content,
+            &target,
+            &assets_root,
+            fonts.as_ref(),
+        ),
+    }
+    .map_err(|e| e.to_string())
+}
+
+/// 将前端生成的 base64 PNG 数据写入用户在 save dialog 选定的路径。
+///
+/// 用于"导出表格为图片"等"前端渲染→落盘到任意路径"的场景：前端
+/// 用 html-to-image / canvas 生成 data URL，把 base64 部分通过本命令
+/// 写到用户挑的位置，避开 WebView 默认下载行为不可控的问题。
+///
+/// `base64_data` 可以是带前缀的 data URL（`data:image/png;base64,...`），
+/// 也可以是纯 base64 字符串。
+#[tauri::command]
+pub fn export_png_to_file(target_path: String, base64_data: String) -> Result<(), String> {
+    let b64 = base64_data
+        .split_once("base64,")
+        .map(|(_, b)| b)
+        .unwrap_or(&base64_data);
+    let bytes = STANDARD
+        .decode(b64.trim())
+        .map_err(|e| format!("base64 解码失败: {}", e))?;
+    std::fs::write(&target_path, &bytes).map_err(|e| format!("写入文件失败: {}", e))?;
+    Ok(())
+}
+
+/// R-005 渲染笔记为 HTML 字符串供前端 iframe 打印为 PDF。
+///
+/// 不写文件，前端拿到字符串后塞 hidden iframe → contentWindow.print() →
+/// 用户在原生打印对话框选 "Microsoft Print to PDF" / "另存为 PDF"。
+///
+/// 返回的 HTML 与 export_single_note_to_html 一致：图片内嵌 base64，
+/// 自包含可独立打印，无需额外资源加载。
+#[tauri::command]
+pub fn render_note_html_for_pdf(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    // 用户设置里的正文 / 标题字体；缺省则用模板自带的通用中文字体链
+    fonts: Option<ExportFonts>,
+) -> Result<String, String> {
+    let note = state
+        .db
+        .get_note(id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("笔记 {} 不存在", id))?;
+
+    let assets_root = state.data_dir.clone();
+
+    // 目标是「打印成 PDF」，属文档版式：留白交给 @page 页边距，不叠 body 自身的
+    // margin/padding（否则纸张上下会多出一截空白）
+    let (html, _inlined, _missing) = services::export_html::HtmlExportService::render_html(
+        &note.title,
+        &note.content,
+        &assets_root,
+        fonts.as_ref(),
+        services::export_html::TemplateLayout::Document,
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(html)
+}
+
+/// R-005b 「所见即所得」打印支撑：把前端传来的**编辑器实时 DOM** HTML 里的本地图片 /
+/// 附件链接 inline 成 base64。
+///
+/// 与 `render_note_html_for_pdf` 的区别：那条从 markdown 经 pulldown-cmark **重新渲染**，
+/// 套的是另一套极简 CSS 模板，导出后样式跟编辑器里看到的不一样；本条不碰结构 / 样式，
+/// 直接接收编辑器**已渲染**的真实 DOM HTML，只做资源内嵌，让前端「打印 = 屏幕所见」。
+/// 前端负责克隆 DOM、注入应用同一份 CSS、触发系统打印对话框。
+#[tauri::command]
+pub fn inline_note_html_assets(
+    state: tauri::State<'_, AppState>,
+    html: String,
+) -> Result<String, String> {
+    let assets_root = state.data_dir.clone();
+    let (html, _img, _att) =
+        services::export_html::HtmlExportService::inline_assets(&html, &assets_root);
+    Ok(html)
+}
+
+/// 批量把本地资源 URL 解析成 data: URL（打印 / 复制为 Word 的附件内嵌走这条）。
+///
+/// 与 `inline_note_html_assets` 的区别是**只搬需要的东西**：那条要求整篇 HTML 进出，
+/// 一篇带图的笔记内嵌后动辄几十 MB，两次 JSON 序列化就能把 WebView 卡住；这条只收
+/// URL 清单、只回 data: URL，前端自己在 DOM 上回填。
+///
+/// `max_bytes` 缺省 32 MiB：单个文件超过就返回 data_url = null，前端保留原 URL
+/// （应用内仍能显示，只是导出物不自包含），避免一个巨型附件把内存顶爆。
+#[tauri::command]
+pub fn resolve_asset_data_urls(
+    state: tauri::State<'_, AppState>,
+    urls: Vec<String>,
+    max_bytes: Option<u64>,
+) -> Result<Vec<ResolvedAssetUrl>, String> {
+    const DEFAULT_MAX_BYTES: u64 = 32 * 1024 * 1024;
+    let assets_root = state.data_dir.clone();
+    Ok(services::export_html::HtmlExportService::resolve_asset_data_urls(
+        &urls,
+        &assets_root,
+        max_bytes.unwrap_or(DEFAULT_MAX_BYTES),
+    ))
+}

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive Icon (mipmap-anydpi-v26/ic_launcher.xml) 引用此 color；与 PC 端 src-tauri/icons/android/values/ic_launcher_background.xml 同源 -->
+<resources>
+  <color name="ic_launcher_background">#fff</color>
+</resources>

@@ -1,0 +1,1660 @@
+import { invoke } from "@tauri-apps/api/core";
+import { check } from "@tauri-apps/plugin-updater";
+import {
+  enable as autostartEnable,
+  disable as autostartDisable,
+  isEnabled as autostartIsEnabled,
+} from "@tauri-apps/plugin-autostart";
+import type {
+  Card,
+  CreateCardInput,
+  ReviewCardInput,
+  CardReviewLog,
+  CardStats,
+  MobileUpdateInfo,
+  AppConfig,
+  CustomReminderSound,
+  AppLockStatus,
+  SystemInfo,
+  TextHealthReport,
+  DashboardStats,
+  Note,
+  NoteImageRef,
+  NoteInput,
+  NoteQuery,
+  PageResult,
+  Folder,
+  EmptyFolderInfo,
+  Tag,
+  SearchResult,
+  SearchFilters,
+  Dataset,
+  DatasetSchema,
+  NoteLink,
+  NoteLinkSummary,
+  WikiLinkSuggestItem,
+  GraphData,
+  AiModel,
+  AiModelInput,
+  AiModelTestResult,
+  AiProviderPreset,
+  ImportedAiModels,
+  LegacyAiModelFix,
+  VerifyOutcome,
+  AiConversation,
+  AiMessage,
+  ImportConflictPolicy,
+  ImportResult,
+  OpenMarkdownResult,
+  OrphanAssetScan,
+  OrphanAssetClean,
+  OrphanItem,
+  AttachmentInfo,
+  ScannedFile,
+  ExportResult,
+  SingleExportResult,
+  WriteBackResult,
+  NoteTemplate,
+  NoteTemplateInput,
+  DailyWritingStat,
+  DailyEntry,
+  DailyConvertPlan,
+  DailyConvertOptions,
+  DailyConvertResult,
+  PdfImportResult,
+  ExcelImportResult,
+  NoteTagBrief,
+  DocConverter,
+  ConverterDiagnostic,
+  SyncScope,
+  SyncImportMode,
+  WebDavConfig,
+  SyncManifest,
+  SyncResult,
+  SyncHistoryItem,
+  RemoteSnapshot,
+  RestoreBatchResult,
+  Task,
+  TaskLinkInput,
+  CreateTaskInput,
+  UpdateTaskInput,
+  TaskQuery,
+  TaskStats,
+  TaskSearchHit,
+  TaskCategory,
+  CreateTaskCategoryInput,
+  UpdateTaskCategoryInput,
+  Project,
+  CreateProjectInput,
+  UpdateProjectInput,
+  DataviewRow,
+  PromptTemplate,
+  PromptTemplateInput,
+  PlanTodayRequest,
+  PlanTodayResponse,
+  PlanFromGoalRequest,
+  PlanFromGoalResponse,
+  PlanFromExcelRequest,
+  ExcelPreview,
+  TaskSuggestion,
+  AttachmentPreview,
+  MessageAttachment,
+  DraftNoteRequest,
+  DraftNoteResponse,
+  VaultStatus,
+  SyncBackend,
+  SyncBackendInput,
+  SyncManifestV1,
+  SyncPushResult,
+  SyncPullResult,
+  SyncGcResult,
+  SyncConflictItem,
+  SyncConflictResolution,
+  ResolvedDataDir,
+  MigrationMarker,
+  WordExportResult,
+  HtmlExportResult,
+  MergeExportResult,
+  MergeFormat,
+  ShortcutBinding,
+  AsrConfig,
+  TranscribeRequest,
+  TranscribeResult,
+  AsrTestResult,
+  PushJob,
+  CreatePushJobInput,
+  UpdatePushJobInput,
+  PushRunLog,
+  PushPopupData,
+  EmbeddedWhiteboardSaved,
+  NoteSnapshotMeta,
+  NoteSnapshot,
+  SnapshotUsage,
+  NoteExcerpt,
+} from "@/types";
+
+/** 系统相关 API */
+export const systemApi = {
+  greet: (name: string) => invoke<string>("greet", { name }),
+  getSystemInfo: () => invoke<SystemInfo>("get_system_info"),
+  getDashboardStats: () => invoke<DashboardStats>("get_dashboard_stats"),
+  getWritingTrend: (days?: number) =>
+    invoke<DailyWritingStat[]>("get_writing_trend", { days }),
+  /**
+   * 枚举本机已安装的所有字体族名（去重 + 排序），供设置页「正文字体」自选。
+   * 仅桌面端注册；移动端该 Command 不存在，invoke 会 reject —— 调用方 catch 后
+   * 回退到「预设 + 手动输入字体名」。
+   */
+  listSystemFonts: () => invoke<string[]>("list_system_fonts"),
+  /** 把笔记 content 里的 `kb-asset://...` 后那段相对路径还原成 OS 绝对路径。
+   * 用于附件链接点击 → opener 打开（opener 必须传绝对路径）。 */
+  resolveAssetAbsolute: (rel: string) =>
+    invoke<string>("resolve_asset_absolute_path", { rel }),
+  /**
+   * 把任意历史形态的素材 URL（`file://` / `http://asset.localhost/` / 裸绝对路径）
+   * 解析成本机可用的相对路径；不是本地资产或本机没这份文件时返回 null。
+   *
+   * 渲染兜底用：存量笔记（尤其从别的机器同步过来的）里可能仍有别台机器的绝对路径，
+   * 直接丢给 WebView 必定裂图。
+   */
+  resolveContentAssetRel: (url: string) =>
+    invoke<string | null>("resolve_content_asset_rel", { url }),
+  /** 把任意文本写入指定路径（UTF-8）。配合 dialog.save() 用于前端导出 SVG/JSON 等。 */
+  writeTextFile: (path: string, content: string) =>
+    invoke<void>("write_text_file", { path, content }),
+  /** 把 base64 编码的二进制数据写入指定路径。配合 dialog.save() 用于导出 PNG/PDF 等。 */
+  writeBinaryFile: (path: string, base64Data: string) =>
+    invoke<void>("write_binary_file", { path, base64Data }),
+  /** 读取用户选中的 UTF-8 文本文件（上限 32MB）。配合 dialog.open() 用于导入 .excalidraw 等。 */
+  readTextFile: (path: string) => invoke<string>("read_text_file", { path }),
+  /** 导出诊断包（应用日志 + 崩溃日志 + 系统信息打成 zip 放桌面），返回 zip 绝对路径。
+   *  用于线上闪退 / 异常时让用户一键打包日志发回（够不到机器时远程取证）。 */
+  exportDiagnostics: () => invoke<string>("export_diagnostics"),
+  /**
+   * 数据库文本健康体检 / 修复。
+   *
+   * 用于排查同步报的 `Conversion error from type Text at index: N, invalid utf-8`——
+   * 该错误说明 db 文件里某个 TEXT cell 有非法 UTF-8 字节（跨平台直接拷 app.db、
+   * 网盘双向同步、磁盘损坏所致，不是应用写出来的）。
+   *
+   * @param repair 传 true 才写回修复；默认只体检不改数据。
+   */
+  checkDbTextHealth: (repair = false) =>
+    invoke<TextHealthReport>("check_db_text_health", { repair }),
+};
+
+/** 更新相关 API */
+export const updaterApi = {
+  checkUpdate: () => check(),
+};
+
+/** 开机启动 API
+ *
+ * 依赖 tauri-plugin-autostart：启用后系统启动时会以
+ * `--start-minimized` 参数唤起本应用，Rust 侧据此决定是否隐藏窗口。
+ */
+export const autostartApi = {
+  isEnabled: () => autostartIsEnabled(),
+  enable: () => autostartEnable(),
+  disable: () => autostartDisable(),
+};
+
+/** PDF 导入与预览 API */
+export const pdfApi = {
+  /** 批量导入 PDF 为笔记，返回每条结果（含错误） */
+  importPdfs: (
+    paths: string[],
+    folderId?: number | null,
+    enableOcr = false,
+  ) =>
+    invoke<PdfImportResult[]>("import_pdfs", { paths, folderId, enableOcr }),
+  /** 获取笔记关联 PDF 的绝对路径（无则返回 null） */
+  getAbsolutePath: (noteId: number) =>
+    invoke<string | null>("get_pdf_absolute_path", { noteId }),
+};
+
+/** Excel / ODS / CSV 导入 API（仅桌面端；移动端未注册该 command） */
+export const excelApi = {
+  /** 批量导入表格文件为笔记（一个文件一篇），返回每条结果（含错误与被截断的工作表） */
+  importFiles: (paths: string[], folderId?: number | null) =>
+    invoke<ExcelImportResult[]>("import_excel_files", { paths, folderId }),
+};
+
+/** 通用源文件 API（Word / 任意附件） */
+export const sourceFileApi = {
+  /** 探测系统可用的 .doc 转换器（启动时检测一次） */
+  getConverterStatus: () =>
+    invoke<DocConverter>("get_converter_status"),
+  /** 详细诊断：每个 Word ProgId 的实测结果（含 PowerShell 错误） */
+  diagnoseDocConverter: () =>
+    invoke<ConverterDiagnostic>("diagnose_doc_converter"),
+  /** 把 .doc 转 .docx，返回 .docx 字节的 base64 */
+  convertDocToDocxBase64: (path: string) =>
+    invoke<string>("convert_doc_to_docx_base64", { path }),
+  /** 把任意路径的文件读为 base64（路径来自 dialog） */
+  readFileAsBase64: (path: string) =>
+    invoke<string>("read_file_as_base64", { path }),
+  /** 把源文件挂到笔记上（拷贝原文件 + 更新 source_file_path/type） */
+  attach: (noteId: number, sourcePath: string, fileType: string) =>
+    invoke<string>("attach_source_file", {
+      noteId,
+      sourcePath,
+      fileType,
+    }),
+  /** 通用：获取笔记关联源文件的绝对路径 */
+  getAbsolutePath: (noteId: number) =>
+    invoke<string | null>("get_source_file_absolute_path", { noteId }),
+};
+
+/** 配置管理 API */
+/** 全局快捷键管理 API（系统级热键，由 Rust 侧 global-shortcut 插件管理） */
+export const shortcutsApi = {
+  list: () => invoke<ShortcutBinding[]>("list_shortcut_bindings"),
+  set: (id: string, accel: string) =>
+    invoke<void>("set_shortcut_binding", { id, accel }),
+  reset: (id: string) => invoke<void>("reset_shortcut_binding", { id }),
+  disable: (id: string) => invoke<void>("disable_shortcut_binding", { id }),
+};
+
+/** 主窗口尺寸 API（桌面端） */
+export const windowApi = {
+  /**
+   * 恢复默认大小并居中。
+   * 窗口大小/位置会被记住并在下次启动还原，这是把它拖歪之后的唯一退路
+   * （尤其是从多屏挪到单屏、或外接屏拔掉之后）。
+   */
+  resetSize: () => invoke<void>("reset_window_size"),
+};
+
+export const configApi = {
+  getAll: () => invoke<AppConfig[]>("get_all_config"),
+  get: (key: string) => invoke<string>("get_config", { key }),
+  set: (key: string, value: string) =>
+    invoke<void>("set_config", { key, value }),
+  delete: (key: string) => invoke<void>("delete_config", { key }),
+};
+
+/**
+ * 待办提醒自定义提示音（音频文件管理）。
+ * 文件复制进 app_data_dir/reminder-sounds/，播放时 `resolve` 拿绝对路径 → convertFileSrc。
+ */
+export const reminderSoundApi = {
+  /** 导入用户在原生对话框里选中的音频文件 */
+  import: (srcPath: string) =>
+    invoke<CustomReminderSound>("import_reminder_sound", { srcPath }),
+  list: () => invoke<CustomReminderSound[]>("list_reminder_sounds"),
+  /** 文件不存在时抛错，调用方据此回退到内置预设 */
+  resolve: (fileName: string) =>
+    invoke<string>("resolve_reminder_sound", { fileName }),
+  delete: (fileName: string) =>
+    invoke<void>("delete_reminder_sound", { fileName }),
+};
+
+/** 笔记 API */
+export const noteApi = {
+  create: (input: NoteInput) => invoke<Note>("create_note", { input }),
+  update: (id: number, input: NoteInput) =>
+    invoke<Note>("update_note", { id, input }),
+  delete: (id: number) => invoke<void>("delete_note", { id }),
+  trashAll: () => invoke<number>("trash_all_notes"),
+  get: (id: number) => invoke<Note>("get_note", { id }),
+  /** 取一批笔记里的图片资源（AI 回答下方"溯源"挂缩略图用）；只回带图的笔记 */
+  getImages: (noteIds: number[]) =>
+    invoke<NoteImageRef[]>("get_notes_images", { noteIds }),
+  list: (query: NoteQuery = {}) =>
+    invoke<PageResult<Note>>("list_notes", { query }),
+  togglePin: (id: number) => invoke<boolean>("toggle_pin", { id }),
+
+  // ─── 历史版本 ────────────────────────────────────────────
+  //
+  // 后端在每次覆盖正文前留底（保存 / 同步 pull 都接了），带时间窗节流与内容去重。
+  // 白板另有一套（whiteboardApi.*Snapshot*）：它要额外做画布图片内联。
+
+  /** 列出历史版本（不含正文，只有时间 / 体积 / 来源） */
+  listSnapshots: (noteId: number) =>
+    invoke<NoteSnapshotMeta[]>("list_note_snapshots", { noteId }),
+  /** 取某一份历史版本的完整正文 */
+  getSnapshot: (snapshotId: number) =>
+    invoke<NoteSnapshot>("get_note_snapshot", { snapshotId }),
+  /** 手动存一个版本。返回 false = 与上一份存档内容相同，没存 */
+  createSnapshot: (noteId: number) =>
+    invoke<boolean>("create_note_snapshot", { noteId }),
+  /** 回滚正文到某一份历史版本（后端会先把当前版本另存一份，点错了还能滚回来） */
+  restoreSnapshot: (noteId: number, snapshotId: number) =>
+    invoke<Note>("restore_note_snapshot", { noteId, snapshotId }),
+  moveToFolder: (noteId: number, folderId?: number | null) =>
+    invoke<void>("move_note_to_folder", { noteId, folderId }),
+  /** 批量重排同 folder 内笔记的 sort_order；调用方传该 folder 内**完整**的 ID 顺序 */
+  reorder: (orderedIds: number[]) =>
+    invoke<void>("reorder_notes", { orderedIds }),
+  /** 拖拽排序专用：拿当前筛选条件下「全部」笔记 id（不分页），用于本地 arrayMove 后整体 reorder */
+  listIdsForReorder: (query: NoteQuery = {}) =>
+    invoke<number[]>("list_note_ids_for_reorder", { query }),
+  /** 批量移动笔记到指定文件夹（folderId=null 表示根目录）；返回实际移动的条数 */
+  moveBatch: (ids: number[], folderId: number | null) =>
+    invoke<number>("move_notes_batch", { ids, folderId }),
+  /** 批量软删除（移入回收站）；返回实际删除的条数 */
+  trashBatch: (ids: number[]) =>
+    invoke<number>("trash_notes_batch", { ids }),
+  /** 批量给笔记追加标签（不清除原有）；返回新增的关联条数 */
+  addTagsBatch: (noteIds: number[], tagIds: number[]) =>
+    invoke<number>("add_tags_to_notes_batch", { noteIds, tagIds }),
+  /** T-003: 切换"隐藏"状态；返回切换后的新状态 */
+  setHidden: (id: number, hidden: boolean) =>
+    invoke<boolean>("set_note_hidden", { id, hidden }),
+  /** 列出「临时编辑」笔记（以临时方式打开的外部 .md），分页 */
+  listScratch: (page = 1, pageSize = 20) =>
+    invoke<PageResult<Note>>("list_scratch_notes", { page, pageSize }),
+  /** 设置 / 取消「临时编辑」标记；false = 转为正式笔记，回到主列表与搜索 */
+  setScratch: (id: number, scratch: boolean) =>
+    invoke<void>("set_note_scratch", { id, scratch }),
+  /** T-014: 网页剪藏 — 把 URL 抓成 markdown 笔记；返回新建笔记 */
+  clipUrl: (url: string, folderId?: number | null) =>
+    invoke<Note>("clip_url_to_note", { url, folderId: folderId ?? null }),
+  /** 剪藏网页并返回可插入编辑器的 HTML（不建笔记）——编辑器工具栏「插入到当前笔记」用 */
+  clipUrlToHtml: (url: string, noteId: number) =>
+    invoke<string>("clip_url_to_html", { url, noteId }),
+  /** 把指定笔记弹到独立 OS 窗口（双显示器对照 / 主副屏分屏用） */
+  openInNewWindow: (id: number) =>
+    invoke<void>("open_note_in_new_window", { noteId: id }),
+  /** 把指定笔记的思维导图弹到独立 OS 窗口（纯导图视图，方便双屏对照） */
+  openMindMapInNewWindow: (id: number) =>
+    invoke<void>("open_mindmap_in_new_window", { noteId: id }),
+};
+
+/**
+ * 白板 API。
+ *
+ * 白板本质是 `note_type='whiteboard'` 的笔记，所以**重命名 / 移动文件夹 / 删除 /
+ * 打标签 / 置顶都直接用 `noteApi`**；这里只有白板独有的两条。
+ */
+export const whiteboardApi = {
+  /** 新建白板；title 省略时后端给「白板 年-月-日 时:分」默认名 */
+  create: (title?: string, folderId?: number | null) =>
+    invoke<Note>("create_whiteboard", {
+      title: title ?? null,
+      folderId: folderId ?? null,
+    }),
+  /**
+   * 读取画布场景 JSON。
+   *
+   * ⚠️ 必须用这个而不是 `note.content` —— 库里存的图片是 `kb-asset://` 引用，
+   * 后端会在这里把它们内联回 base64，Excalidraw 才能正常渲染和导出。
+   */
+  getScene: (id: number) => invoke<string>("get_whiteboard_scene", { id }),
+  /** 保存画布。scene 是 Excalidraw 场景 JSON 字符串；后端负责校验、图片外置、抽取可搜索文本 */
+  saveScene: (id: number, scene: string) =>
+    invoke<void>("save_whiteboard_scene", { id, scene }),
+
+  // ─── 笔记内嵌白板（正文里的白板块，与上面的整页白板并存）───────────
+  /**
+   * 保存内嵌白板：一次写入场景文件 + PNG 预览图，返回两者的相对路径
+   * （调用方拼 `kb-asset://` 存进节点属性）。
+   *
+   * `relPath` 传已有场景路径 = 覆盖同一对文件；传 null/undefined = 新建。
+   * `preview` 是 PNG 的 base64（不含 data URL 前缀）。
+   */
+  saveEmbedded: (
+    noteId: number,
+    scene: string,
+    preview: string,
+    relPath?: string | null,
+  ) =>
+    invoke<EmbeddedWhiteboardSaved>("save_embedded_whiteboard", {
+      noteId,
+      relPath: relPath ?? null,
+      scene,
+      preview,
+    }),
+  /** 读回内嵌白板画布（图片已内联成 base64，可直接喂 Excalidraw） */
+  loadEmbedded: (relPath: string) =>
+    invoke<string>("load_embedded_whiteboard", { relPath }),
+
+  // ─── 历史版本 ────────────────────────────────────────────
+  //
+  // 画布是自动保存的：误删一片图形什么都不用做就已经落库，撤销栈又活不过关窗。
+  // 后端在每次覆盖前留底（带时间窗节流 + 内容去重），这里是它的读取面。
+
+  /** 列出历史版本（不含正文，只有时间 / 体积 / 来源） */
+  listSnapshots: (noteId: number) =>
+    invoke<NoteSnapshotMeta[]>("list_whiteboard_snapshots", { noteId }),
+  /** 取某一份历史版本的画布（图片已内联，可直接渲染预览） */
+  getSnapshotScene: (snapshotId: number) =>
+    invoke<string>("get_whiteboard_snapshot_scene", { snapshotId }),
+  /** 手动存一个版本。返回 false = 与上一份存档内容相同，没存 */
+  createSnapshot: (noteId: number) =>
+    invoke<boolean>("create_whiteboard_snapshot", { noteId }),
+  /** 回滚到某一份历史版本（后端会先把当前版本另存一份，点错了还能滚回来） */
+  restoreSnapshot: (noteId: number, snapshotId: number) =>
+    invoke<void>("restore_whiteboard_snapshot", { noteId, snapshotId }),
+
+  // ─── 素材库 ──────────────────────────────────────────────
+  //
+  // Excalidraw 默认不持久化素材库（收藏的图形组件），关掉应用就没了。
+  // 后端把它存成 data_dir 下的标准 `.excalidrawlib` 文件，跟着数据目录走。
+
+  /** 读素材库原文（`.excalidrawlib` JSON）。没存过返回空串 */
+  getLibrary: () => invoke<string>("get_whiteboard_library"),
+  /** 覆盖写素材库 */
+  saveLibrary: (content: string) =>
+    invoke<void>("save_whiteboard_library", { content }),
+
+  // ─── 内嵌白板的历史版本 ──────────────────────────────
+  //
+  // 与整页白板分开：内嵌白板的场景存在独立文件里，靠 (noteId, relPath) 定位，
+  // 后端用 note_snapshots.target_path 区分同一条笔记下的正文与各块白板。
+
+  /** 列出某块内嵌白板的历史版本 */
+  listEmbeddedSnapshots: (noteId: number, relPath: string) =>
+    invoke<NoteSnapshotMeta[]>("list_embedded_whiteboard_snapshots", {
+      noteId,
+      relPath,
+    }),
+  /** 取某一份内嵌白板历史版本的画布（图片已内联） */
+  getEmbeddedSnapshotScene: (snapshotId: number) =>
+    invoke<string>("get_embedded_whiteboard_snapshot_scene", { snapshotId }),
+  /** 回滚内嵌白板到某一份历史版本，返回回滚后的画布 */
+  restoreEmbeddedSnapshot: (
+    noteId: number,
+    relPath: string,
+    snapshotId: number,
+  ) =>
+    invoke<string>("restore_embedded_whiteboard_snapshot", {
+      noteId,
+      relPath,
+      snapshotId,
+    }),
+
+  /**
+   * 批量取笔记摘要，供画布上的「笔记卡片」显示。
+   * 每次打开白板调一次 —— 卡片显示的是笔记**当前**内容，不是插入那刻的快照。
+   */
+  noteExcerpts: (noteIds: number[]) =>
+    invoke<NoteExcerpt[]>("get_note_excerpts", { noteIds }),
+};
+
+/** T-003 隐藏笔记专用 API（/hidden 页面） */
+/**
+ * 历史版本的**全局**管理（设置页用）。
+ *
+ * 与 noteApi.*Snapshot* 的区别：那些是"某条笔记的历史版本"，
+ * 这里是"整个库的历史版本占了多少、怎么清"。
+ */
+export const snapshotApi = {
+  /** 用量总览：总数 / 总体积 / 占用最大的前 N 条笔记 */
+  usage: () => invoke<SnapshotUsage>("get_snapshot_usage"),
+  /** 清掉某条笔记的全部历史版本，返回删除条数 */
+  clearNote: (noteId: number) =>
+    invoke<number>("clear_note_snapshots", { noteId }),
+  /** 清掉所有超过 days 天的历史版本，返回删除条数 */
+  clearOlderThan: (days: number) =>
+    invoke<number>("clear_snapshots_older_than", { days }),
+  /** 清空全部历史版本，返回删除条数 */
+  clearAll: () => invoke<number>("clear_all_snapshots"),
+};
+
+export const hiddenApi = {
+  list: (opts?: {
+    page?: number;
+    pageSize?: number;
+    /** 只看某个目录；与 uncategorized 二选一，uncategorized 优先 */
+    folderId?: number | null;
+    /** true = 只看未分类（folder_id IS NULL） */
+    uncategorized?: boolean;
+  }) =>
+    invoke<PageResult<Note>>("list_hidden_notes", {
+      page: opts?.page,
+      pageSize: opts?.pageSize,
+      folderId: opts?.folderId ?? null,
+      uncategorized: opts?.uncategorized ?? false,
+    }),
+  /** 返回有隐藏笔记的 folder_id 列表；含 null 表示有"未分类"的隐藏笔记 */
+  listFolderIds: () =>
+    invoke<(number | null)[]>("list_hidden_folder_ids"),
+};
+
+/**
+ * 隐藏笔记 PIN —— UX 门禁（不是数据加密）
+ *
+ * 与 vaultApi 完全独立：vault 是真加密笔记内容；这里只挡"打开 /hidden 路由"。
+ * 忘记 PIN 时数据无损（隐藏笔记本身仍是明文，可走重置流程）。
+ */
+export const hiddenPinApi = {
+  /** 查询是否已设置 PIN —— 决定 ActivityBar 点"隐藏笔记"是否要弹解锁框 */
+  isSet: () => invoke<boolean>("is_hidden_pin_set"),
+  /**
+   * 设置或修改 PIN（已设过时必须传 oldPin）
+   * - hint = null 表示不动现有提示；hint = "" 表示清空提示
+   * - 后端会校验 hint 不能包含 PIN 本身，否则报错
+   */
+  set: (oldPin: string | null, newPin: string, hint: string | null = null) =>
+    invoke<void>("set_hidden_pin", { oldPin, newPin, hint }),
+  /** 校验 PIN —— 失败次数限制由后端管 */
+  verify: (pin: string) => invoke<void>("verify_hidden_pin", { pin }),
+  /** 清除 PIN（需当前 PIN 校验通过） */
+  clear: (currentPin: string) => invoke<void>("clear_hidden_pin", { currentPin }),
+  /** 获取 PIN 提示（无则 null）—— 解锁框展示 + 修改 PIN 时预填 */
+  getHint: () => invoke<string | null>("get_hidden_pin_hint"),
+};
+
+/**
+ * 应用启动锁 —— 软锁 / 全局进入密码（不是数据加密）
+ *
+ * 与 hiddenPinApi / vaultApi 完全独立：这是"打开软件就要输密码"的全局门禁。
+ * 默认关闭，用户在设置里设密码后才生效；防的是"公用电脑被顺手翻"。
+ * 忘记密码时数据无损（笔记本身仍是明文，可在设置页关闭后重设）。
+ */
+export const appLockApi = {
+  /** 查询锁状态：是否开启 + 闲置自动锁定分钟数 */
+  status: () => invoke<AppLockStatus>("app_lock_status"),
+  /**
+   * 设置或修改进入密码（已设过时必须传 oldPassword）
+   * - hint = null 不动现有提示；hint = "" 清空提示
+   * - 后端会校验 hint 不能包含密码本身，否则报错
+   */
+  setPassword: (
+    oldPassword: string | null,
+    newPassword: string,
+    hint: string | null = null,
+  ) => invoke<void>("app_lock_set_password", { oldPassword, newPassword, hint }),
+  /** 校验进入密码 —— 失败次数限制由后端管 */
+  verify: (password: string) => invoke<void>("app_lock_verify", { password }),
+  /** 关闭应用锁（需当前密码校验通过） */
+  disable: (currentPassword: string) =>
+    invoke<void>("app_lock_disable", { currentPassword }),
+  /** 获取密码提示（无则 null）—— 锁屏页展示 + 修改密码时预填 */
+  getHint: () => invoke<string | null>("app_lock_get_hint"),
+  /** 设置闲置自动锁定分钟数（0 = 关闭；后端 clamp 到 [0, 240]） */
+  setAutoMinutes: (minutes: number) =>
+    invoke<void>("app_lock_set_auto_minutes", { minutes }),
+};
+
+/**
+ * T-007 笔记加密 / Vault API
+ *
+ * - 首次使用先 `setup(主密码)`
+ * - 会话启动 / 空闲锁定后要 `unlock(主密码)` 才能加/解密
+ * - `encryptNote(id)` 把一篇笔记切换到加密态；`decryptNote(id)` 读出明文（不落盘）
+ * - `disableEncrypt(id)` 取消加密，明文写回 content
+ *
+ * **忘记主密码 = 数据永久不可读**。首次 setup 前 UI 要强提示 + 建议导出 Markdown 备份。
+ */
+export const vaultApi = {
+  status: () => invoke<VaultStatus>("vault_status"),
+  setup: (password: string) => invoke<void>("vault_setup", { password }),
+  unlock: (password: string) => invoke<void>("vault_unlock", { password }),
+  lock: () => invoke<void>("vault_lock"),
+  encryptNote: (id: number) => invoke<void>("encrypt_note", { id }),
+  decryptNote: (id: number) => invoke<string>("decrypt_note", { id }),
+  disableEncrypt: (id: number) =>
+    invoke<void>("disable_note_encrypt", { id }),
+};
+
+/** 文件夹 API */
+export const folderApi = {
+  create: (name: string, parentId?: number) =>
+    invoke<Folder>("create_folder", { name, parentId }),
+  rename: (id: number, name: string) =>
+    invoke<void>("rename_folder", { id, name }),
+  delete: (id: number) => invoke<void>("delete_folder", { id }),
+  /**
+   * 查询子树统计 —— 级联删除确认弹窗用。
+   * `notes` 只数用户在列表里看得见的笔记；`dailies` 是子树内的日记数，
+   * 它们**不会**被删除，只会因文件夹消失而回到"未分类"，所以单独一项告知用户。
+   */
+  subtreeStats: (id: number) =>
+    invoke<{ folders: number; notes: number; dailies: number }>(
+      "folder_subtree_stats",
+      { id },
+    ),
+  /** 级联删除：子树笔记移入回收站 + 删除子树文件夹；日记只脱钩不删 */
+  deleteCascade: (id: number) =>
+    invoke<{
+      notes_trashed: number;
+      folders_deleted: number;
+      dailies_detached: number;
+    }>("delete_folder_cascade", { id }),
+  /** 扫描空文件夹（子树内无任何未回收笔记），供"清理空文件夹"预览 */
+  listEmpty: () => invoke<EmptyFolderInfo[]>("list_empty_folders"),
+  /** 清理空文件夹：后端会重新校验一次仍然为空才删，返回实际删除数 */
+  cleanupEmpty: (ids: number[]) =>
+    invoke<{ deleted: number }>("cleanup_empty_folders", { ids }),
+  list: () => invoke<Folder[]>("list_folders"),
+  move: (id: number, newParentId: number | null) =>
+    invoke<void>("move_folder", { id, newParentId }),
+  reorder: (orderedIds: number[]) =>
+    invoke<void>("reorder_folders", { orderedIds }),
+  /** T-006: 按 "工作/周报" 这样的路径字符串递归确保存在，返回最深一级 folder id */
+  ensurePath: (path: string) =>
+    invoke<number | null>("ensure_folder_path", { path }),
+  /** 设置文件夹颜色（hex `#RRGGBB`）；传 null 清除 */
+  setColor: (id: number, color: string | null) =>
+    invoke<void>("set_folder_color", { id, color }),
+};
+
+/** 搜索 API */
+export const searchApi = {
+  /**
+   * 全文搜索。
+   *
+   * `filters` 可选（P1-2）：只传用户真正勾选的维度。
+   * ⚠️ 传空数组（如 `{ folderIds: [] }`）表示"勾了但没选中"，后端会返回零结果；
+   * 清空筛选请**省略字段**而不是传 `[]`（见 SearchFilters 注释）。
+   */
+  search: (query: string, limit?: number, filters?: SearchFilters) =>
+    invoke<SearchResult[]>("search_notes", { query, limit, filters }),
+};
+
+/** 回收站 API */
+export const trashApi = {
+  softDelete: (id: number) => invoke<void>("soft_delete_note", { id }),
+  /** 单条恢复；返回 true=回到原文件夹，false=原文件夹已不存在落到根目录 */
+  restore: (id: number) => invoke<boolean>("restore_note", { id }),
+  permanentDelete: (id: number) =>
+    invoke<void>("permanent_delete_note", { id }),
+  list: (page?: number, pageSize?: number) =>
+    invoke<PageResult<Note>>("list_trash", { page, pageSize }),
+  empty: () => invoke<number>("empty_trash"),
+  /** 批量恢复；返回 {restored, toRoot} */
+  restoreBatch: (ids: number[]) =>
+    invoke<RestoreBatchResult>("restore_notes_batch", { ids }),
+  /** 批量永久删除；返回实际删除条数 */
+  permanentDeleteBatch: (ids: number[]) =>
+    invoke<number>("permanent_delete_notes_batch", { ids }),
+};
+
+/** 每日笔记 API */
+export const dailyApi = {
+  get: (date: string) =>
+    invoke<Note | null>("get_daily", { date }),
+  getOrCreate: (date: string) =>
+    invoke<Note>("get_or_create_daily", { date }),
+  listDates: (year: number, month: number) =>
+    invoke<string[]>("list_daily_dates", { year, month }),
+  /** 找当前日期相邻的真实存在的日记，返回 [prev, next]；按真实日记跳，跳过空白日 */
+  getNeighbors: (date: string) =>
+    invoke<[string | null, string | null]>("get_daily_neighbors", { date }),
+  /** 列出全部日记（轻量元数据），前端按年月分组 */
+  listAll: () => invoke<DailyEntry[]>("list_all_dailies"),
+  /** 快速记一笔：追加带时间戳的 callout 块到今天的日记末尾，返回当天日记 id */
+  appendQuickCapture: (text: string) =>
+    invoke<number>("append_quick_capture", { text }),
+  /** 扫描库里「文件夹名是日期」的普通笔记，生成历史日记转换计划。
+   *  只读，不改数据 —— 前端拿它渲染预览，用户确认后再调 applyConvert。 */
+  scanConvert: () => invoke<DailyConvertPlan>("scan_daily_convert"),
+  /** 执行历史日记转换。会改数据：合并模式下被并入的笔记会进回收站（可捞回）。
+   *  plan 可以是 scanConvert 的返回值经前端筛选后的子集（用户勾掉了某几天）。 */
+  applyConvert: (plan: DailyConvertPlan, options: DailyConvertOptions) =>
+    invoke<DailyConvertResult>("apply_daily_convert", { plan, options }),
+};
+
+/** 笔记链接 API */
+export const linkApi = {
+  syncLinks: (sourceId: number, targetIds: number[]) =>
+    invoke<void>("sync_note_links", { sourceId, targetIds }),
+  getBacklinks: (noteId: number) =>
+    invoke<NoteLink[]>("get_backlinks", { noteId }),
+  /** 出链 + 入链 + 断链一次取回（编辑器底部链接状态条用，避免打三次 IPC） */
+  getLinkSummary: (noteId: number) =>
+    invoke<NoteLinkSummary>("get_note_link_summary", { noteId }),
+  /** 从正文重新解析 [[wiki]] 并同步出链（Rust 侧一次完成）。
+   *  日记页保存后调它 —— 日记此前从不同步出链，写进去的 [[X]] 不进 note_links。 */
+  rebuildLinks: (noteId: number, content: string) =>
+    invoke<void>("rebuild_note_links", { noteId, content }),
+  searchTargets: (keyword: string, limit?: number) =>
+    invoke<WikiLinkSuggestItem[]>("search_link_targets", { keyword, limit }),
+  /** 规范化精确匹配：trim + 空白折叠 + 大小写不敏感 */
+  findIdByTitle: (title: string) =>
+    invoke<number | null>("find_note_id_by_title_loose", { title }),
+  getGraphData: () => invoke<GraphData>("get_graph_data"),
+};
+
+/** 标签 API */
+export const tagApi = {
+  /** 创建标签；parentId 传 null/undefined 即创建顶层标签 */
+  create: (name: string, color?: string, parentId?: number | null) =>
+    invoke<Tag>("create_tag", { name, color, parentId: parentId ?? null }),
+  list: () => invoke<Tag[]>("list_tags"),
+  rename: (id: number, name: string) =>
+    invoke<void>("rename_tag", { id, name }),
+  /** 修改标签颜色；传 null 清除自定义颜色走默认样式 */
+  setColor: (id: number, color: string | null) =>
+    invoke<void>("set_tag_color", { id, color }),
+  /** 移动标签到新父级；parentId=null 提升为顶层 */
+  setParent: (id: number, parentId: number | null) =>
+    invoke<void>("set_tag_parent", { id, parentId }),
+  /** 批量重排同级标签：orderedIds 为同一 parent（或全顶层）下完整 ID 顺序，按 idx*1000 赋 sort_order */
+  reorder: (orderedIds: number[]) =>
+    invoke<void>("reorder_tags", { orderedIds }),
+  delete: (id: number) => invoke<void>("delete_tag", { id }),
+  addToNote: (noteId: number, tagId: number) =>
+    invoke<void>("add_tag_to_note", { noteId, tagId }),
+  removeFromNote: (noteId: number, tagId: number) =>
+    invoke<void>("remove_tag_from_note", { noteId, tagId }),
+  getNoteTags: (noteId: number) =>
+    invoke<Tag[]>("get_note_tags", { noteId }),
+  /**
+   * 批量取一组笔记各自的标签（笔记列表「标签」列用），一次 IPC 取完整页。
+   * 返回 `{ 笔记id: [标签...] }`，没有标签的笔记不在表里；JSON 的键是字符串，
+   * 但用数字 id 去索引照样取得到。
+   */
+  getForNotes: (noteIds: number[]) =>
+    invoke<Record<number, NoteTagBrief[]>>("get_tags_for_notes", { noteIds }),
+  listNotesByTag: (tagId: number, page?: number, pageSize?: number) =>
+    invoke<PageResult<Note>>("list_notes_by_tag", { tagId, page, pageSize }),
+};
+
+/** AI 模型 API */
+export const aiModelApi = {
+  list: () => invoke<AiModel[]>("list_ai_models"),
+  create: (input: AiModelInput) =>
+    invoke<AiModel>("create_ai_model", { input }),
+  update: (id: number, input: AiModelInput) =>
+    invoke<AiModel>("update_ai_model", { id, input }),
+  delete: (id: number) => invoke<void>("delete_ai_model", { id }),
+  setDefault: (id: number) => invoke<void>("set_default_ai_model", { id }),
+  /** 测试模型连通性。入参用未保存的 AiModelInput，方便 Modal 表单里直接试。 */
+  test: (input: AiModelInput) =>
+    invoke<AiModelTestResult>("test_ai_model", { input }),
+  /**
+   * 测试**已保存**模型（按 id，后端自取明文）。
+   *
+   * 列表里的模型必须用这个 —— 前端已经拿不到 Key 明文了（P0-1b）。
+   */
+  testSaved: (id: number) =>
+    invoke<AiModelTestResult>("test_saved_ai_model", { id }),
+  /**
+   * 取 Key 明文。**仅供"分享配置"这类用户显式发起的导出**，
+   * 别拿它去做展示或判断（判断用 `has_api_key`）。
+   */
+  getApiKey: (id: number) => invoke<string | null>("get_ai_model_api_key", { id }),
+  /** 服务商预置（ai-profile crate 全量，OpenAI 兼容与 Anthropic 协议都有）。静态数据，前端缓存一次即可 */
+  listPresets: () => invoke<AiProviderPreset[]>("list_ai_provider_presets"),
+  /**
+   * 「获取」：零成本验证地址与密钥，拿回已清洗的模型清单与端点上报的限额。
+   *
+   * 失败走返回值（`ok: false` + 结构化 `error`），不走异常 —— 界面按原因给动作。
+   * `savedId` 传编辑中模型的 id：Key 保存后前端只剩 `has_api_key`，
+   * 用户不重输 Key 时靠它让后端去库里取明文，否则一点获取就 401。
+   */
+  verify: (args: {
+    provider: string;
+    apiUrl: string;
+    apiKey?: string | null;
+    modelId?: string | null;
+    savedId?: number | null;
+  }) =>
+    invoke<VerifyOutcome>("verify_ai_model_endpoint", {
+      provider: args.provider,
+      apiUrl: args.apiUrl,
+      apiKey: args.apiKey ?? null,
+      modelId: args.modelId ?? null,
+      savedId: args.savedId ?? null,
+    }),
+  /** 解析 ai.profile（单条或打包），已换成 ai_models 字段口径。解析失败抛中文原因 */
+  parseAiProfile: (text: string) =>
+    invoke<ImportedAiModels>("parse_ai_profile_text", { text }),
+  /**
+   * 生成 ai.profile 文本（规范写法）。🔴 含明文密钥，仅供用户点「分享」。
+   * `provider` 决定写进去的协议（Anthropic 档写 anthropic），不传按 OpenAI 兼容。
+   */
+  toAiProfile: (args: {
+    name: string;
+    apiUrl: string;
+    apiKey: string | null;
+    modelId: string;
+    provider?: string;
+  }) =>
+    invoke<string>("ai_model_to_ai_profile", {
+      name: args.name,
+      apiUrl: args.apiUrl,
+      apiKey: args.apiKey ?? "",
+      modelId: args.modelId,
+      provider: args.provider ?? null,
+    }),
+  /** 旧版本（v1.64.0 及以前）导出的模型配置 → 新口径（地址补齐、厂商 id 换 key、历史默认窗口清空） */
+  fixLegacy: (provider: string, apiUrl: string, maxContext: number | null | undefined) =>
+    invoke<LegacyAiModelFix>("fix_legacy_ai_model", {
+      provider,
+      apiUrl,
+      maxContext: maxContext ?? null,
+    }),
+};
+
+/** AI 对话 API */
+export const aiChatApi = {
+  listConversations: () =>
+    invoke<AiConversation[]>("list_ai_conversations"),
+  createConversation: (title?: string, modelId?: number, scopeFolderId?: number) =>
+    invoke<AiConversation>("create_ai_conversation", { title, modelId, scopeFolderId }),
+  deleteConversation: (id: number) =>
+    invoke<void>("delete_ai_conversation", { id }),
+  /** 批量清理：olderThanDays 不传 = 全清；传 N = 删除 N 天前未活动的对话；返回删除条数 */
+  deleteConversationsBefore: (olderThanDays?: number) =>
+    invoke<number>("delete_ai_conversations_before", { olderThanDays }),
+  renameConversation: (id: number, title: string) =>
+    invoke<void>("rename_ai_conversation", { id, title }),
+  updateConversationModel: (id: number, modelId: number) =>
+    invoke<void>("update_ai_conversation_model", { id, modelId }),
+  listMessages: (conversationId: number) =>
+    invoke<AiMessage[]>("list_ai_messages", { conversationId }),
+  /**
+   * 撤回会话里从某条提问起（含）的所有消息，返回删除条数。
+   * 给「重新生成 / 编辑重发」用；`fromMessageId` 必须是一条 user 消息，否则后端拒绝。
+   */
+  truncateFrom: (conversationId: number, fromMessageId: number) =>
+    invoke<number>("delete_ai_messages_from", { conversationId, fromMessageId }),
+  /**
+   * 发送消息并流式接收回复。
+   * - `useRag`: 是否启用 RAG（默认 true）。`useSkills=true` 时自动失效（AI 自行调 search_notes）
+   * - `useSkills`: T-004 Skills 框架。AI 可调 search_notes / get_note / list_tags 等工具
+   *    监听 `ai:tool_call` 事件可实时拿到每次工具调用（含 running/ok/error 状态）
+   * - `attachments`: 路线 A 会话附件（当前支持 Excel）。后端把每个附件的 markdown
+   *   拼到 user message 前再发给 AI；附件区会随 user message 一起入库。
+   */
+  sendMessage: (
+    conversationId: number,
+    message: string,
+    useRag?: boolean,
+    useSkills?: boolean,
+    attachments?: MessageAttachment[],
+  ) =>
+    invoke<void>("send_ai_message", {
+      conversationId,
+      message,
+      useRag,
+      useSkills,
+      attachments,
+    }),
+  cancelGeneration: (conversationId: number) =>
+    invoke<void>("cancel_ai_generation", { conversationId }),
+  /**
+   * 设置对话挂载的笔记列表（A 方向）。整对话共享，全量覆盖；
+   * 后续每次 sendMessage 时，后端按这个列表拉笔记拼成 system prompt 前缀。
+   */
+  setAttachedNotes: (conversationId: number, noteIds: number[]) =>
+    invoke<void>("set_ai_conversation_attached_notes", {
+      conversationId,
+      noteIds,
+    }),
+  /** 设置/清除对话的 RAG 文件夹范围；scopeFolderId 传 null 清除（恢复全库） */
+  setScopeFolder: (conversationId: number, scopeFolderId: number | null) =>
+    invoke<void>("set_ai_conversation_scope_folder", {
+      conversationId,
+      scopeFolderId,
+    }),
+  /**
+   * 设置/清除对话的角色预设（提示词库里的一条）；presetId 传 null 取消角色。
+   * 预设正文由后端在每轮请求时追加到 system prompt 末尾，前端不用自己拼。
+   */
+  setPreset: (conversationId: number, presetId: number | null) =>
+    invoke<void>("set_ai_conversation_preset", { conversationId, presetId }),
+  /**
+   * B 方向：把整个对话归档成笔记。title 为空时取对话当前标题；
+   * folder_id 为空时落到根。返回新建的 Note。
+   */
+  archiveToNote: (
+    conversationId: number,
+    title?: string,
+    folderId?: number,
+  ) =>
+    invoke<Note>("archive_ai_conversation_to_note", {
+      conversationId,
+      title,
+      folderId,
+    }),
+  /**
+   * 取得 / 懒建笔记的伴生 AI 对话（给编辑器右侧抽屉用）。
+   * 每篇笔记一条专属对话，自动挂当前笔记为附加上下文；对话被删后重新调会重建。
+   */
+  getOrCreateCompanionConversation: (noteId: number) =>
+    invoke<AiConversation>("get_or_create_companion_conversation", { noteId }),
+};
+
+/** AI 会话附件 API（路线 A：导入文件给 AI 会话用） */
+export const aiAttachmentApi = {
+  /**
+   * 通用附件解析：后端按扩展名自动分发 Excel / PDF / 文本解析器，
+   * 返回 tagged AttachmentPreview。前端按 kind 渲染不同 chip。
+   */
+  parseAttachment: (filePath: string) =>
+    invoke<AttachmentPreview>("ai_parse_attachment", { filePath }),
+  /** @deprecated 用 parseAttachment；保留兼容旧调用方 */
+  parseExcel: (filePath: string) =>
+    invoke<ExcelPreview>("ai_parse_excel", { filePath }),
+};
+
+/** 导入 API */
+export const importApi = {
+  /**
+   * 扫描文件夹，返回每个 .md 文件的分桶结果（new / path / fuzzy）。
+   * 前端据此展示"全新/已导入过/可能重复"预览弹窗。
+   */
+  scan: (path: string) =>
+    invoke<ScannedFile[]>("scan_markdown_folder", { path }),
+  /**
+   * 导入选中的 md 文件。
+   * - `rootPath` / `preserveRoot` 来自"扫描文件夹"入口：传了后端会按相对目录重建文件夹树；
+   *   "单选 md 文件"入口无源根，不传即可（全部平铺到 folderId 下）
+   * - `policy` 控制遇到已存在文件的处理：
+   *   · "skip"（默认）已存在则跳过
+   *   · "duplicate" 标题加 " (2)" 新建副本
+   * - `dailyMode` 按「日期文件夹/笔记.md」结构把笔记标记为日记（默认关，保持原行为）。
+   *   同一天多篇时只认领第一篇，其余仍是普通笔记 —— 可事后用「整理历史日记」合并。
+   */
+  importSelected: (
+    filePaths: string[],
+    folderId?: number | null,
+    rootPath?: string | null,
+    preserveRoot?: boolean,
+    policy?: ImportConflictPolicy,
+    dailyMode?: boolean,
+  ) =>
+    invoke<ImportResult>("import_selected_files", {
+      filePaths,
+      folderId,
+      rootPath: rootPath ?? null,
+      preserveRoot: preserveRoot ?? false,
+      policy: policy ?? "skip",
+      dailyMode: dailyMode ?? false,
+    }),
+  /**
+   * 打开单个 md 文件；返回 note id、是否已同步、以及是否为临时编辑。
+   *
+   * `asScratch=true`：按「临时编辑」打开 —— 照常入库、照常写回原文件，
+   * 但不进主列表 / 搜索 / 双链。用于"只是拿本应用改一份外部 .md"的场景。
+   * 复用一条已有的正式笔记时不会被降级，返回值里的 isScratch 才是真实状态。
+   */
+  openMarkdownFile: (filePath: string, asScratch = false) =>
+    invoke<OpenMarkdownResult>("open_markdown_file", { filePath, asScratch }),
+};
+
+/** 孤儿素材维护 API（图片/视频/附件/PDF/源文件统一扫描清理） */
+export const orphanAssetApi = {
+  scanAll: () => invoke<OrphanAssetScan>("scan_orphan_assets"),
+  clean: (items: OrphanItem[]) =>
+    invoke<OrphanAssetClean>("clean_orphan_assets", { items }),
+};
+
+/** 外部 .md 双向同步 API（保存即写回原文件） */
+export const sourceWritebackApi = {
+  /** 把笔记当前内容写回原 .md 文件。
+   *
+   *  - `force=false`（默认）：mtime 不一致会返回 `kind: "conflict"`，前端据此弹冲突 Modal
+   *  - `force=true`：忽略冲突强制覆盖（冲突 Modal 选"覆盖外部"后调用） */
+  writeBack: (noteId: number, force = false) =>
+    invoke<WriteBackResult>("write_back_source_md", { noteId, force }),
+  /** 解除笔记与外部 .md 的双向同步关联（原文件丢失或用户主动断开）。
+   *  调用后该笔记降级为纯本地笔记，保存不再触发写回 / 不再弹同步提示。 */
+  clearLink: (noteId: number) =>
+    invoke<void>("clear_source_md_link", { noteId }),
+};
+
+/** 一条本地资源 URL 的解析结果（resolveAssetDataUrls 返回） */
+export interface ResolvedAssetUrl {
+  /** 原样回传的请求 URL，据此回填对应 DOM 元素 */
+  url: string;
+  /** data: URL；解析失败 / 超出大小上限时为 null */
+  dataUrl: string | null;
+  /** 文件名，用于 `<a download="…">` */
+  fileName: string | null;
+}
+
+/** 导出时写进 HTML 模板的字体（完整 CSS font-family 值，含 fallback 链） */
+export interface ExportFonts {
+  /** 正文字体；省略 = 用后端模板自带的通用中文链 */
+  body?: string;
+  /** 标题字体；省略 = 跟随正文 */
+  heading?: string;
+}
+
+/**
+ * 「当前导出字体」提供者。
+ *
+ * 由 store 在模块初始化时注册（`setExportFontsProvider`），导出 API 调用时现取。
+ * 之所以用注册回调而不是直接 `import { useAppStore } from "@/store"`：store 已经
+ * import 了本模块，反过来再 import 就成了循环依赖 —— 打包器虽然多半能绕过去，
+ * 但 store 顶层有 subscribe 副作用，初始化顺序一旦被打乱很难查。
+ *
+ * 好处是 7 个导出调用点一处都不用改，将来新增导出入口也自动跟随用户字体。
+ */
+let exportFontsProvider: (() => ExportFonts | undefined) | null = null;
+
+export function setExportFontsProvider(fn: () => ExportFonts | undefined): void {
+  exportFontsProvider = fn;
+}
+
+function currentExportFonts(): ExportFonts | undefined {
+  try {
+    const fonts = exportFontsProvider?.();
+    // 两个字段都空就别传了，让后端走默认模板
+    if (!fonts || (!fonts.body && !fonts.heading)) return undefined;
+    return fonts;
+  } catch {
+    return undefined; // 取字体失败不该拖垮导出
+  }
+}
+
+/** 导出 API */
+export const exportApi = {
+  /** 批量导出笔记。`outputDir` 是用户选择的父目录，
+   *  实际会在其下创建一层 `知识库导出_YYYYMMDD_HHmmss/` 作为导出根（见返回值 root_dir） */
+  exportNotes: (outputDir: string, folderId?: number | null, recursive?: boolean) =>
+    invoke<ExportResult>("export_notes", { outputDir, folderId, recursive }),
+  /** 合并导出：把一个文件夹（或全库）合成**单个**带章节结构的文件。
+   *
+   *  与 exportNotes 的分工：那个导出一堆散 .md（备份 / 迁移），这个导出一份带目录和
+   *  章节层级的文档（交付：发同事 / 打印 / 存档）。`targetPath` 是 save dialog 选定的
+   *  最终路径（含扩展名）；`recursive` 缺省 true（文件夹导出含子文件夹符合直觉）。 */
+  exportFolderMerged: (params: {
+    folderId?: number | null;
+    recursive?: boolean;
+    rootTitle: string;
+    targetPath: string;
+    format: MergeFormat;
+  }) =>
+    invoke<MergeExportResult>("export_folder_merged", {
+      ...params,
+      fonts: currentExportFonts(),
+    }),
+  /** 导出单篇笔记。`parentDir` 是用户选择的父目录。
+   *  - `singleFile=false`（缺省）：在其下建一层 `{标题}/`，放 `{标题}.md` 与 `assets/`
+   *  - `singleFile=true`：不建目录，图片/附件 base64 内嵌，直接写单个 `{标题}.md` */
+  exportSingle: (id: number, parentDir: string, singleFile = false) =>
+    invoke<SingleExportResult>("export_single_note", { id, parentDir, singleFile }),
+  /** T-020 导出单条笔记为 Word（.docx）；targetPath 是用户在 save dialog 选定的最终路径。
+   *
+   *  `bodyHtml`：编辑器实时 DOM（用 printNote 的 editorDomToSelfContainedHtml 生成）。
+   *  传了就用它，导出物才会带上**标题自动编号** —— 编号是 ProseMirror widget
+   *  decoration，不写进 doc / .md，后端拿 markdown 重渲永远看不到。省略则退回旧管线。 */
+  exportSingleToWord: (id: number, targetPath: string, bodyHtml?: string) =>
+    invoke<WordExportResult>("export_single_note_to_word", {
+      id,
+      targetPath,
+      bodyHtml,
+      // 字体只在「系统转换器」路径生效；无转换器时后端回退原生 docx，仍是 Word 默认样式
+      fonts: currentExportFonts(),
+    }),
+  /** T-020 导出单条笔记为 HTML（单文件，图片内嵌 base64）。`bodyHtml` 同上 */
+  exportSingleToHtml: (id: number, targetPath: string, bodyHtml?: string) =>
+    invoke<HtmlExportResult>("export_single_note_to_html", {
+      id,
+      targetPath,
+      bodyHtml,
+      fonts: currentExportFonts(),
+    }),
+  /** R-005 渲染笔记为 HTML 字符串（不写文件），供前端 iframe 打印为 PDF。
+   *  返回的 HTML 与 exportSingleToHtml 同构：图片已 inline 为 base64，自包含。 */
+  renderHtmlForPdf: (id: number) =>
+    invoke<string>("render_note_html_for_pdf", { id, fonts: currentExportFonts() }),
+  /** R-005b 「所见即所得」打印：把编辑器**实时 DOM** 序列化出的 HTML 里的本地图片/附件
+   *  inline 成 base64。与 renderHtmlForPdf 不同——不经 markdown 重渲、不套模板，只内嵌
+   *  传入 HTML 的本地资源，保证打印 iframe 自包含、所见即所得。返回内嵌后的 HTML 片段。 */
+  inlineNoteHtmlAssets: (html: string) =>
+    invoke<string>("inline_note_html_assets", { html }),
+  /** 批量把本地资源 URL 解析成 data: URL（打印 / 复制为 Word 的附件内嵌）。
+   *
+   *  用它而不是 inlineNoteHtmlAssets：后者要整篇 HTML 进出，内嵌图片后动辄几十 MB，
+   *  两次 JSON 序列化就足以卡住 WebView；这条 IPC 上只走 URL 清单 + 附件本身。
+   *  解析不到 / 超出 maxBytes 的条目返回 dataUrl = null，调用方保留原 URL。 */
+  resolveAssetDataUrls: (urls: string[], maxBytes?: number) =>
+    invoke<ResolvedAssetUrl[]>("resolve_asset_data_urls", { urls, maxBytes }),
+};
+
+/** 附件 API（PDF/Office/ZIP/音视频等非图片非文本文件）
+ *
+ * AttachmentInfo.path 是**相对 data_dir 的 POSIX 路径**；笔记 content 里写
+ * `kb-asset://<path>`，需要调用 OS opener 时通过 `systemApi.resolveAssetAbsolute(path)` 还原。
+ */
+export const attachmentApi = {
+  /** 保存附件（base64 数据，给前端拖放/粘贴用） */
+  save: (noteId: number, fileName: string, base64Data: string) =>
+    invoke<AttachmentInfo>("save_note_attachment", { noteId, fileName, base64Data }),
+  /** 从本地路径零拷贝保存（工具栏"插入附件"用，避免大文件 base64 OOM） */
+  saveFromPath: (noteId: number, sourcePath: string) =>
+    invoke<AttachmentInfo>("save_note_attachment_from_path", { noteId, sourcePath }),
+  /** 删除笔记的所有附件 */
+  deleteNoteAttachments: (noteId: number) =>
+    invoke<void>("delete_note_attachments", { noteId }),
+  /** 获取附件存储目录（设置页"打开目录"入口） */
+  getAttachmentsDir: () => invoke<string>("get_attachments_dir"),
+  /** 把 .xlsx/.xls/.xlsm/.xlsb/.ods 附件解析为前端可渲染的结构化 sheets/rows */
+  previewExcel: (rel: string) =>
+    invoke<ExcelPreviewData>("preview_excel_attachment", { rel }),
+  /** 读取附件为文本（md/txt/json/csv/代码等），超长自动截断 */
+  previewText: (rel: string) =>
+    invoke<TextPreviewData>("preview_text_attachment", { rel }),
+};
+
+/**
+ * Excel 二维数据集 API（P1-3b，仅桌面端）。
+ *
+ * 与 `attachmentApi.previewExcel` 的区别：预览是"把文件原样显示出来"，
+ * 数据集是"把它变成可查询的结构化数据"（区域识别 + 字段画像后落库）。
+ */
+export const datasetApi = {
+  /**
+   * 解析附件并入库为数据集，返回数据集个数。
+   *
+   * `force = false`（默认）时源文件哈希未变会直接跳过，不重复解析。
+   */
+  import: (rel: string, force?: boolean) =>
+    invoke<number>("import_attachment_datasets", { rel, force }),
+  /** 列出该附件已入库的数据集 */
+  list: (rel: string) => invoke<Dataset[]>("list_attachment_datasets", { rel }),
+  /** 取数据集详情（元信息 + 列画像） */
+  getSchema: (datasetId: number) =>
+    invoke<DatasetSchema>("get_dataset_schema", { datasetId }),
+  /**
+   * 分页取数据行。
+   *
+   * 返回的是每行的 `{"列名": "值"}` **JSON 字符串**数组 —— 由调用方 parse。
+   * 后端不转二维数组是为了避免列顺序在前后端各维护一份。
+   */
+  previewRows: (datasetId: number, offset?: number, limit?: number) =>
+    invoke<string[]>("preview_dataset_rows", { datasetId, offset, limit }),
+};
+
+/** Excel 预览：单个 Sheet 的结构化数据（headers + rows） */
+export interface ExcelSheetData {
+  name: string;
+  headers: string[];
+  rows: string[][];
+  totalRows: number;
+  truncatedRows: number;
+}
+
+export interface ExcelPreviewData {
+  sheets: ExcelSheetData[];
+  totalRows: number;
+}
+
+export interface TextPreviewData {
+  content: string;
+  totalLines: number;
+  truncated: boolean;
+}
+
+/** 图片 API
+ *
+ * save / saveFromPath 返回**相对 data_dir 的 POSIX 路径**（如 `kb_assets/images/1/x.png`）。
+ * 调用方要拼 `kb-asset://<rel>` 写入笔记 content；用 `lib/assetUrl.ts` 的 `toKbAsset()`。
+ */
+export const imageApi = {
+  /** 保存图片（base64 数据，用于粘贴/拖放）；返回相对路径 */
+  save: (noteId: number, fileName: string, base64Data: string) =>
+    invoke<string>("save_note_image", { noteId, fileName, base64Data }),
+  /** 从本地文件路径保存图片（用于工具栏文件选择）；返回相对路径 */
+  saveFromPath: (noteId: number, sourcePath: string) =>
+    invoke<string>("save_note_image_from_path", { noteId, sourcePath }),
+  /** 从远程 URL 下载并保存图片（粘贴外链图片本地化）。
+   * Rust reqwest 不受 WebView Origin/Referer/CORS 约束，可绕过钉钉/微信图床/知乎/CSDN
+   * 等图床的防盗链；referer 不传时按 host 智能匹配。返回相对路径。 */
+  downloadFromUrl: (noteId: number, url: string, referer?: string) =>
+    invoke<string>("download_image_to_assets", { noteId, url, referer }),
+  /** 删除笔记的所有图片 */
+  deleteNoteImages: (noteId: number) =>
+    invoke<void>("delete_note_images", { noteId }),
+  /** 获取图片存储目录路径（绝对路径，用于"打开目录"入口） */
+  getImagesDir: () => invoke<string>("get_images_dir"),
+  /** 读取图片字节流：路径以 `.enc` 结尾时由后端自动解密。
+   * 接收**相对路径**（kb-asset:// 后那段），加密笔记 observer 用此还原明文 bytes
+   * 转 blob URL 喂给 <img>。vault 锁定时此调用会失败。
+   *
+   * 后端返回 `tauri::ipc::Response`（raw body）→ 这里拿到的是 ArrayBuffer，零编解码。
+   * 旧版返回 `Vec<u8>` 会被序列化成 JSON 数字数组，一张 300KB 的图要传 30 万个数字，
+   * 大图能耗掉数秒；调用方若在其后写剪贴板，用户手势早已过期。 */
+  getBlob: async (path: string): Promise<Uint8Array> => {
+    const buf = await invoke<ArrayBuffer | number[]>("get_image_blob", { path });
+    // 正常走 fetch IPC 通道拿到 ArrayBuffer；万一某平台回落到 JSON 通道则是数字数组，
+    // 两种都还原成 Uint8Array，调用方无感。
+    return buf instanceof ArrayBuffer ? new Uint8Array(buf) : Uint8Array.from(buf);
+  },
+  /** 把图片直接写进系统剪贴板（相对路径，加密图后端自动解密）。
+   *
+   * 走 Rust 侧系统剪贴板，不经 WebView 的 Async Clipboard API，因此不受"用户手势必须
+   * 未过期"的限制。移动端不支持（会返回错误），调用方需自行回退。 */
+  copyToClipboard: (path: string) =>
+    invoke<void>("copy_image_to_clipboard", { path }),
+};
+
+/** 视频 API
+ *
+ * 与图片 API 对称，但走 Tauri 2.x binary IPC（参数 Uint8Array → Rust Vec<u8>），
+ * 比 base64 省 33% 体积 + 零编解码，100MB 视频也能秒传。
+ *
+ * save / saveFromPath 返回**相对 data_dir 的 POSIX 路径**，调用方拼 `kb-asset://<rel>`。
+ *
+ * v1 不支持加密笔记的视频；后端遇到加密笔记会拒绝。
+ */
+export const videoApi = {
+  /** 保存视频字节（Uint8Array 直传，用于粘贴/拖入）；返回相对路径 */
+  save: (noteId: number, fileName: string, data: Uint8Array) =>
+    invoke<string>("save_video", { noteId, fileName, data }),
+  /** 从本地文件路径保存（工具栏文件选择器 / 大文件回退路径，零拷贝）；返回相对路径 */
+  saveFromPath: (noteId: number, sourcePath: string) =>
+    invoke<string>("save_video_from_path", { noteId, sourcePath }),
+  /** 删除笔记的所有视频 */
+  deleteNoteVideos: (noteId: number) =>
+    invoke<void>("delete_note_videos", { noteId }),
+  /** 获取视频存储目录（设置页"打开目录"用） */
+  getVideosDir: () => invoke<string>("get_videos_dir"),
+};
+
+/** 模板 API */
+export const templateApi = {
+  list: () => invoke<NoteTemplate[]>("list_templates"),
+  get: (id: number) => invoke<NoteTemplate>("get_template", { id }),
+  create: (input: NoteTemplateInput) =>
+    invoke<NoteTemplate>("create_template", { input }),
+  update: (id: number, input: NoteTemplateInput) =>
+    invoke<NoteTemplate>("update_template", { id, input }),
+  delete: (id: number) => invoke<void>("delete_template", { id }),
+  /** 按模板建笔记：后端会渲染 {{date}}/{{weekday}}/{{title}} 等占位符 */
+  createNoteFromTemplate: (
+    templateId: number,
+    title?: string,
+    folderId?: number | null,
+  ) =>
+    invoke<Note>("create_note_from_template", {
+      templateId,
+      title,
+      folderId: folderId ?? null,
+    }),
+  /** 仅渲染模板内容（不落库）：用于"日记默认模板"等把文本灌入已有编辑器的场景。
+   *  forDate（YYYY-MM-DD）让 `{{date}}/{{weekday}}` 锁定到该日期 —— 翻历史日记套模板用。 */
+  renderContent: (templateId: number, title?: string, forDate?: string) =>
+    invoke<string>("render_template_content", { templateId, title, forDate }),
+};
+
+/** AI 写作辅助 API */
+export const aiWriteApi = {
+  /** 执行写作辅助操作（流式返回，通过 ai-write:token 事件接收） */
+  assist: (action: string, selectedText: string, context?: string) =>
+    invoke<void>("ai_write_assist", { action, selectedText, context }),
+  /** 取消写作辅助 */
+  cancel: () => invoke<void>("cancel_ai_write_assist"),
+  /**
+   * 根据选区 + 上下文，向 AI 拿一条"最有用"的处理指令建议（一次性，不走流式）。
+   * 失败时调用方应静默忽略（例如未配置默认模型 / 离线 / 限流）。
+   */
+  suggestPrompt: (selectedText: string, context?: string) =>
+    invoke<string>("ai_suggest_prompt", { selectedText, context }),
+};
+
+/**
+ * T-005 AI 规划今日待办
+ *
+ * 非流式：典型耗时 5~15 秒。调用前 UI 要给骨架屏/加载态。
+ * 仅 OpenAI 兼容模型可用；Ollama 会返回错误字符串。
+ */
+export const aiPlanApi = {
+  planToday: (request: PlanTodayRequest) =>
+    invoke<PlanTodayResponse>("ai_plan_today", { request }),
+  /** T-006: AI 生成笔记草稿 + 归档目录建议（未落库）*/
+  draftNote: (request: DraftNoteRequest) =>
+    invoke<DraftNoteResponse>("ai_draft_note", { request }),
+  /** 目标驱动 AI 智能规划：生成 10~30 条结构化待办 + 阶段里程碑（未落库） */
+  planFromGoal: (request: PlanFromGoalRequest) =>
+    invoke<PlanFromGoalResponse>("ai_plan_from_goal", { request }),
+  /** Excel/ODS 文件 → AI 智能规划：解析 Excel 内容后让 AI 拆四象限任务 */
+  planFromExcel: (request: PlanFromExcelRequest) =>
+    invoke<PlanFromGoalResponse>("ai_plan_from_excel", { request }),
+  /** 一键撤销某次 AI 智能规划生成的所有任务，返回删除条数 */
+  undoBatch: (batchId: string) =>
+    invoke<number>("undo_task_batch", { batchId }),
+  /**
+   * 把一段自然语言（通常是语音转写）解析成结构化任务建议。
+   * 用于「语音快速捕获 → 智能解析」场景；典型耗时 2-6s。
+   * 仅返回建议，未落库；调用方拿到后通常直接 taskApi.create()。
+   */
+  extractTaskFromText: (text: string) =>
+    invoke<TaskSuggestion>("ai_extract_task_from_text", { text }),
+};
+
+/**
+ * AI 提示词库 API
+ *
+ * 内置模板在数据库迁移 v19 时写入（见 schema.rs），用户可修改文案/排序/启用状态，
+ * 但 `isBuiltin` / `builtinCode` 字段由后端保护不可修改。
+ */
+export const promptApi = {
+  /** 列出提示词；onlyEnabled=true 时过滤禁用项（编辑器菜单用） */
+  list: (onlyEnabled?: boolean) =>
+    invoke<PromptTemplate[]>("list_prompts", { onlyEnabled }),
+  get: (id: number) => invoke<PromptTemplate>("get_prompt", { id }),
+  create: (input: PromptTemplateInput) =>
+    invoke<PromptTemplate>("create_prompt", { input }),
+  update: (id: number, input: PromptTemplateInput) =>
+    invoke<PromptTemplate>("update_prompt", { id, input }),
+  delete: (id: number) => invoke<boolean>("delete_prompt", { id }),
+  setEnabled: (id: number, enabled: boolean) =>
+    invoke<void>("set_prompt_enabled", { id, enabled }),
+};
+
+/** 定时推送：用户维护多条推送，到点让 AI 跑提示词并推送结果 */
+export const pushApi = {
+  list: () => invoke<PushJob[]>("list_push_jobs"),
+  get: (id: number) => invoke<PushJob>("get_push_job", { id }),
+  create: (input: CreatePushJobInput) =>
+    invoke<number>("create_push_job", { input }),
+  update: (id: number, input: UpdatePushJobInput) =>
+    invoke<boolean>("update_push_job", { id, input }),
+  delete: (id: number) => invoke<boolean>("delete_push_job", { id }),
+  setEnabled: (id: number, enabled: boolean) =>
+    invoke<boolean>("set_push_job_enabled", { id, enabled }),
+  /** 立即运行一次（调试/即时查看） */
+  runNow: (id: number) => invoke<void>("run_push_job_now", { id }),
+  /** 某条推送的最近运行历史 */
+  logs: (jobId: number, limit?: number) =>
+    invoke<PushRunLog[]>("list_push_run_logs", { jobId, limit }),
+  /** 居中弹窗页按 run_log id 拉展示数据 */
+  popupData: (logId: number) =>
+    invoke<PushPopupData>("get_push_popup_data", { logId }),
+};
+
+/** 同步 API（V0 快照归档：本地 ZIP + WebDAV 全量快照） */
+export const syncApi = {
+  /** 导出为本地 ZIP 文件。backupPassword 非空时输出加密包（.zip.enc） */
+  exportToFile: (scope: SyncScope, targetPath: string, backupPassword?: string) =>
+    invoke<SyncResult>("sync_export_to_file", { scope, targetPath, backupPassword }),
+  /** 从本地 ZIP/.enc 文件导入。加密文件需提供 backupPassword */
+  importFromFile: (sourcePath: string, mode: SyncImportMode, backupPassword?: string) =>
+    invoke<SyncManifest>("sync_import_from_file", { sourcePath, mode, backupPassword }),
+  /** 测试 WebDAV 连接 */
+  webdavTest: (url: string, username: string, password: string) =>
+    invoke<void>("sync_webdav_test", { url, username, password }),
+  /** 推送到 WebDAV。backupPassword 非空时上传加密包（kb-sync-<host>.zip.enc） */
+  webdavPush: (scope: SyncScope, config: WebDavConfig, backupPassword?: string) =>
+    invoke<SyncResult>("sync_webdav_push", { scope, config, backupPassword }),
+  /** 从 WebDAV 拉取。云端是加密包时需提供 backupPassword */
+  webdavPull: (
+    mode: SyncImportMode,
+    config: WebDavConfig,
+    filename?: string,
+    backupPassword?: string,
+  ) => invoke<SyncManifest>("sync_webdav_pull", { mode, config, filename, backupPassword }),
+  /** 预览云端 manifest（加密包不支持，会返回错误） */
+  webdavPreview: (config: WebDavConfig, filename?: string) =>
+    invoke<SyncManifest>("sync_webdav_preview", { config, filename }),
+  /** 列出云端所有 kb-sync-*.zip / .zip.enc 快照（多设备场景） */
+  webdavListSnapshots: (config: WebDavConfig) =>
+    invoke<RemoteSnapshot[]>("sync_webdav_list_snapshots", { config }),
+  /** 保存 WebDAV 密码到 OS keyring */
+  savePassword: (username: string, password: string) =>
+    invoke<void>("sync_save_webdav_password", { username, password }),
+  /** 检查 keyring 中是否有该用户的密码 */
+  hasPassword: (username: string) =>
+    invoke<boolean>("sync_has_webdav_password", { username }),
+  /** 取出已加密的密码明文（仅供"复用配置"等本地内部流程用） */
+  getPassword: (username: string) =>
+    invoke<string | null>("sync_get_webdav_password", { username }),
+  /** 删除 keyring 中的密码 */
+  deletePassword: (username: string) =>
+    invoke<void>("sync_delete_webdav_password", { username }),
+  /** T-S050: 保存备份密码（全局唯一，hostname 派生 key 加密存 SQLite） */
+  saveBackupPassword: (password: string) =>
+    invoke<void>("sync_save_backup_password", { password }),
+  /** T-S050: 是否已保存备份密码 */
+  hasBackupPassword: () => invoke<boolean>("sync_has_backup_password"),
+  /** T-S050: 取已保存的备份密码明文（前端加载时填回密码框） */
+  getBackupPassword: () => invoke<string | null>("sync_get_backup_password"),
+  /** T-S050: 删除备份密码（关闭加密备份时） */
+  deleteBackupPassword: () => invoke<void>("sync_delete_backup_password"),
+  /** 列出同步历史 */
+  listHistory: (limit?: number) =>
+    invoke<SyncHistoryItem[]>("sync_list_history", { limit }),
+  /** 唤醒自动同步调度器（配置变更后调用）*/
+  schedulerReload: () => invoke<void>("sync_scheduler_reload"),
+};
+
+/**
+ * T-024 同步 V1 API（多端真同步：单笔记粒度 + 多 backend）
+ *
+ * 与 syncApi（V0 ZIP 备份）并存；用户可同时配置两套
+ */
+export const syncV1Api = {
+  listBackends: () => invoke<SyncBackend[]>("sync_v1_list_backends"),
+  getBackend: (id: number) =>
+    invoke<SyncBackend | null>("sync_v1_get_backend", { id }),
+  createBackend: (input: SyncBackendInput) =>
+    invoke<number>("sync_v1_create_backend", { input }),
+  updateBackend: (id: number, input: SyncBackendInput) =>
+    invoke<void>("sync_v1_update_backend", { id, input }),
+  deleteBackend: (id: number) =>
+    invoke<boolean>("sync_v1_delete_backend", { id }),
+  testConnection: (id: number) =>
+    invoke<void>("sync_v1_test_connection", { id }),
+  readRemoteManifest: (id: number) =>
+    invoke<SyncManifestV1 | null>("sync_v1_read_remote_manifest", { id }),
+  push: (id: number) => invoke<SyncPushResult>("sync_v1_push", { id }),
+  pull: (id: number) => invoke<SyncPullResult>("sync_v1_pull", { id }),
+  /** 后台同步：立即返回，先拉后推在后台跑，完成/失败通过 sync_v1:auto-triggered 事件回报 */
+  triggerBackgroundSync: (id: number) =>
+    invoke<void>("sync_v1_trigger_background_sync", { id }),
+  getLocalManifest: () =>
+    invoke<SyncManifestV1>("sync_v1_get_local_manifest"),
+  /// T-S024: 重建附件索引（扫描所有笔记 content 中的本地资产引用 → upsert 到 note_attachments）
+  /// 返回成功 upsert 的引用数（不存在的文件被跳过且不计入）
+  rebuildAttachmentIndex: () =>
+    invoke<number>("sync_v1_rebuild_attachment_index"),
+  /// T-S025: 清理远端孤儿附件（远端有但 manifest 不引用的 hash，7 天宽限后删）
+  /// Local/S3/WebDAV 均支持（个别禁用 PROPFIND infinity 的 WebDAV 服务器自动跳过）
+  gcAttachments: (id: number) =>
+    invoke<SyncGcResult>("sync_v1_gc_attachments", { id }),
+  /// T-S051: 列出所有同步源待解决的冲突（本地/远端各改各的那条笔记）
+  listConflicts: () => invoke<SyncConflictItem[]>("sync_v1_list_conflicts"),
+  /// T-S051: 解决一条冲突。resolution: "keep_local" | "use_remote" | "merged"（merged 需带 mergedContent）
+  resolveConflict: (
+    conflictFilePath: string,
+    resolution: SyncConflictResolution,
+    mergedContent?: string,
+  ) =>
+    invoke<void>("sync_v1_resolve_conflict", {
+      conflictFilePath,
+      resolution,
+      mergedContent,
+    }),
+};
+
+/**
+ * T-013 自定义数据目录 API
+ *
+ * 修改路径只写指针文件，**重启生效**。当前进程的 db / 资产路径不会变。
+ * 不会自动迁移老数据；UI 强提示用户手动复制旧 `app.db + kb_assets/` 到新目录。
+ */
+export const dataDirApi = {
+  getInfo: () => invoke<ResolvedDataDir>("get_data_dir_info"),
+  setPending: (newPath: string) =>
+    invoke<void>("set_pending_data_dir", { newPath }),
+  clearPending: () => invoke<void>("clear_pending_data_dir"),
+  /** T-013 完整版：写指针 + 写迁移 marker */
+  setPendingWithMigration: (newPath: string) =>
+    invoke<void>("set_pending_data_dir_with_migration", { newPath }),
+  /** 取消未执行 / 失败的迁移（指针退回源目录 + 删 marker） */
+  cancelPendingMigration: () => invoke<void>("cancel_pending_migration"),
+  /** 重试上次失败的迁移（marker crashed → pending，仍需重启才真正执行） */
+  retryPendingMigration: () => invoke<void>("retry_pending_migration"),
+  /** 读迁移 marker（splash 窗口启动时查初始状态用）*/
+  getMigrationMarker: () =>
+    invoke<MigrationMarker | null>("get_migration_marker"),
+};
+
+/** 待办任务 API */
+export const taskApi = {
+  list: (query?: TaskQuery) => invoke<Task[]>("list_tasks", { query }),
+  get: (id: number) => invoke<Task>("get_task", { id }),
+  /** 列出某主任务的所有子任务（按创建时间正序） */
+  listSubtasks: (parentId: number) =>
+    invoke<Task[]>("list_subtasks", { parentId }),
+  create: (input: CreateTaskInput) => invoke<number>("create_task", { input }),
+  update: (id: number, input: UpdateTaskInput) =>
+    invoke<boolean>("update_task", { id, input }),
+  toggleStatus: (id: number) => invoke<number>("toggle_task_status", { id }),
+  /**
+   * 放弃任务（status=2）：留档但不再进待办 / 不提醒 / 不计入完成率。
+   * 区别于删除——放弃的任务可在「已放弃」筛选里找回。
+   */
+  abandon: (id: number) => invoke<void>("abandon_task", { id }),
+  /** 恢复已放弃的任务（回到未完成）；对未放弃的任务是无操作 */
+  restoreAbandoned: (id: number) =>
+    invoke<void>("restore_abandoned_task", { id }),
+  /** 设置工作流看板列：'todo' / 'doing' / 'done'；done 自动标 status=1 */
+  setKanbanStage: (id: number, stage: "todo" | "doing" | "done") =>
+    invoke<void>("set_task_kanban_stage", { id, stage }),
+  delete: (id: number) => invoke<boolean>("delete_task", { id }),
+  /** 批量删除任务（多选模式用），返回实际删除条数 */
+  deleteBatch: (ids: number[]) =>
+    invoke<number>("delete_tasks_batch", { ids }),
+  /** 批量标记完成（多选模式用），返回实际更新条数 */
+  completeBatch: (ids: number[]) =>
+    invoke<number>("complete_tasks_batch", { ids }),
+  addLink: (taskId: number, input: TaskLinkInput) =>
+    invoke<number>("add_task_link", { taskId, input }),
+  removeLink: (linkId: number) =>
+    invoke<boolean>("remove_task_link", { linkId }),
+  stats: () => invoke<TaskStats>("get_task_stats"),
+  /** 稍后提醒：向后推 minutes 分钟 + 重置已提醒标记 */
+  snooze: (id: number, minutes: number) =>
+    invoke<boolean>("snooze_task_reminder", { id, minutes }),
+  /** 完成本次：循环任务推进到下一次；非循环任务等同于 toggleStatus */
+  completeOccurrence: (id: number) =>
+    invoke<void>("complete_task_occurrence", { id }),
+  /** 顶栏 Ctrl+K 搜索：按关键词查待办（LIKE title/description） */
+  search: (query: string, limit?: number) =>
+    invoke<TaskSearchHit[]>("search_tasks", { query, limit }),
+};
+
+/**
+ * 语音识别 API（ASR）
+ *
+ * 当前仅接入阿里云百炼 DashScope（qwen3-asr-flash-filetrans / paraformer-v2）。
+ * 服务商通过 AsrProviderKind 抽象，后续可在不破坏调用方的前提下新增。
+ *
+ * 使用流程：
+ *   1. 用户在设置页保存配置（saveConfig + enabled=true）
+ *   2. 录音 UI 拿到 base64 后调 transcribeAudio
+ *   3. 后端走异步任务模式，单次短录音典型 2-5s 返回
+ */
+export const asrApi = {
+  /** 读取当前 ASR 配置（首次访问 = 默认值，apiKey 为空） */
+  getConfig: () => invoke<AsrConfig>("asr_get_config"),
+  /** 保存配置；启用时后端会强校验 apiKey 非空 */
+  saveConfig: (config: AsrConfig) =>
+    invoke<void>("asr_save_config", { config }),
+  /** 测试连通性（仅校验鉴权，不消耗识别用量） */
+  testConnection: (config: AsrConfig) =>
+    invoke<AsrTestResult>("asr_test_connection", { config }),
+  /** 把录音转为文字 */
+  transcribe: (request: TranscribeRequest) =>
+    invoke<TranscribeResult>("asr_transcribe_audio", { request }),
+};
+
+/** 待办分类 API（一级扁平分类） */
+export const taskCategoryApi = {
+  list: () => invoke<TaskCategory[]>("list_task_categories"),
+  create: (input: CreateTaskCategoryInput) =>
+    invoke<number>("create_task_category", { input }),
+  update: (id: number, input: UpdateTaskCategoryInput) =>
+    invoke<boolean>("update_task_category", { id, input }),
+  /** 删除分类。任务的 category_id 会因 ON DELETE SET NULL 自动落到未分类 */
+  delete: (id: number) => invoke<boolean>("delete_task_category", { id }),
+};
+
+/** Dataview 块 API（v1.12 最简）—— 5 个固定模板查询 */
+export const dataviewApi = {
+  recentNotes: (limit?: number) =>
+    invoke<DataviewRow[]>("dataview_recent_notes", {
+      limit: limit ?? null,
+    }),
+  notesByTag: (tag: string, limit?: number) =>
+    invoke<DataviewRow[]>("dataview_notes_by_tag", {
+      tag,
+      limit: limit ?? null,
+    }),
+  notesByFolder: (folderId: number, limit?: number) =>
+    invoke<DataviewRow[]>("dataview_notes_by_folder", {
+      folderId,
+      limit: limit ?? null,
+    }),
+  pendingTasks: (limit?: number) =>
+    invoke<DataviewRow[]>("dataview_pending_tasks", {
+      limit: limit ?? null,
+    }),
+  tasksByProject: (projectId: number, limit?: number) =>
+    invoke<DataviewRow[]>("dataview_tasks_by_project", {
+      projectId,
+      limit: limit ?? null,
+    }),
+};
+
+/** #9 本地 OCR API（RapidOCR sidecar，仅桌面端可用） */
+export const ocrApi = {
+  /** 本地 OCR 引擎是否随安装包分发（不可用时前端应隐藏/禁用 OCR 入口） */
+  available: () => invoke<boolean>("ocr_available"),
+  /** 识别单张图片文件的文字 */
+  image: (path: string) => invoke<string>("ocr_image", { path }),
+  /** 识别扫描件 PDF（逐页渲染 + OCR + 拼接）；maxPages 缺省 30 */
+  pdf: (path: string, maxPages?: number) =>
+    invoke<string>("ocr_pdf", { path, maxPages: maxPages ?? null }),
+};
+
+/** 项目 API（v41）——任务的工作流容器 + 甘特图的根 */
+export const projectApi = {
+  /** 列出项目。默认隐藏归档项目 */
+  list: (includeArchived?: boolean) =>
+    invoke<Project[]>("list_projects", {
+      includeArchived: includeArchived ?? false,
+    }),
+  get: (id: number) =>
+    invoke<Project | null>("get_project", { id }),
+  create: (input: CreateProjectInput) =>
+    invoke<number>("create_project", { input }),
+  update: (id: number, input: UpdateProjectInput) =>
+    invoke<void>("update_project", { id, input }),
+  /** 删除项目。任务的 project_id 因 ON DELETE SET NULL 自动落到"无项目" */
+  delete: (id: number) => invoke<void>("delete_project", { id }),
+};
+
+/** 闪卡 + FSRS 复习 API */
+export const cardApi = {
+  create: (input: CreateCardInput) => invoke<Card>("create_card", { input }),
+  list: (deck?: string) => invoke<Card[]>("list_cards", { deck: deck ?? null }),
+  get: (id: number) => invoke<Card | null>("get_card", { id }),
+  /** 取今天到期 / 已过期 / 新卡的待复习队列 */
+  listDue: (limit?: number) =>
+    invoke<Card[]>("list_due_cards", { limit: limit ?? null }),
+  updateContent: (id: number, front: string, back: string) =>
+    invoke<void>("update_card_content", { id, front, back }),
+  delete: (id: number) => invoke<void>("delete_card", { id }),
+  /** 提交复习：前端 ts-fsrs 算好新状态后调这个 */
+  review: (input: ReviewCardInput) => invoke<void>("review_card", { input }),
+  stats: () => invoke<CardStats>("get_card_stats"),
+  listLogs: (cardId: number, limit?: number) =>
+    invoke<CardReviewLog[]>("list_card_review_logs", {
+      cardId,
+      limit: limit ?? null,
+    }),
+};
+
+/**
+ * 移动端"检查更新" API（仅 Android/iOS 后端注册了 check_mobile_update 命令；
+ * 桌面端用 tauri-plugin-updater，不要调这个）。
+ */
+export const mobileUpdateApi = {
+  check: () => invoke<MobileUpdateInfo>("check_mobile_update"),
+  /**
+   * 下载 APK 到应用 cache 目录，返回落盘绝对路径。
+   * 进度经 `MOBILE_UPDATE_PROGRESS_EVENT` 事件推送，调用前先 listen。
+   * 支持断点续传：同版本中断后再调会从 .part 接着下。
+   */
+  download: (url: string, version: string) =>
+    invoke<string>("download_mobile_update", { url, version }),
+  /** 拉起系统安装器（Android）。iOS / 桌面返回错误，调用方应回退到浏览器下载 */
+  install: (apkPath: string) => invoke<void>("install_mobile_update", { apkPath }),
+  /** 是否已获「允许安装未知应用」授权（Android 8.0+ 的开关；非 Android 恒 false） */
+  canInstall: () => invoke<boolean>("can_install_mobile_update"),
+  /** 跳到「允许安装未知应用」设置页 —— 系统不允许应用自己授予，只能引导用户开 */
+  openInstallPermissionSettings: () =>
+    invoke<void>("open_install_permission_settings"),
+};

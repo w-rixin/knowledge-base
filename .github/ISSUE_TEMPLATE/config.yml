@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💼 商业授权咨询
+    url: https://github.com/bkywksj/knowledge-base/blob/master/COMMERCIAL-LICENSE.md
+    about: 闭源商用、SaaS 部署、OEM 等场景请联系（QQ/微信 770492966），不要在 Issue 中咨询。
+  - name: 📖 使用文档
+    url: https://github.com/bkywksj/knowledge-base/blob/master/README.md
+    about: 查看 README 了解安装和使用方式。

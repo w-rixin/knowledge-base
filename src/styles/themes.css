@@ -1,0 +1,1036 @@
+/* ═══════════════════════════════════════════════════════════
+   4 套主题 CSS 变量 + 强制 Ant Design 覆盖
+   ═══════════════════════════════════════════════════════════ */
+
+/* ─── 亮色 A：柔光毛玻璃 ────────────────────────────────── */
+[data-theme="light-glass"] {
+  --kb-bg-app: #f0eef6;
+  --kb-bg-card: rgba(255,255,255,0.7);
+  --kb-bg-card-solid: #ffffff;
+  --kb-bg-sidebar: rgba(255,255,255,0.55);
+  --kb-bg-header: rgba(255,255,255,0.72);
+  --kb-bg-content: transparent;
+  --kb-bg-hover: rgba(99,102,241,0.06);
+  --kb-bg-active: rgba(99,102,241,0.1);
+  --kb-text-primary: #1e1b4b;
+  --kb-text-secondary: #6b7280;
+  --kb-text-tertiary: #a8a29e;
+  --kb-border: rgba(99,102,241,0.1);
+  --kb-border-card: rgba(255,255,255,0.6);
+  --kb-border-sidebar: rgba(255,255,255,0.4);
+  --kb-primary: #6366f1;
+  --kb-primary-light: rgba(99,102,241,0.08);
+  --kb-accent: #ec4899;
+  --kb-glass-blur: 20px;
+  --kb-shadow-sm: 0 1px 3px rgba(99,102,241,0.04);
+  --kb-shadow-md: 0 4px 16px rgba(99,102,241,0.06);
+  --kb-scrollbar-thumb: rgba(99,102,241,0.15);
+  --kb-scrollbar-hover: rgba(99,102,241,0.25);
+  color-scheme: light;
+}
+
+/* body 渐变底 */
+[data-theme="light-glass"] body,
+[data-theme="light-glass"] #root {
+  background: linear-gradient(135deg, #ede9fe 0%, #e0e7ff 40%, #fce7f3 100%) !important;
+  background-attachment: fixed !important;
+}
+
+/* 背景装饰光斑 */
+[data-theme="light-glass"]::after {
+  content: '';
+  position: fixed; top: -15%; right: -5%;
+  width: 500px; height: 500px;
+  background: radial-gradient(circle, rgba(99,102,241,0.1), transparent 70%);
+  pointer-events: none; z-index: 0;
+}
+
+/* Layout 容器透明 */
+[data-theme="light-glass"] .ant-layout {
+  background: transparent !important;
+}
+
+/* 侧边栏毛玻璃 */
+[data-theme="light-glass"] .ant-layout-sider {
+  background: var(--kb-bg-sidebar) !important;
+  backdrop-filter: blur(var(--kb-glass-blur)) !important;
+  -webkit-backdrop-filter: blur(var(--kb-glass-blur)) !important;
+  border-right-color: var(--kb-border-sidebar) !important;
+}
+
+/* Header 毛玻璃 */
+[data-theme="light-glass"] .ant-layout-header {
+  background: var(--kb-bg-header) !important;
+  backdrop-filter: blur(var(--kb-glass-blur)) !important;
+  -webkit-backdrop-filter: blur(var(--kb-glass-blur)) !important;
+}
+
+/* Content 透明 */
+[data-theme="light-glass"] .ant-layout-content {
+  background: transparent !important;
+}
+
+/* 卡片毛玻璃 */
+[data-theme="light-glass"] .ant-card {
+  background: var(--kb-bg-card) !important;
+  backdrop-filter: blur(var(--kb-glass-blur)) !important;
+  -webkit-backdrop-filter: blur(var(--kb-glass-blur)) !important;
+  border-color: var(--kb-border-card) !important;
+  box-shadow: var(--kb-shadow-sm) !important;
+  border-radius: 12px !important;
+}
+[data-theme="light-glass"] .ant-card:hover {
+  box-shadow: var(--kb-shadow-md) !important;
+  transform: translateY(-1px);
+}
+
+/* Menu 透明 + 选中渐变 */
+[data-theme="light-glass"] .ant-menu {
+  background: transparent !important;
+}
+[data-theme="light-glass"] .ant-menu-item-selected {
+  background: var(--kb-bg-active) !important;
+}
+[data-theme="light-glass"] .ant-menu-item:hover:not(.ant-menu-item-selected) {
+  background: var(--kb-bg-hover) !important;
+}
+
+/* Input 毛玻璃 */
+[data-theme="light-glass"] .ant-input,
+[data-theme="light-glass"] .ant-input-affix-wrapper {
+  background: rgba(255,255,255,0.5) !important;
+  border-color: var(--kb-border) !important;
+}
+[data-theme="light-glass"] .ant-input:focus,
+[data-theme="light-glass"] .ant-input-affix-wrapper:focus,
+[data-theme="light-glass"] .ant-input-affix-wrapper-focused {
+  border-color: var(--kb-primary) !important;
+  box-shadow: 0 0 0 3px rgba(99,102,241,0.08) !important;
+}
+
+/* ─── 亮色 B：暖木书房 ──────────────────────────────────── */
+[data-theme="light-warm"] {
+  --kb-bg-app: #faf8f5;
+  --kb-bg-card: #ffffff;
+  --kb-bg-sidebar: #f5f0ea;
+  --kb-bg-header: #faf8f5;
+  --kb-bg-content: #faf8f5;
+  --kb-bg-hover: #f0ebe3;
+  --kb-bg-active: #ebe4da;
+  --kb-text-primary: #3d3228;
+  --kb-text-secondary: #7c6f64;
+  --kb-text-tertiary: #b5a99a;
+  --kb-border: #e8e0d5;
+  --kb-border-card: #f0e9df;
+  --kb-border-sidebar: #e8e0d5;
+  --kb-primary: #c2713a;
+  --kb-primary-light: rgba(194,113,58,0.08);
+  --kb-accent: #6b8e5e;
+  --kb-glass-blur: 0px;
+  --kb-shadow-sm: 0 1px 2px rgba(61,50,40,0.04);
+  --kb-shadow-md: 0 4px 12px rgba(61,50,40,0.06);
+  --kb-scrollbar-thumb: rgba(61,50,40,0.12);
+  --kb-scrollbar-hover: rgba(61,50,40,0.22);
+  color-scheme: light;
+}
+
+[data-theme="light-warm"] body,
+[data-theme="light-warm"] #root {
+  background: #faf8f5 !important;
+}
+
+/* Layout */
+[data-theme="light-warm"] .ant-layout {
+  background: var(--kb-bg-app) !important;
+}
+[data-theme="light-warm"] .ant-layout-sider {
+  background: var(--kb-bg-sidebar) !important;
+  border-right-color: var(--kb-border-sidebar) !important;
+}
+[data-theme="light-warm"] .ant-layout-header {
+  background: var(--kb-bg-header) !important;
+  border-bottom-color: var(--kb-border) !important;
+}
+[data-theme="light-warm"] .ant-layout-content {
+  background: var(--kb-bg-content) !important;
+}
+
+/* Card */
+[data-theme="light-warm"] .ant-card {
+  border-color: var(--kb-border-card) !important;
+  border-radius: 8px !important;
+}
+
+/* Menu */
+[data-theme="light-warm"] .ant-menu {
+  background: transparent !important;
+}
+[data-theme="light-warm"] .ant-menu-item-selected {
+  background: var(--kb-bg-active) !important;
+}
+[data-theme="light-warm"] .ant-menu-item:hover:not(.ant-menu-item-selected) {
+  background: var(--kb-bg-hover) !important;
+}
+
+/* Input */
+[data-theme="light-warm"] .ant-input:focus,
+[data-theme="light-warm"] .ant-input-affix-wrapper-focused {
+  border-color: var(--kb-primary) !important;
+}
+
+/* 衬线标题 —— 只作用于「应用界面」的 h1/h2（页面标题、统计卡片数字等）。
+   `:not(.tiptap *)` 把笔记正文里的标题排除在外：那里的字体归用户的
+   「正文字体 / 标题字体」偏好管，主题不该越权（此前带 !important 的写法会让
+   用户在设置里选的标题字体在暖色主题下完全失效，且 H1/H2 变宋体、H3+ 仍是黑体，
+   同一篇笔记里字体割裂）。 */
+[data-theme="light-warm"] h1:not(.tiptap *),
+[data-theme="light-warm"] h2:not(.tiptap *),
+[data-theme="light-warm"] .ant-statistic-content-value {
+  font-family: "Georgia", "Noto Serif SC", "Source Han Serif SC", "PingFang SC", serif !important;
+}
+
+/* 统计卡片顶部彩条 */
+[data-theme="light-warm"] .ant-card {
+  position: relative;
+  overflow: hidden;
+}
+[data-theme="light-warm"] .ant-card::before {
+  content: '';
+  position: absolute; top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #c2713a, #e6a849);
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+[data-theme="light-warm"] .ant-card:hover::before {
+  opacity: 1;
+}
+
+/* ─── 亮色 C：翡翠白瓷 ──────────────────────────────────────
+   三栏浅灰配色（参考微信 macOS 新版视觉）：
+     ActivityBar #e2e3ea（最左、最深的浅灰）
+     SidePanel  #e3e3e5（中间栏、稍浅）
+     主区        #fafafa（右侧、几乎白）
+   强调色：翡翠绿 #07c160（活动条选中态 / Primary / 聚焦边框）
+   注意点：
+     - ActivityBar 内联 background=token.colorBgContainer，必须 !important 强覆盖
+     - SidePanel 内联 ${colorBgContainer}80 + blur，要换成实色并关闭 blur
+     - lucide 图标 color 通过 prop 注入 SVG，选择器要打到 .activity-item svg
+   ──────────────────────────────────────────────────────── */
+[data-theme="light-jade"] {
+  --kb-bg-app: #fafafa;
+  --kb-bg-card: #ffffff;
+  --kb-bg-sidebar: #e2e3ea;
+  --kb-bg-panel: #e3e3e5;
+  --kb-bg-header: #fafafa;
+  --kb-bg-content: #fafafa;
+  --kb-bg-hover: rgba(0,0,0,0.04);
+  --kb-bg-active: rgba(7,193,96,0.14);
+  --kb-text-primary: #191919;
+  --kb-text-secondary: #5f5f5f;
+  --kb-text-tertiary: #9c9c9c;
+  --kb-text-icon: #4a4a4a;
+  --kb-text-icon-hover: #1f1f1f;
+  --kb-border: #d8d9dd;
+  --kb-border-card: #e6e7eb;
+  --kb-border-sidebar: #d4d5da;
+  --kb-primary: #07c160;
+  --kb-primary-light: rgba(7,193,96,0.1);
+  --kb-accent: #07c160;
+  --kb-glass-blur: 0px;
+  --kb-shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
+  --kb-shadow-md: 0 2px 8px rgba(0,0,0,0.06);
+  --kb-scrollbar-thumb: rgba(0,0,0,0.18);
+  --kb-scrollbar-hover: rgba(0,0,0,0.32);
+  color-scheme: light;
+}
+
+[data-theme="light-jade"] body,
+[data-theme="light-jade"] #root {
+  background: var(--kb-bg-app) !important;
+}
+
+/* Layout */
+[data-theme="light-jade"] .ant-layout {
+  background: var(--kb-bg-app) !important;
+}
+[data-theme="light-jade"] .ant-layout-sider {
+  background: var(--kb-bg-sidebar) !important;
+  border-right: 1px solid var(--kb-border-sidebar) !important;
+}
+[data-theme="light-jade"] .ant-layout-header {
+  background: var(--kb-bg-header) !important;
+  border-bottom: 1px solid var(--kb-border) !important;
+}
+[data-theme="light-jade"] .ant-layout-content {
+  background: var(--kb-bg-content) !important;
+}
+
+/* ActivityBar — 浅灰容器（覆盖 inline token.colorBgContainer 的纯白） */
+[data-theme="light-jade"] .activity-bar {
+  background: var(--kb-bg-sidebar) !important;
+  border-right-color: var(--kb-border-sidebar) !important;
+}
+
+/* ActivityBar 图标按钮：浅灰底上深色图标
+   button 的 color / background 是 inline，lucide 图标 color 通过 prop 注入 svg，
+   两层都要覆盖才能稳。 */
+[data-theme="light-jade"] .activity-item {
+  color: var(--kb-text-icon) !important;
+  background: transparent !important;
+}
+[data-theme="light-jade"] .activity-item svg {
+  color: var(--kb-text-icon) !important;
+}
+[data-theme="light-jade"] .activity-item:hover:not([data-active]) {
+  color: var(--kb-text-icon-hover) !important;
+  /* hover 跟随强调色（8% tint），用户改 customAccent 后会自动变色；
+     不再硬编码 rgba(0,0,0,0.05) 中性灰 */
+  background: color-mix(in srgb, var(--kb-primary) 8%, transparent) !important;
+}
+[data-theme="light-jade"] .activity-item:hover:not([data-active]) svg {
+  color: var(--kb-text-icon-hover) !important;
+}
+[data-theme="light-jade"] .activity-item[data-active] {
+  color: var(--kb-primary) !important;
+  /* active 跟随强调色（14% tint），不再硬编码 rgba(7,193,96,0.14) 微信绿 */
+  background: color-mix(in srgb, var(--kb-primary) 14%, transparent) !important;
+}
+[data-theme="light-jade"] .activity-item[data-active] svg {
+  color: var(--kb-primary) !important;
+}
+[data-theme="light-jade"] .activity-item[data-active] span[aria-hidden] {
+  background: var(--kb-primary) !important;
+}
+
+/* SidePanel 浮层 — 中间浅灰栏（覆盖 inline ${colorBgContainer}80 + blur） */
+[data-theme="light-jade"] .side-panel-enter {
+  background: var(--kb-bg-panel) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border-right-color: var(--kb-border) !important;
+}
+
+/* Card */
+[data-theme="light-jade"] .ant-card {
+  background: var(--kb-bg-card) !important;
+  border-color: var(--kb-border-card) !important;
+  border-radius: 6px !important;
+  box-shadow: none !important;
+}
+[data-theme="light-jade"] .ant-card:hover {
+  box-shadow: var(--kb-shadow-sm) !important;
+}
+
+/* Menu */
+[data-theme="light-jade"] .ant-menu {
+  background: transparent !important;
+}
+[data-theme="light-jade"] .ant-menu-item-selected {
+  background: var(--kb-bg-active) !important;
+  color: var(--kb-primary) !important;
+}
+[data-theme="light-jade"] .ant-menu-item:hover:not(.ant-menu-item-selected) {
+  background: var(--kb-bg-hover) !important;
+}
+
+/* Input */
+[data-theme="light-jade"] .ant-input,
+[data-theme="light-jade"] .ant-input-affix-wrapper {
+  background: #ffffff !important;
+  border-color: var(--kb-border) !important;
+}
+[data-theme="light-jade"] .ant-input:focus,
+[data-theme="light-jade"] .ant-input-affix-wrapper:focus,
+[data-theme="light-jade"] .ant-input-affix-wrapper-focused {
+  border-color: var(--kb-primary) !important;
+  box-shadow: 0 0 0 2px var(--kb-primary-light) !important;
+}
+
+/* Table */
+[data-theme="light-jade"] .ant-table {
+  background: transparent !important;
+}
+[data-theme="light-jade"] .ant-table-thead > tr > th,
+[data-theme="light-jade"] .ant-table-thead > tr > td {
+  background: #f3f4f6 !important;
+  border-color: var(--kb-border) !important;
+}
+[data-theme="light-jade"] .ant-table-tbody > tr > td {
+  border-color: var(--kb-border) !important;
+}
+[data-theme="light-jade"] .ant-table-tbody > tr:hover > td {
+  background: var(--kb-bg-hover) !important;
+}
+
+/* Button primary 翠绿按钮 */
+[data-theme="light-jade"] .ant-btn-primary {
+  box-shadow: 0 1px 2px rgba(7,193,96,0.18) !important;
+}
+
+/* 编辑器 */
+[data-theme="light-jade"] .editor-topbar {
+  background: var(--kb-bg-panel) !important;
+  border-bottom-color: var(--kb-border) !important;
+}
+/* .kb-link-status-dock 必须跟着 .editor-body 走：它是编辑区底部的链接状态条，
+   挂在 .editor-body 外面自成一层，不同步就会在状态条上沿断出一条色带 */
+[data-theme="light-jade"] .editor-body,
+[data-theme="light-jade"] .kb-link-status-dock {
+  background: #ffffff !important;
+}
+
+/* ─── 暗色 A：星空沉浸 ──────────────────────────────────── */
+[data-theme="dark-starry"] {
+  --kb-bg-app: #0a0a12;
+  --kb-bg-card: #12121e;
+  --kb-bg-sidebar: #0e0e18;
+  --kb-bg-header: #0e0e18;
+  --kb-bg-content: transparent;
+  --kb-bg-hover: rgba(167,139,250,0.08);
+  --kb-bg-active: rgba(167,139,250,0.14);
+  --kb-text-primary: #e8e6f0;
+  --kb-text-secondary: #a5a2c8;
+  --kb-text-tertiary: #6b6890;
+  --kb-border: rgba(139,92,246,0.12);
+  --kb-border-card: rgba(139,92,246,0.15);
+  --kb-border-sidebar: rgba(139,92,246,0.1);
+  --kb-primary: #a78bfa;
+  --kb-primary-light: rgba(167,139,250,0.1);
+  --kb-accent: #67e8f9;
+  --kb-glass-blur: 0px;
+  --kb-shadow-sm: 0 1px 3px rgba(0,0,0,0.3);
+  --kb-shadow-md: 0 4px 20px rgba(0,0,0,0.4);
+  --kb-shadow-glow: 0 0 24px rgba(167,139,250,0.08);
+  --kb-scrollbar-thumb: rgba(139,92,246,0.2);
+  --kb-scrollbar-hover: rgba(167,139,250,0.35);
+  color-scheme: dark;
+}
+
+[data-theme="dark-starry"] body,
+[data-theme="dark-starry"] #root {
+  background: #0a0a12 !important;
+}
+
+/* Layout */
+[data-theme="dark-starry"] .ant-layout {
+  background: transparent !important;
+}
+[data-theme="dark-starry"] .ant-layout-sider {
+  background: var(--kb-bg-sidebar) !important;
+  border-right: 1px solid var(--kb-border-sidebar) !important;
+  position: relative;
+}
+/* 侧边栏右侧发光线 */
+[data-theme="dark-starry"] .ant-layout-sider::after {
+  content: '';
+  position: absolute; top: 0; right: 0;
+  width: 1px; height: 100%;
+  background: linear-gradient(180deg, transparent, var(--kb-primary), transparent);
+  opacity: 0.25;
+  pointer-events: none;
+}
+[data-theme="dark-starry"] .ant-layout-header {
+  background: rgba(14,14,24,0.85) !important;
+  border-bottom-color: var(--kb-border) !important;
+}
+[data-theme="dark-starry"] .ant-layout-content {
+  background: transparent !important;
+}
+
+/* Card 发光边框 */
+[data-theme="dark-starry"] .ant-card {
+  background: var(--kb-bg-card) !important;
+  border-color: var(--kb-border-card) !important;
+  border-radius: 14px !important;
+  transition: all 0.25s;
+}
+[data-theme="dark-starry"] .ant-card:hover {
+  border-color: rgba(167,139,250,0.25) !important;
+  box-shadow: var(--kb-shadow-glow) !important;
+}
+
+/* Statistic */
+[data-theme="dark-starry"] .ant-statistic-title {
+  color: var(--kb-text-tertiary) !important;
+}
+[data-theme="dark-starry"] .ant-statistic-content-value {
+  color: var(--kb-text-primary) !important;
+}
+
+/* Menu */
+[data-theme="dark-starry"] .ant-menu {
+  background: transparent !important;
+}
+[data-theme="dark-starry"] .ant-menu-item-selected {
+  background: var(--kb-bg-active) !important;
+  box-shadow: var(--kb-shadow-glow) !important;
+}
+[data-theme="dark-starry"] .ant-menu-item:hover:not(.ant-menu-item-selected) {
+  background: var(--kb-bg-hover) !important;
+}
+
+/* Input 发光聚焦 */
+[data-theme="dark-starry"] .ant-input,
+[data-theme="dark-starry"] .ant-input-affix-wrapper {
+  background: rgba(255,255,255,0.03) !important;
+  border-color: var(--kb-border) !important;
+}
+[data-theme="dark-starry"] .ant-input:focus,
+[data-theme="dark-starry"] .ant-input-affix-wrapper-focused {
+  border-color: var(--kb-primary) !important;
+  box-shadow: 0 0 0 3px var(--kb-primary-light), 0 0 20px rgba(167,139,250,0.08) !important;
+}
+
+/* Table */
+[data-theme="dark-starry"] .ant-table {
+  background: transparent !important;
+}
+[data-theme="dark-starry"] .ant-table-thead > tr > th,
+[data-theme="dark-starry"] .ant-table-thead > tr > td {
+  background: var(--kb-bg-card) !important;
+  border-color: var(--kb-border) !important;
+}
+[data-theme="dark-starry"] .ant-table-tbody > tr > td {
+  border-color: var(--kb-border) !important;
+}
+[data-theme="dark-starry"] .ant-table-tbody > tr:hover > td {
+  background: var(--kb-bg-hover) !important;
+}
+
+/* Button */
+[data-theme="dark-starry"] .ant-btn-primary {
+  box-shadow: 0 2px 10px rgba(167,139,250,0.2) !important;
+}
+
+/* ─── 暗色 B：摩卡棕夜 ──────────────────────────────────── */
+[data-theme="dark-mocha"] {
+  --kb-bg-app: #1e1e2e;
+  --kb-bg-card: #24243a;
+  --kb-bg-sidebar: #1a1a2c;
+  --kb-bg-header: #1a1a2c;
+  --kb-bg-content: #1e1e2e;
+  --kb-bg-hover: rgba(245,189,105,0.06);
+  --kb-bg-active: rgba(245,189,105,0.12);
+  --kb-text-primary: #cdd6f4;
+  --kb-text-secondary: #a6adc8;
+  --kb-text-tertiary: #6c7086;
+  --kb-border: #313244;
+  --kb-border-card: #3b3b52;
+  --kb-border-sidebar: #313244;
+  --kb-primary: #f5bd69;
+  --kb-primary-light: rgba(245,189,105,0.1);
+  --kb-accent: #cba6f7;
+  --kb-glass-blur: 0px;
+  --kb-shadow-sm: 0 1px 3px rgba(0,0,0,0.25);
+  --kb-shadow-md: 0 4px 12px rgba(0,0,0,0.3);
+  --kb-scrollbar-thumb: rgba(245,189,105,0.15);
+  --kb-scrollbar-hover: rgba(245,189,105,0.3);
+  color-scheme: dark;
+}
+
+[data-theme="dark-mocha"] body,
+[data-theme="dark-mocha"] #root {
+  background: #1e1e2e !important;
+}
+
+/* Layout */
+[data-theme="dark-mocha"] .ant-layout {
+  background: var(--kb-bg-app) !important;
+}
+[data-theme="dark-mocha"] .ant-layout-sider {
+  background: var(--kb-bg-sidebar) !important;
+  border-right: 1px solid var(--kb-border-sidebar) !important;
+}
+[data-theme="dark-mocha"] .ant-layout-header {
+  background: var(--kb-bg-header) !important;
+  border-bottom-color: var(--kb-border) !important;
+}
+[data-theme="dark-mocha"] .ant-layout-content {
+  background: var(--kb-bg-content) !important;
+}
+
+/* Card */
+[data-theme="dark-mocha"] .ant-card {
+  background: var(--kb-bg-card) !important;
+  border-color: var(--kb-border-card) !important;
+  border-radius: 10px !important;
+  position: relative;
+  overflow: hidden;
+}
+[data-theme="dark-mocha"] .ant-card:hover {
+  border-color: rgba(245,189,105,0.2) !important;
+}
+
+/* Statistic */
+[data-theme="dark-mocha"] .ant-statistic-title {
+  color: var(--kb-text-tertiary) !important;
+}
+[data-theme="dark-mocha"] .ant-statistic-content-value {
+  color: var(--kb-text-primary) !important;
+}
+
+/* Menu */
+[data-theme="dark-mocha"] .ant-menu {
+  background: transparent !important;
+}
+[data-theme="dark-mocha"] .ant-menu-item-selected {
+  background: var(--kb-bg-active) !important;
+}
+[data-theme="dark-mocha"] .ant-menu-item:hover:not(.ant-menu-item-selected) {
+  background: var(--kb-bg-hover) !important;
+}
+
+/* Input */
+[data-theme="dark-mocha"] .ant-input,
+[data-theme="dark-mocha"] .ant-input-affix-wrapper {
+  background: rgba(255,255,255,0.03) !important;
+  border-color: var(--kb-border) !important;
+}
+[data-theme="dark-mocha"] .ant-input:focus,
+[data-theme="dark-mocha"] .ant-input-affix-wrapper-focused {
+  border-color: var(--kb-primary) !important;
+}
+
+/* Table */
+[data-theme="dark-mocha"] .ant-table {
+  background: transparent !important;
+}
+[data-theme="dark-mocha"] .ant-table-thead > tr > th,
+[data-theme="dark-mocha"] .ant-table-thead > tr > td {
+  background: var(--kb-bg-card) !important;
+  border-color: var(--kb-border) !important;
+}
+[data-theme="dark-mocha"] .ant-table-tbody > tr > td {
+  border-color: var(--kb-border) !important;
+}
+[data-theme="dark-mocha"] .ant-table-tbody > tr:hover > td {
+  background: var(--kb-bg-hover) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   通用覆盖 — 所有主题共享
+   ═══════════════════════════════════════════════════════════ */
+
+/* 带前后缀图标的输入框：内层 <input> 不要重复刷底色。
+   ───────────────────────────────────────────────────────────
+   上面 4 套主题都给 `.ant-input` 和 `.ant-input-affix-wrapper` **同时**上了
+   background。但带 prefix/suffix 的输入框（搜索框、带麦克风的框…）结构是
+   wrapper > input，wrapper 有 border-radius、内层 input 的 radius 是 0 —— 内层
+   那块方形色块画在圆角容器之上，把四个角「削平」，看着就是个直角框。
+   平底色下两层同色几乎看不出来，一旦启用背景图（半透明白叠在照片上）立刻扎眼。
+   antd 原生就是内层透明、由 wrapper 承担视觉，这里把它恢复回去。
+   ⚠️ 只作用于 wrapper 内的 input：独立的 .ant-input / TextArea 仍需要自己的底色。 */
+[data-theme] .ant-input-affix-wrapper > .ant-input,
+[data-theme] .ant-input-affix-wrapper > textarea.ant-input {
+  background: transparent !important;
+}
+
+/* 滚动条 */
+[data-theme] ::-webkit-scrollbar-thumb {
+  background: var(--kb-scrollbar-thumb) !important;
+}
+[data-theme] ::-webkit-scrollbar-thumb:hover {
+  background: var(--kb-scrollbar-hover) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   主题自定义 — 全屏背景图 + 可读性遮罩
+   ───────────────────────────────────────────────────────────
+   由 store.applyThemeOverrides() 在 body 上加 .has-custom-bg
+   并写入 --kb-custom-bg-image / --kb-custom-bg-dim。
+   覆盖各主题原 body 渐变；遮罩用 currentColor 为 #000 的 ::before 层，
+   配合主题分类用不同色（暗主题→黑、亮主题→白）。
+   ═══════════════════════════════════════════════════════════ */
+body.has-custom-bg {
+  background-image: var(--kb-custom-bg-image) !important;
+  background-size: var(--kb-custom-bg-size, cover) !important;
+  background-position: var(--kb-custom-bg-position, center center) !important;
+  background-attachment: fixed !important;
+  background-repeat: var(--kb-custom-bg-repeat, no-repeat) !important;
+  position: relative;
+}
+
+/* 暗主题：用黑色叠 + 可选 backdrop-filter 模糊 */
+[data-theme-category="dark"] body.has-custom-bg::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, var(--kb-custom-bg-dim, 0));
+  backdrop-filter: blur(var(--kb-custom-bg-blur, 0px));
+  -webkit-backdrop-filter: blur(var(--kb-custom-bg-blur, 0px));
+  pointer-events: none;
+  z-index: 0;
+}
+/* 亮主题：用白色叠 + 可选 backdrop-filter 模糊 */
+[data-theme-category="light"] body.has-custom-bg::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: rgba(255, 255, 255, var(--kb-custom-bg-dim, 0));
+  backdrop-filter: blur(var(--kb-custom-bg-blur, 0px));
+  -webkit-backdrop-filter: blur(var(--kb-custom-bg-blur, 0px));
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* 启用自定义背景时，让 #root 透明，避免主题预设的纯色/渐变把图遮住。
+   ⚠️ body 自身用的是 background shorthand 不能再 reset，否则会把 background-image 一并清掉；
+   只对 body 重置 background-color，保留 background-image。 */
+body.has-custom-bg {
+  background-color: transparent !important;
+}
+body.has-custom-bg #root {
+  background: transparent !important;
+}
+
+/* Layout 三层在自定义背景下统一透明，让面板/卡片自身的 --kb-bg-* 浮在背景图上 */
+body.has-custom-bg .ant-layout,
+body.has-custom-bg .ant-layout-content {
+  background: transparent !important;
+}
+/* ActivityBar（最左侧 64px 图标栏）+ 承载它的 Sider。
+   ───────────────────────────────────────────────────────────
+   原先刻意保留实色（怕图标漂在背景图上读不出），但那样它会是整屏唯一一块
+   不透明的"贴纸"，跟旁边全玻璃的面板割裂。改为一起走毛玻璃，但**单独设
+   0.78 下限**：这是 64px 窄栏 + 10px 小字，跟着滑杆掉到 30% 会直接读不出来，
+   跟内容区不是一个可读性量级，所以不共用那档 0.55。
+
+   Sider 只做透明容器、玻璃画在 .activity-bar 上 —— 两层都上底色会叠加成
+   接近不透明（0.78 over 0.78 ≈ 0.95），等于白做。
+   自动隐藏模式下 ActivityBar 不在 Sider 里而是绝对定位浮层，
+   .activity-bar 类挂在 <nav> 本身，两种模式都覆盖得到。 */
+body.has-custom-bg .ant-layout-sider {
+  background: transparent !important;
+}
+body.has-custom-bg .activity-bar {
+  --kb-surface-alpha-eff: max(var(--kb-surface-alpha, 0.72), 0.78);
+  background: rgba(
+    var(--kb-surface-base, 255, 255, 255),
+    var(--kb-surface-alpha-eff)
+  ) !important;
+  backdrop-filter: blur(14px) saturate(180%) !important;
+  -webkit-backdrop-filter: blur(14px) saturate(180%) !important;
+  border-right-color: var(--kb-surface-border, rgba(255, 255, 255, 0.12)) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   自定义背景 — 内容面板半透明（.kb-surface）
+   ───────────────────────────────────────────────────────────
+   上一段只把 #root / Layout 三层调透明，但**页面级内容容器的底色写在
+   JSX 内联 style 里**（`background: token.colorBgContainer`），普通类规则
+   打不过内联样式 —— 于是主区中间那块始终是实色，把背景图整片遮住。
+
+   解法用「白名单标记类」而不是全局一刀切：需要跟随背景的容器加 .kb-surface，
+   在这里统一给半透明 + 毛玻璃（`!important` 才压得住内联 background）。
+   没加类的浮层（Modal / Drawer / Dropdown / 右键菜单 / Slash 面板）天然不受
+   影响，保持实色可读 —— 这正是不用通配选择器的原因。
+
+   变量：
+   - --kb-surface-base   面板底色的 `r,g,b` 三元组（各主题各自定义，见下）
+   - --kb-surface-alpha  面板不透明度，由设置页滑杆经 store 写到 :root（0.3~1）
+   - --kb-surface-hover  行 hover 底色（必须是半透明，见下方说明）
+   ═══════════════════════════════════════════════════════════ */
+
+/* 按主题分类兜底 —— 将来新增主题忘了定义 base 也不会塌成透明。
+   ⚠️ 必须排在下面按具体主题定义之前：两者特异性同为 (0,1,0)，靠后者胜出。 */
+[data-theme-category="light"] {
+  --kb-surface-base: 255, 255, 255;
+  --kb-surface-hover: rgba(0, 0, 0, 0.05);
+  --kb-surface-border: rgba(0, 0, 0, 0.08);
+}
+[data-theme-category="dark"] {
+  --kb-surface-base: 20, 20, 28;
+  --kb-surface-hover: rgba(255, 255, 255, 0.08);
+  --kb-surface-border: rgba(255, 255, 255, 0.12);
+}
+
+/* 各主题的面板底色 = 该主题 --kb-bg-card 的 rgb 三元组形式。
+   写成三元组而不是直接复用 --kb-bg-card：后者在 light-glass 里本身就是
+   rgba(...,0.7)，再套一层 alpha 会叠加成几乎全透明。 */
+[data-theme="light-glass"],
+[data-theme="light-warm"],
+[data-theme="light-jade"] {
+  --kb-surface-base: 255, 255, 255;
+}
+[data-theme="dark-starry"] {
+  --kb-surface-base: 18, 18, 30;
+}
+[data-theme="dark-mocha"] {
+  --kb-surface-base: 36, 36, 58;
+}
+
+/* .ant-layout-content .ant-card 一并纳入：首页 / 关于 / 标签 / 提示词 / 定时推送 /
+   设置这些页面整页都是 antd Card 堆出来的，逐个加 class 既啰嗦又容易漏。
+   限定在 .ant-layout-content 之内是安全边界 —— Modal / Drawer 被 antd portal 到
+   body 根节点，不在这个作用域里，所以弹层里的 Card 仍然保持实色。 */
+body.has-custom-bg .kb-surface,
+body.has-custom-bg .ant-layout-content .ant-card {
+  --kb-surface-alpha-eff: var(--kb-surface-alpha, 0.72);
+  background: rgba(
+    var(--kb-surface-base, 255, 255, 255),
+    var(--kb-surface-alpha-eff)
+  ) !important;
+  /* blur 只加在最外这一层：WebView2 上给滚动列表的每一行都加 backdrop-filter
+     会明显掉帧，内部元素一律置 transparent（见下）即可透出这层的模糊结果 */
+  /* !important：light-glass 主题的 .ant-card 自带 `backdrop-filter: ... !important`，
+     不加就会被它压回 blur(20px) 且丢掉 saturate，同一档背景图下各主题观感不一致 */
+  backdrop-filter: blur(14px) saturate(180%) !important;
+  -webkit-backdrop-filter: blur(14px) saturate(180%) !important;
+  /* 半透明后面板边缘会糊进背景图，补描边 + 投影把它从背景里「托」出来。
+     ⚠️ 只写 border-color 不写 border：这批容器里有的本来就没边框（笔记列表、
+     回收站），写 `border: 1px solid` 会凭空给它们加一圈线，改变原有观感。
+     border-width 为 0 时 border-color 是空操作，有边框的则被重新着色。 */
+  border-color: var(--kb-surface-border, rgba(255, 255, 255, 0.12));
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.12);
+}
+
+/* 亮色主题下白色面板压不住浅色背景图 —— 无论滑杆调到多低，实际不透明度
+   不低于 55%，否则正文直接糊在图上没法读。 */
+[data-theme-category="light"] body.has-custom-bg .kb-surface,
+[data-theme-category="light"] body.has-custom-bg .ant-layout-content .ant-card {
+  --kb-surface-alpha-eff: max(var(--kb-surface-alpha, 0.72), 0.55);
+}
+
+/* 带语义色的容器（看板列 / 四象限格）：保留原色相，只按同一档不透明度稀释。
+   这类容器的底色是**信息**（红=紧急、蓝=进行中），直接套 .kb-surface 会被抹成
+   中性灰，等于丢掉颜色编码。所以单开一个变体：用法是容器加 .kb-surface-tint，
+   并把原底色写进内联 CSS 变量 --kb-tint。 */
+body.has-custom-bg .kb-surface-tint {
+  --kb-surface-alpha-eff: var(--kb-surface-alpha, 0.72);
+  background: color-mix(
+    in srgb,
+    var(--kb-tint, transparent) calc(var(--kb-surface-alpha-eff) * 100%),
+    transparent
+  ) !important;
+  /* !important：light-glass 主题的 .ant-card 自带 `backdrop-filter: ... !important`，
+     不加就会被它压回 blur(20px) 且丢掉 saturate，同一档背景图下各主题观感不一致 */
+  backdrop-filter: blur(14px) saturate(180%) !important;
+  -webkit-backdrop-filter: blur(14px) saturate(180%) !important;
+}
+[data-theme-category="light"] body.has-custom-bg .kb-surface-tint {
+  --kb-surface-alpha-eff: max(var(--kb-surface-alpha, 0.72), 0.55);
+}
+
+/* 设置页 / 关于页左侧的锚点导航（.anchor-page-nav）。
+   它本身**没有任何底色** —— 正常主题下靠 Content 的实色页面底衬着就能读。
+   启用背景图后 Content 变透明，这排导航就直接漂在照片上，几乎看不见。
+   这里补一块玻璃底；padding / radius 也只在这个分支加，不影响原主题下的排版。 */
+body.has-custom-bg .anchor-page-nav {
+  --kb-surface-alpha-eff: var(--kb-surface-alpha, 0.72);
+  background: rgba(
+    var(--kb-surface-base, 255, 255, 255),
+    var(--kb-surface-alpha-eff)
+  ) !important;
+  backdrop-filter: blur(14px) saturate(180%) !important;
+  -webkit-backdrop-filter: blur(14px) saturate(180%) !important;
+  border: 1px solid var(--kb-surface-border, rgba(255, 255, 255, 0.12));
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  padding: 6px;
+}
+/* 导航是 13px 小字的窄栏，可读性量级同 ActivityBar，用同一档 0.78 下限，
+   而不是内容区那档 0.55 —— 滑杆拉到底时这排字会直接糊在照片上。 */
+[data-theme-category="light"] body.has-custom-bg .anchor-page-nav {
+  --kb-surface-alpha-eff: max(var(--kb-surface-alpha, 0.72), 0.78);
+}
+[data-theme-category="dark"] body.has-custom-bg .anchor-page-nav {
+  --kb-surface-alpha-eff: max(var(--kb-surface-alpha, 0.72), 0.78);
+}
+
+/* 处于玻璃面板内部、自身又写了内联底色的容器。
+   典型是 AI 问答页：整页由「会话列表 / 顶栏 / 消息区 / 输入区」四块拼成，
+   每块都各自 `background: token.colorBgContainer`。如果每块都当成独立
+   .kb-surface，就是四个硬边玻璃矩形拼在一起（接缝很突兀），而且两层
+   半透明叠加会把不透明度乘上去。正解是外层套一块 .kb-surface，
+   内部这些块统统 .kb-surface-clear 透明化，由外层统一承载底色。 */
+body.has-custom-bg .kb-surface-clear {
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* 面板内部：antd 自绘的底色一律透明。
+   不清掉的话，Table / Card 会在半透明面板之上再刷一层实色，
+   表现为「四周透明、中间表格还是实色」的割裂感。
+
+   作用域用 :is() 同时覆盖两种「面板」：
+   - .kb-surface           —— 手工标记的容器
+   - .ant-layout-content .ant-card —— Card 堆出来的页面（提示词 / 定时推送 /
+     首页 / 关于…）。只让 Card 半透明是不够的：Card 里的 Table 仍会刷实色，
+     表现就是「卡片透了、表格没透」。 */
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-table,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-table-container,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-table-content,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-table-body,
+/* 开了 sticky 表头时 antd 会多套一层 .ant-table-header.ant-table-sticky-holder
+   并给它刷 colorBgContainer —— 漏掉它，表头就是整条白带（实测踩到过） */
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-table-header,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-table-sticky-holder,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-table-thead > tr > th,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-table-thead > tr > td,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-table-tbody > tr > td,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-table-cell-fix-left,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-table-cell-fix-right,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-table-summary,
+/* 空列表占位：底色画在 <tr> 上而不是 td，只写 `> td` 会漏（实测踩到过） */
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) tr.ant-table-placeholder,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) tr.ant-table-placeholder > td,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-card,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-card-head,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-list,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-list-item,
+/* 侧栏文件夹树 / 标签树：antd Tree 自己刷 colorBgContainer，
+   不清掉就是玻璃面板里嵌一个纯白方盒子（实测踩到过） */
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-tree,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-tree-list,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-tree-list-holder,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-menu,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-collapse,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-collapse-content,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-tabs-content-holder,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-empty {
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* 行 hover / 选中：必须换成半透明叠加色。
+   各主题的 --kb-bg-hover 在 light-warm / light-jade 下是**实色**（#f0ebe3 等），
+   直接沿用会让鼠标划过的那一行「闪回实色」，比不做适配还难看。 */
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-table-tbody > tr:hover > td,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-table-tbody > tr.ant-table-row-selected > td,
+body.has-custom-bg :is(.kb-surface, .ant-layout-content .ant-card) .ant-list-item:hover {
+  background: var(--kb-surface-hover, rgba(127, 127, 127, 0.1)) !important;
+}
+
+/* 暗色主题通用 — 编辑器 */
+/* 工具栏激活态：实色主题色方块 + 白字（参考截图效果）
+ * - 背景：主题色 55% 透明度，叠在暗背景上呈现明显的实色块
+ * - 文字：纯白，对比强烈
+ * 用 html[...] 前缀拉高选择器特异性，避免被 global.css 中 .tiptap-toolbar .ant-btn:hover 等同特异性规则覆盖 */
+html[data-theme-category="dark"] .tiptap-toolbar .toolbar-btn-active,
+html[data-theme-category="dark"] .tiptap-toolbar .toolbar-btn-active:not(:disabled) {
+  color: #ffffff !important;
+  background: color-mix(in srgb, var(--kb-primary, #a78bfa) 55%, transparent) content-box !important;
+  padding: 2px !important;
+}
+html[data-theme-category="dark"] .tiptap-toolbar .toolbar-btn-active:hover:not(:disabled) {
+  color: #ffffff !important;
+  background: color-mix(in srgb, var(--kb-primary, #a78bfa) 70%, transparent) content-box !important;
+}
+[data-theme-category="dark"] .tiptap mark {
+  background: rgba(255, 243, 191, 0.2);
+  color: #ffd666;
+}
+[data-theme-category="dark"] .tiptap table th {
+  /* 与 .code-block-toolbar 暗色版同源（5% 文本叠加） */
+  background: color-mix(in srgb, var(--ant-color-text, #fff) 5%, transparent) !important;
+}
+[data-theme-category="dark"] .tiptap table td.selectedCell,
+[data-theme-category="dark"] .tiptap table th.selectedCell {
+  background: var(--kb-primary-light) !important;
+}
+[data-theme-category="dark"] .tiptap [style*="border: 1px dashed"] {
+  border-color: rgba(255, 255, 255, 0.35) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   毛玻璃额外 — 二级组件
+   ═══════════════════════════════════════════════════════════ */
+
+/* Dropdown / Modal 等弹层 */
+[data-theme="light-glass"] .ant-dropdown-menu {
+  background: rgba(255,255,255,0.85) !important;
+  backdrop-filter: blur(16px) !important;
+}
+
+/* 编辑器顶栏 + body */
+[data-theme="light-glass"] .editor-topbar {
+  background: rgba(255,255,255,0.6) !important;
+  backdrop-filter: blur(16px) !important;
+}
+/* 半透明叠在页面渐变上 —— dock 不跟着叠就会露出原始渐变（色带最明显的一档） */
+[data-theme="light-glass"] .editor-body,
+[data-theme="light-glass"] .kb-link-status-dock {
+  background: rgba(255,255,255,0.5) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   星空额外 — 发光 + 编辑器
+   ═══════════════════════════════════════════════════════════ */
+
+[data-theme="dark-starry"] .editor-topbar {
+  background: rgba(14,14,24,0.9) !important;
+}
+[data-theme="dark-starry"] .editor-body,
+[data-theme="dark-starry"] .kb-link-status-dock {
+  background: var(--kb-bg-card) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   摩卡额外 — 编辑器
+   ═══════════════════════════════════════════════════════════ */
+
+[data-theme="dark-mocha"] .editor-topbar {
+  background: var(--kb-bg-sidebar) !important;
+}
+[data-theme="dark-mocha"] .editor-body,
+[data-theme="dark-mocha"] .kb-link-status-dock {
+  background: var(--kb-bg-card) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   暖木额外 — 编辑器
+   ═══════════════════════════════════════════════════════════ */
+
+[data-theme="light-warm"] .editor-topbar {
+  background: #f5f0ea !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   T-B01: 暗色主题统一文字色对比度兜底
+   覆盖 dark-starry / dark-mocha 两套主题。
+   修复用户反馈："黑夜星空主题下模型 ID 文字纯白看不见"——根因是某些
+   themes.css 里只 override 了 background 没 override color，导致 antd 默认
+   字色（理应跟 darkAlgorithm 派生）和实际容器 bg 不匹配。这里显式把所有
+   表单 / 下拉菜单的 color 绑回主题 text token。
+   ═══════════════════════════════════════════════════════════ */
+
+[data-theme-category="dark"] .ant-input,
+[data-theme-category="dark"] .ant-input-affix-wrapper,
+[data-theme-category="dark"] .ant-input-affix-wrapper input,
+[data-theme-category="dark"] .ant-input-number,
+[data-theme-category="dark"] .ant-input-number input,
+[data-theme-category="dark"] .ant-input-textarea-show-count,
+[data-theme-category="dark"] textarea.ant-input,
+[data-theme-category="dark"] .ant-select-selection-item,
+[data-theme-category="dark"] .ant-select-selection-placeholder,
+[data-theme-category="dark"] .ant-select-selection-search-input {
+  color: var(--ant-color-text, rgba(255, 255, 255, 0.92)) !important;
+}
+
+/* 暗色下拉容器：面板 bg 用 elevated（避免下拉时露出白底）
+   menu / option 字色绑主题文字色 */
+[data-theme-category="dark"] .ant-select-dropdown,
+[data-theme-category="dark"] .ant-picker-dropdown,
+[data-theme-category="dark"] .ant-dropdown-menu,
+[data-theme-category="dark"] .ant-cascader-dropdown {
+  background: var(--ant-color-bg-elevated, #1f1f2e) !important;
+}
+[data-theme-category="dark"] .ant-select-item,
+[data-theme-category="dark"] .ant-dropdown-menu-item,
+[data-theme-category="dark"] .ant-cascader-menu-item {
+  color: var(--ant-color-text, rgba(255, 255, 255, 0.92)) !important;
+}
+[data-theme-category="dark"] .ant-select-item-option-active:not(
+    .ant-select-item-option-disabled
+  ),
+[data-theme-category="dark"] .ant-dropdown-menu-item:hover:not(
+    .ant-dropdown-menu-item-disabled
+  ) {
+  background: var(--ant-color-fill-secondary, rgba(255, 255, 255, 0.08)) !important;
+}
+[data-theme-category="dark"] .ant-select-item-option-selected {
+  background: var(--ant-color-primary-bg, rgba(167, 139, 250, 0.16)) !important;
+}
