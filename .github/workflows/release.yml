@@ -95,26 +95,14 @@ jobs:
             echo "Created draft release $TAG"
           fi
 
-      - name: Report build switches
-        # 矩阵已改为在 release job 内静态声明（见该 job strategy 注释），
-        # 这里只把两个开关的实际取值打进日志，便于排查「为什么某个平台没构建」。
-        # 真正的跳过逻辑在 release job 的 `if:`。
-        shell: bash
-        env:
-          RELEASE_WINDOWS: ${{ vars.RELEASE_WINDOWS }}
-          RELEASE_KYLIN_ARM: ${{ vars.RELEASE_KYLIN_ARM }}
+      - name: Report build scope
+        # 矩阵为静态全量声明（见 release job 的 strategy 注释），本步骤只把
+        # 实际构建范围打进日志，方便核对是否有矩阵项没跑起来。
         run: |
-          if [ "$RELEASE_WINDOWS" = "skip" ]; then
-            echo "跳过 Windows（RELEASE_WINDOWS=skip，由发版机本地构建提供）"
-          else
-            echo "构建 Windows（RELEASE_WINDOWS='${RELEASE_WINDOWS:-unset}'）"
-          fi
-          if [ "$RELEASE_KYLIN_ARM" = "skip" ]; then
-            echo "跳过麒麟 aarch64（RELEASE_KYLIN_ARM=skip）"
-          else
-            echo "构建麒麟 aarch64（RELEASE_KYLIN_ARM='${RELEASE_KYLIN_ARM:-unset}'）"
-          fi
-          echo "矩阵固定包含：windows-latest / macos-latest x2 / ubuntu-22.04 / ubuntu-24.04-arm"
+          echo "本仓库为公开仓库，Actions 与 arm64 runner 均免费无限量，故采用全量矩阵。"
+          echo "将构建：windows-latest / macos-latest(aarch64, x86_64) /"
+          echo "          ubuntu-22.04(x86_64 deb+appimage) / ubuntu-24.04-arm(麒麟 aarch64 deb)"
+          echo "其中 ubuntu-24.04-arm 产出的 deb 即麒麟 / 飞腾 / 鲲鹏所需安装包。"
 
   # ===========================================================================
   # Job 1: 跨平台构建
@@ -125,20 +113,32 @@ jobs:
       contents: write
     strategy:
       fail-fast: false
-      # 矩阵**静态声明**，不用 fromJSON(needs.*.outputs.*)。
+      # 矩阵**静态声明**（不使用 fromJSON / 不依赖任何 vars）。
       #
-      # 为什么不用动态矩阵（历史踩坑记录，勿改回）：
-      # 1) 早期用字符串拼 JSON，产出 [..,..],{..} 非法 JSON → fromJSON 静默失败；
-      # 2) 改成 bash 数组 + jq 后 JSON 合法（日志确认 5 项齐全），
-      #    但 GitHub 依然不创建本作业，rerun 报
-      #    "run cannot be rerun; its workflow file may be broken"。
-      #    即 matrix 在 job 级strategy 里取 needs 输出这条路径在本项目组合下不可用，
-      #    失败表现是「prepare-release 绿、release 空白」，极难定位。
-      # 静态矩阵把问题从运行期挪到解析期，也让 Actions 页面直接列出各 job。
+      # 三个必须记住的坑（本项目都踩过，勿改回）：
       #
-      # 两个开关改用 `if` 逐条判断（挂在 job 级 works）：
-      #   RELEASE_WINDOWS=skip → 跳过 Windows（Windows 由发版机本地构建提供）
-      #   RELEASE_KYLIN_ARM=skip → 跳过麒麟 aarch64（省 ARM runner 配额）
+      # 1) 不要用 `matrix: ${{ fromJSON(needs.X.outputs.matrix) }}` 动态矩阵。
+      #    本项目实测该路径下 release 作业**永远不被创建**，run 直接标 failure，
+      #    页面提示 "This run likely failed because of a workflow file issue"，
+      #    rerun 报 "its workflow file may be broken"。而 prepare-release 是绿的，
+      #    极易误判成"构建失败"。静态矩阵把问题从运行期挪到解析期，可被 actionlint 检出。
+      #
+      # 2) **`matrix` 上下文在 job 级 `if:` 里不可用**（actionlint 明确报错：
+      #    'context "matrix" is not allowed here'，job 级仅
+      #    github / inputs / needs / vars 可用）。写了会让**整个工作流解析失败**，
+      #    所有 job 都不跑 —— 这正是本项目排查最久的一个坑。
+      #
+      # 3) 早期用字符串拼 JSON 产出 [..,..],{..} 非法 JSON，fromJSON 静默失败。
+      #    现改为 YAML 静态列表，从根上不存在拼接问题。
+      #
+      # 关于"按平台跳过"：曾想用 vars + fromJSON 动态构造矩阵，但那样一旦变量未设置
+      # （新仓库默认就没有）行为不确定。改为**全量构建**——公开仓库的 Actions
+      # 与 arm64 runner 均免费无限量，无省额必要。若将来确需跳过某平台，
+      # 正确做法是复制本文件为 release-minimal.yml 手工删掉对应条目，
+      # 不要在矩阵里引变量。
+      #
+      # 若临时不想构建某平台，在 Actions 页面勾选后点 Run workflow，
+      # 或用 workflow_dispatch 的 version 输入重跑指定版本。
       matrix:
         include:
           - platform: windows-latest
@@ -151,18 +151,13 @@ jobs:
             target: x86_64-apple-darwin
           - platform: ubuntu-22.04
             args: --bundles deb,appimage
-          # 麒麟 / 飞腾 / 鲲鹏 aarch64：原生 ARM runner（Cobalt 100），非交叉编译，
-          # 因此无需 --target，产物 triple 即 aarch64-unknown-linux-gnu，与麒麟机一致。
+          # 麒麟 / 飞腾 / 鲲鹏 aarch64：原生 ARM runner（Cobalt 100 / Armv9-A），
+          # 非 QEMU 模拟，因此无需 --target；host triple 即
+          # aarch64-unknown-linux-gnu，产物与麒麟机架构一致。
           - platform: ubuntu-24.04-arm
             args: --bundles deb
 
     runs-on: ${{ matrix.platform }}
-
-    # 逐条开关：matrix 含全部 5 项，用 if 决定某项是否真跑。
-    # 比在 prepare-release 里动态裁剪矩阵更可靠（不依赖 fromJSON）。
-    if: |
-      (matrix.platform != 'windows-latest' || vars.RELEASE_WINDOWS != 'skip')
-      && (matrix.platform != 'ubuntu-24.04-arm' || vars.RELEASE_KYLIN_ARM != 'skip')
 
     steps:
       - name: Checkout
