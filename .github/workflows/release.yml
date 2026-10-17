@@ -56,7 +56,6 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
       # 归一化后的 tag，job 2 创建/上传产物时要用（手动触发时不能直接用 ref_name）
       tag: ${{ steps.tag.outputs.tag }}
     steps:
@@ -96,58 +95,26 @@ jobs:
             echo "Created draft release $TAG"
           fi
 
-      - name: Compute build matrix
-        id: set-matrix
+      - name: Report build switches
+        # 矩阵已改为在 release job 内静态声明（见该 job strategy 注释），
+        # 这里只把两个开关的实际取值打进日志，便于排查「为什么某个平台没构建」。
+        # 真正的跳过逻辑在 release job 的 `if:`。
         shell: bash
         env:
           RELEASE_WINDOWS: ${{ vars.RELEASE_WINDOWS }}
-          # 国产麒麟 aarch64 产物。默认 build（与其它平台一起构建）；
-          # 设 skip 可省掉 ARM runner 配额（ARM runner 排队通常比 x64 久）。
-          # 麒麟目标机常处内网/离线，故这条产物走 GitHub Release 下载后 U 盘摆渡。
           RELEASE_KYLIN_ARM: ${{ vars.RELEASE_KYLIN_ARM }}
         run: |
-          # 用 bash 数组累积条目，最后用 jq 拼 JSON。
-          #
-          # 为什么不用字符串变量直接拼：
-          # 早先用 INCLUDE="[$A,$B]" 之后 INCLUDE="$INCLUDE,$C" 追加，
-          # 一旦任何一次赋值把中括号写进变量，最终就会拼出
-          #   [..,..],{..}      ← 数组提前闭合 + 尾部孤立对象
-          # 这种**非法 JSON**。fromJSON 解析失败时 GitHub 不报 fromJSON 的错，
-          # 而是静默不创建 release 矩阵作业，只在 run 概要里看到
-          # "prepare-release ✓ / release 一片空白"，极难定位。
-          # 改用数组 + jq 后，JSON 由结构化数据生成，不可能拼错。
-          ITEMS=()
-
-          if [ "$RELEASE_WINDOWS" != "skip" ]; then
-            ITEMS+=('{"platform":"windows-latest","args":"--bundles nsis"}')
-            echo "含 Windows（RELEASE_WINDOWS='${RELEASE_WINDOWS:-unset}'）"
+          if [ "$RELEASE_WINDOWS" = "skip" ]; then
+            echo "跳过 Windows（RELEASE_WINDOWS=skip，由发版机本地构建提供）"
           else
-            echo "跳过 Windows（RELEASE_WINDOWS=skip，由发版机本地构建）"
+            echo "构建 Windows（RELEASE_WINDOWS='${RELEASE_WINDOWS:-unset}'）"
           fi
-
-          ITEMS+=('{"platform":"macos-latest","args":"--bundles app,dmg","target":"aarch64-apple-darwin"}')
-          ITEMS+=('{"platform":"macos-latest","args":"--bundles app,dmg","target":"x86_64-apple-darwin"}')
-          ITEMS+=('{"platform":"ubuntu-22.04","args":"--bundles deb,appimage"}')
-
-          # 麒麟 / 飞腾 / 鲲鹏 aarch64：原生 ARM runner（Cobalt 100），非交叉编译，
-          # 因此无需 --target，产物 triple 即 aarch64-unknown-linux-gnu，与麒麟机一致。
-          if [ "$RELEASE_KYLIN_ARM" != "skip" ]; then
-            ITEMS+=('{"platform":"ubuntu-24.04-arm","args":"--bundles deb"}')
-            echo "含麒麟 aarch64（RELEASE_KYLIN_ARM='${RELEASE_KYLIN_ARM:-unset}'）"
-          else
+          if [ "$RELEASE_KYLIN_ARM" = "skip" ]; then
             echo "跳过麒麟 aarch64（RELEASE_KYLIN_ARM=skip）"
+          else
+            echo "构建麒麟 aarch64（RELEASE_KYLIN_ARM='${RELEASE_KYLIN_ARM:-unset}'）"
           fi
-
-          # jq -s 把多个 JSON 对象收成数组，比字符串拼接可靠
-          INCLUDE="$(printf '%s\n' "${ITEMS[@]}" | jq -s -c '{include: .}')"
-
-          # 校验：必须是合法 JSON，否则这一步直接失败，别把坏数据传给 fromJSON
-          echo "$INCLUDE" | jq -e . > /dev/null \
-            || { echo "::error::矩阵 JSON 非法: $INCLUDE"; exit 1; }
-
-          echo "构建矩阵：$INCLUDE"
-
-          echo "matrix={\"include\":$INCLUDE}" >> "$GITHUB_OUTPUT"
+          echo "矩阵固定包含：windows-latest / macos-latest x2 / ubuntu-22.04 / ubuntu-24.04-arm"
 
   # ===========================================================================
   # Job 1: 跨平台构建
@@ -158,10 +125,44 @@ jobs:
       contents: write
     strategy:
       fail-fast: false
-      # 矩阵由 prepare-release 动态生成（受仓库变量 RELEASE_WINDOWS 控制是否含 Windows）
-      matrix: ${{ fromJSON(needs.prepare-release.outputs.matrix) }}
+      # 矩阵**静态声明**，不用 fromJSON(needs.*.outputs.*)。
+      #
+      # 为什么不用动态矩阵（历史踩坑记录，勿改回）：
+      # 1) 早期用字符串拼 JSON，产出 [..,..],{..} 非法 JSON → fromJSON 静默失败；
+      # 2) 改成 bash 数组 + jq 后 JSON 合法（日志确认 5 项齐全），
+      #    但 GitHub 依然不创建本作业，rerun 报
+      #    "run cannot be rerun; its workflow file may be broken"。
+      #    即 matrix 在 job 级strategy 里取 needs 输出这条路径在本项目组合下不可用，
+      #    失败表现是「prepare-release 绿、release 空白」，极难定位。
+      # 静态矩阵把问题从运行期挪到解析期，也让 Actions 页面直接列出各 job。
+      #
+      # 两个开关改用 `if` 逐条判断（挂在 job 级 works）：
+      #   RELEASE_WINDOWS=skip → 跳过 Windows（Windows 由发版机本地构建提供）
+      #   RELEASE_KYLIN_ARM=skip → 跳过麒麟 aarch64（省 ARM runner 配额）
+      matrix:
+        include:
+          - platform: windows-latest
+            args: --bundles nsis
+          - platform: macos-latest
+            args: --bundles app,dmg
+            target: aarch64-apple-darwin
+          - platform: macos-latest
+            args: --bundles app,dmg
+            target: x86_64-apple-darwin
+          - platform: ubuntu-22.04
+            args: --bundles deb,appimage
+          # 麒麟 / 飞腾 / 鲲鹏 aarch64：原生 ARM runner（Cobalt 100），非交叉编译，
+          # 因此无需 --target，产物 triple 即 aarch64-unknown-linux-gnu，与麒麟机一致。
+          - platform: ubuntu-24.04-arm
+            args: --bundles deb
 
     runs-on: ${{ matrix.platform }}
+
+    # 逐条开关：matrix 含全部 5 项，用 if 决定某项是否真跑。
+    # 比在 prepare-release 里动态裁剪矩阵更可靠（不依赖 fromJSON）。
+    if: |
+      (matrix.platform != 'windows-latest' || vars.RELEASE_WINDOWS != 'skip')
+      && (matrix.platform != 'ubuntu-24.04-arm' || vars.RELEASE_KYLIN_ARM != 'skip')
 
     steps:
       - name: Checkout
