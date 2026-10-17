@@ -76,31 +76,45 @@ jobs:
           # 麒麟目标机常处内网/离线，故这条产物走 GitHub Release 下载后 U 盘摆渡。
           RELEASE_KYLIN_ARM: ${{ vars.RELEASE_KYLIN_ARM }}
         run: |
-          WIN='{"platform":"windows-latest","args":"--bundles nsis"}'
-          MAC_ARM='{"platform":"macos-latest","args":"--bundles app,dmg","target":"aarch64-apple-darwin"}'
-          MAC_X64='{"platform":"macos-latest","args":"--bundles app,dmg","target":"x86_64-apple-darwin"}'
-          LINUX='{"platform":"ubuntu-22.04","args":"--bundles deb,appimage"}'
+          # 用 bash 数组累积条目，最后用 jq 拼 JSON。
+          #
+          # 为什么不用字符串变量直接拼：
+          # 早先用 INCLUDE="[$A,$B]" 之后 INCLUDE="$INCLUDE,$C" 追加，
+          # 一旦任何一次赋值把中括号写进变量，最终就会拼出
+          #   [..,..],{..}      ← 数组提前闭合 + 尾部孤立对象
+          # 这种**非法 JSON**。fromJSON 解析失败时 GitHub 不报 fromJSON 的错，
+          # 而是静默不创建 release 矩阵作业，只在 run 概要里看到
+          # "prepare-release ✓ / release 一片空白"，极难定位。
+          # 改用数组 + jq 后，JSON 由结构化数据生成，不可能拼错。
+          ITEMS=()
+
+          if [ "$RELEASE_WINDOWS" != "skip" ]; then
+            ITEMS+=('{"platform":"windows-latest","args":"--bundles nsis"}')
+            echo "含 Windows（RELEASE_WINDOWS='${RELEASE_WINDOWS:-unset}'）"
+          else
+            echo "跳过 Windows（RELEASE_WINDOWS=skip，由发版机本地构建）"
+          fi
+
+          ITEMS+=('{"platform":"macos-latest","args":"--bundles app,dmg","target":"aarch64-apple-darwin"}')
+          ITEMS+=('{"platform":"macos-latest","args":"--bundles app,dmg","target":"x86_64-apple-darwin"}')
+          ITEMS+=('{"platform":"ubuntu-22.04","args":"--bundles deb,appimage"}')
+
           # 麒麟 / 飞腾 / 鲲鹏 aarch64：原生 ARM runner（Cobalt 100），非交叉编译，
           # 因此无需 --target，产物 triple 即 aarch64-unknown-linux-gnu，与麒麟机一致。
-          LINUX_ARM='{"platform":"ubuntu-24.04-arm","args":"--bundles deb"}'
-
-          INCLUDE="[$WIN,$MAC_ARM,$MAC_X64,$LINUX]"
-          if [ "$RELEASE_WINDOWS" = "skip" ]; then
-            echo "跳过 Windows CI 构建（RELEASE_WINDOWS=skip，Windows 由发版机本地构建提供）"
-            INCLUDE="[$MAC_ARM,$MAC_X64,$LINUX]"
+          if [ "$RELEASE_KYLIN_ARM" != "skip" ]; then
+            ITEMS+=('{"platform":"ubuntu-24.04-arm","args":"--bundles deb"}')
+            echo "含麒麟 aarch64（RELEASE_KYLIN_ARM='${RELEASE_KYLIN_ARM:-unset}'）"
           else
-            echo "含 Windows CI 构建（RELEASE_WINDOWS='${RELEASE_WINDOWS:-unset}'）"
+            echo "跳过麒麟 aarch64（RELEASE_KYLIN_ARM=skip）"
           fi
 
-          if [ "$RELEASE_KYLIN_ARM" = "skip" ]; then
-            echo "跳过麒麟 aarch64 构建（RELEASE_KYLIN_ARM=skip）"
-          else
-            echo "含麒麟 aarch64 构建（RELEASE_KYLIN_ARM='${RELEASE_KYLIN_ARM:-unset}'）"
-            INCLUDE="$INCLUDE,$LINUX_ARM"
-          fi
+          # jq -s 把多个 JSON 对象收成数组，比字符串拼接可靠
+          INCLUDE="$(printf '%s\n' "${ITEMS[@]}" | jq -s -c '{include: .}')"
 
-          # 调试：把最终矩阵打到日志里。GitHub 解析 fromJSON 失败时，
-          # 只能靠这行确认拼出来的 JSON 到底长什么样，别删。
+          # 校验：必须是合法 JSON，否则这一步直接失败，别把坏数据传给 fromJSON
+          echo "$INCLUDE" | jq -e . > /dev/null \
+            || { echo "::error::矩阵 JSON 非法: $INCLUDE"; exit 1; }
+
           echo "构建矩阵：$INCLUDE"
 
           echo "matrix={\"include\":$INCLUDE}" >> "$GITHUB_OUTPUT"
