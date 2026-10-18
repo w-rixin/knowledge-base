@@ -55,7 +55,14 @@ cc = "1"
 #   而 Tauri 2 硬依赖 webkit2gtk-4.1（要求 glibc >= 2.35）无法安装，
 #   故整体降级到 Tauri 1.8，改用系统已有的 webkit2gtk-4.0（本机 2.38.5）。
 #   tray-icon / protocol-asset / image-png 在 1.x 中均为可用 feature。
-tauri = { version = "1", features = ["protocol-asset", "tray-icon", "image-png"] }
+# ⚠️ Tauri 1.x 的 feature 名与 v2 不同（写错会报 "does not have that feature"）：
+#   v2: tray-icon   → v1: system-tray
+#   v2: image-png   → v1: icon-png
+#   protocol-asset 两版同名
+# 其余 allowlist 能力（dialog/notification/clipboard/global-shortcut/shell/fs/http/
+# os/path/process/window/updater）由 tauri-build 依据 tauri.conf.json 的 allowlist
+# **自动注入**对应 feature，无需在此手写。
+tauri = { version = "1", features = ["protocol-asset", "system-tray", "icon-png"] }
 # Tauri 1.x 中「打开文件/URL」由 allowlist 的 shell.open 提供，
 # 没有 tauri-plugin-opener（该插件仅 v2 存在）。
 # 保留的独立插件均为官方提供过 1.x 版本的：
