@@ -1084,7 +1084,7 @@ pub fn run() {
 
                 // 全局快捷键注册。单条注册失败只 log warn，不阻断启动；用户可在设置页改键/禁用
                 services::shortcut::ShortcutService::register_all(
-                    app.handle(),
+                    &app.handle(),
                     &app.state::<AppState>().db,
                 );
             }
@@ -1254,12 +1254,9 @@ pub fn run() {
             //    且这两个函数本身没有平台 gate（内部按 cfg 分支降级），故直接列出。
             commands::ocr::ocr_available,
             commands::ocr::ocr_image,
-            #[cfg(desktop)]
             commands::ocr::ocr_pdf,
             // 外部 MCP server 子进程仅桌面端
-            #[cfg(desktop)]
             commands::mcp::mcp_external_list_tools,
-            #[cfg(desktop)]
             commands::mcp::mcp_external_call_tool,
             commands::mcp::mcp_install_to_client,
             commands::mcp::mcp_uninstall_from_client,
@@ -1268,15 +1265,10 @@ pub fn run() {
             commands::mcp::mcp_get_ai_writable,
             commands::mcp::mcp_set_ai_writable,
             // MCP HTTP 服务（桌面端专属：移动端不开监听端口）
-            #[cfg(desktop)]
             commands::mcp::get_mcp_http_config,
-            #[cfg(desktop)]
             commands::mcp::get_mcp_http_status,
-            #[cfg(desktop)]
             commands::mcp::regenerate_mcp_http_token,
-            #[cfg(desktop)]
             commands::mcp::start_mcp_http,
-            #[cfg(desktop)]
             commands::mcp::stop_mcp_http,
             // 系统模块
             commands::system::greet,
@@ -1294,7 +1286,6 @@ pub fn run() {
             commands::system::export_diagnostics,
             commands::system::check_db_text_health,
             // 系统字体枚举（设置页自选字体，仅桌面端）
-            #[cfg(desktop)]
             commands::font::list_system_fonts,
             // 配置模块
             commands::config::get_all_config,
@@ -1366,9 +1357,7 @@ pub fn run() {
             commands::notes::clip_url_to_note,
             commands::notes::clip_url_to_html,
             // 多窗口 pop-out（笔记对照 / 双显示器分屏）
-            #[cfg(desktop)]
             commands::notes::open_note_in_new_window,
-            #[cfg(desktop)]
             commands::notes::open_mindmap_in_new_window,
             // T-007 笔记加密 / Vault
             commands::vault::vault_status,
@@ -1487,9 +1476,7 @@ pub fn run() {
             commands::ai::ai_extract_task_from_text,
             commands::ai::ai_plan_from_goal,
             // Excel 解析仅桌面端（calamine 移动端编译失败，T-M013 后再决策）
-            #[cfg(desktop)]
             commands::ai::ai_plan_from_excel,
-            #[cfg(desktop)]
             commands::ai::ai_parse_excel,
             commands::ai::ai_parse_attachment,
             commands::ai::undo_task_batch,
@@ -1527,7 +1514,6 @@ pub fn run() {
             commands::export::export_single_note,
             // T-020 导出 Word / HTML
             // Word 导出仅桌面端（docx_rs 移动端编译失败）
-            #[cfg(desktop)]
             commands::export::export_single_note_to_word,
             commands::export::export_single_note_to_html,
             // R-005 PDF 导出：渲染 HTML 字符串供前端 iframe 打印
@@ -1560,18 +1546,13 @@ pub fn run() {
             commands::attachment::save_note_attachment_from_path,
             commands::attachment::delete_note_attachments,
             commands::attachment::get_attachments_dir,
-            #[cfg(desktop)]
             commands::attachment::preview_excel_attachment,
             commands::attachment::preview_text_attachment,
             // Excel 二维数据集（P1-3b）：解析入库 + 结构/行查询。
             // 仅桌面端 —— 依赖 calamine，Android target 编译失败
-            #[cfg(desktop)]
             commands::dataset::import_attachment_datasets,
-            #[cfg(desktop)]
             commands::dataset::list_attachment_datasets,
-            #[cfg(desktop)]
             commands::dataset::get_dataset_schema,
-            #[cfg(desktop)]
             commands::dataset::preview_dataset_rows,
             // 模板模块
             commands::template::list_templates,
@@ -1582,7 +1563,6 @@ pub fn run() {
             commands::template::create_note_from_template,
             commands::template::render_template_content,
             // Excel / ODS / CSV 导入为笔记（仅桌面端，依赖 calamine）
-            #[cfg(desktop)]
             commands::excel_import::import_excel_files,
             // PDF 模块
             commands::pdf::import_pdfs,
@@ -1645,16 +1625,11 @@ pub fn run() {
             commands::tasks::complete_task_occurrence,
             commands::tasks::search_tasks,
             // 全局快捷键（仅桌面端；移动端无此概念）
-            #[cfg(desktop)]
             commands::shortcut::list_shortcut_bindings,
-            #[cfg(desktop)]
             commands::shortcut::set_shortcut_binding,
-            #[cfg(desktop)]
             commands::shortcut::reset_shortcut_binding,
-            #[cfg(desktop)]
             commands::shortcut::disable_shortcut_binding,
             // 窗口尺寸（仅桌面端；移动端窗口由系统管理）
-            #[cfg(desktop)]
             commands::window::reset_window_size,
             // 待办分类
             commands::tasks::list_task_categories,
@@ -1679,16 +1654,6 @@ pub fn run() {
             commands::asr::asr_test_connection,
             commands::asr::asr_transcribe_audio,
             // 移动端"检查更新"（桌面端走 tauri-plugin-updater，无此命令）
-            #[cfg(mobile)]
-            commands::mobile_update::check_mobile_update,
-            #[cfg(mobile)]
-            commands::mobile_update::download_mobile_update,
-            #[cfg(mobile)]
-            commands::mobile_update::install_mobile_update,
-            #[cfg(mobile)]
-            commands::mobile_update::can_install_mobile_update,
-            #[cfg(mobile)]
-            commands::mobile_update::open_install_permission_settings,
         ])
         // ─── 窗口事件处理 ─────────────────────────
         .on_window_event(|__we| {

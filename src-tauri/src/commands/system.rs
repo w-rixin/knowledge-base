@@ -259,15 +259,17 @@ pub fn export_diagnostics(app: tauri::AppHandle) -> Result<String, String> {
 
     // 输出位置：桌面端优先桌面，回退下载目录，再回退数据目录
     #[cfg(desktop)]
-    let out_base = app
-        .path_resolver()
-        // 🔴 v1 的 PathResolver 没有 desktop_dir()/download_dir()，用 home 目录拼
-        .home_dir()
-        .map(|h| h.join("Desktop"))
-        .filter(|p| p.exists())
-        .or_else(|| app.path_resolver().home_dir().map(|h| h.join("Downloads")).filter(|p| p.exists()))
-        .or_else(|| crate::framework_app_data_dir(&app).ok())
-        .ok_or_else(|| "无法确定诊断包输出目录".to_string())?;
+    let out_base = {
+        // 🔴 v1 的 PathResolver 连 home_dir() 都没有（v2 才有），
+        //    故走 home_dir_opt()（读 HOME / USERPROFILE 环境变量）。
+        let _ = &app;
+        home_dir_opt()
+            .map(|h| h.join("Desktop"))
+            .filter(|p| p.exists())
+            .or_else(|| home_dir_opt().map(|h| h.join("Downloads")).filter(|p| p.exists()))
+            .or_else(|| crate::framework_app_data_dir(&app).ok())
+            .ok_or_else(|| "无法确定诊断包输出目录".to_string())?
+    };
     // 移动端无 desktop_dir（PathResolver 不提供）；沙盒环境直接落应用数据目录
     #[cfg(not(desktop))]
     let out_base = crate::framework_app_data_dir(&app)
@@ -352,4 +354,13 @@ pub fn check_db_text_health(
         .db
         .check_text_health(repair.unwrap_or(false))
         .map_err(|e| e.to_string())
+}
+
+/// v1 的 PathResolver 不提供 home_dir()，这里用环境变量兜底。
+/// Linux/macOS 读 HOME，Windows 读 USERPROFILE。
+#[cfg(desktop)]
+fn home_dir_opt() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
 }
