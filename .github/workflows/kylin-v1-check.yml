@@ -71,6 +71,11 @@ jobs:
         #      改：显式 CARGO_TERM_COLOR=never + sed 兜底剥离 ANSI。
         env:
           CARGO_TERM_COLOR: never
+          # tauri 的 tauri-build / 宏在编译期需要 TAURI_ENV_TARGET_TRIPLE。
+          # 正常走 `tauri build` 时由 CLI 注入；这里直接调 cargo check，
+          # 缺它会导致宏展开失败，进而产生大量**连带**的 "cannot find xxx in tauri"
+          # 假错误（api 模块没生成）。必须显式补上。
+          TAURI_ENV_TARGET_TRIPLE: aarch64-unknown-linux-gnu
           # 本 job 只做 cargo check（不打包），无需 sidecar 二进制。
           # 但 build.rs 会校验 bundle.externalBin 指向的文件是否存在，缺失即报
           #   path matching binaries/kb-mcp-aarch64-unknown-linux-gnu not found.
