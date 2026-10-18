@@ -205,14 +205,19 @@ fn check_no_conflict(db: &Database, self_id: &str, accel: &str) -> Result<(), Ap
 
 /// 绑定 accel 到 id 对应的 handler；同步刷新缓存
 ///
-/// 🔴 Tauri 1.x 迁移：v2 的 `app.global_shortcut().on_shortcut(accel, cb)`
-/// 在 v1 中对应 `app.global_shortcut_manager().register(accel, cb)`。
-/// 两点差异（属功能退化，已知）：
-///   1) v1 回调**没有 event 参数**，无法区分「按下/松开」，只会在触发时调用一次；
-///      v2 里靠 `ShortcutState::Pressed` 过滤的防重逻辑在 v1 不再需要。
-///   2) v1 的 manager 要求 `&mut self`，故需先 `let mut m = ...`。
-fn bind(app: &AppHandle, id: &str, accel: &str) -> Result<(), tauri::api::global_shortcut::Error> {
-    use tauri::api::global_shortcut::GlobalShortcutManager;
+/// 🔴 Tauri 1.x 迁移要点（v1.8.3 实测）：
+///   v2: `app.global_shortcut().on_shortcut(accel, |_,_,event| ...)`
+///   v1: `app.global_shortcut_manager().register(accel, || ...)`
+///        + `use tauri::GlobalShortcutManager;`（trait 必须在作用域，
+///          否则报 "trait GlobalShortcutManager which provides register
+///          is implemented but not in scope"）
+///
+/// 已知退化：
+///   1) v1 回调**没有 event 参数**，无法区分「按下/松开」，只在触发时调用一次
+///      （v2 靠 ShortcutState::Pressed 去重，此处不再需要）；
+///   2) register/unregister 取 `&mut self`，故 manager 需为 mut 绑定。
+fn bind(app: &AppHandle, id: &str, accel: &str) -> Result<(), tauri::Error> {
+    use tauri::GlobalShortcutManager;
 
     let app_for_handler = app.clone();
     let id_for_handler = id.to_string();
@@ -233,20 +238,14 @@ fn bind(app: &AppHandle, id: &str, accel: &str) -> Result<(), tauri::api::global
 
 /// 解绑当前 id 缓存的 accel；若缓存为空则当作"已经没注册"
 fn unbind_if_any(app: &AppHandle, id: &str) {
-    use std::str::FromStr;
-    use tauri::api::global_shortcut::{GlobalShortcut, GlobalShortcutManager};
+    use tauri::GlobalShortcutManager;
 
     let prev = cache().lock().ok().and_then(|mut g| g.remove(id));
     if let Some(accel) = prev {
+        // v1 的 unregister 接受 &str（v2 需构造 GlobalShortcut）
         let mut manager = app.global_shortcut_manager();
-        // v1 的 unregister 要 GlobalShortcut，先解析；解析失败说明这个 accel 本来就没注册成功
-        match GlobalShortcut::from_str(&accel) {
-            Ok(sc) => {
-                if let Err(e) = manager.unregister(sc) {
-                    log::warn!("[shortcut] 解绑 {} ({}) 失败: {}", id, accel, e);
-                }
-            }
-            Err(e) => log::warn!("[shortcut] 解析快捷键 {} 失败，跳过解绑: {}", accel, e),
+        if let Err(e) = manager.unregister(accel.as_str()) {
+            log::warn!("[shortcut] 解绑 {} ({}) 失败: {}", id, accel, e);
         }
     }
 }
@@ -287,8 +286,21 @@ fn focus_main(app: &AppHandle) {
 
 /// 剪贴板 → 新笔记的具体动作（从 lib.rs 的 handle_quick_capture 迁移过来）
 fn action_quick_capture(app: AppHandle) {
-    let text = match tauri::api::clipboard::read_text() {
-        Ok(t) => t,
+    use tauri::ClipboardManager;
+
+    // 🔴 v1 与 v2 的差异：v1 的 ClipboardManager::read_text() 返回
+    // Result<Option<String>>（空剪贴板是 Ok(None)，不是错误）；
+    // v2 返回 Result<String>。故需多判一层 None。
+    let text = match app.clipboard_manager().read_text() {
+        Ok(Some(t)) if !t.is_empty() => t,
+        Ok(_) => {
+            log::info!("[quick_capture] 剪贴板为空，忽略本次触发");
+            let _ = tauri::api::notification::Notification::new(&app.config().tauri.bundle.identifier)
+                .title("剪贴板为空")
+                .body("没有可捕获的文本内容")
+                .show();
+            return;
+        }
         Err(e) => {
             log::warn!("[quick_capture] 读取剪贴板失败: {}", e);
             let _ = tauri::api::notification::Notification::new(&app.config().tauri.bundle.identifier)

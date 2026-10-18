@@ -143,7 +143,7 @@ fn resolve_image_path(state: &AppState, path: &str) -> Result<std::path::PathBuf
 pub async fn get_image_blob(
     app: tauri::AppHandle,
     path: String,
-) -> Result<tauri::ipc::Response, String> {
+) -> Result<Vec<u8>, String> {
     let bytes = tauri::async_runtime::spawn_blocking(move || {
         use tauri::Manager;
         let state = app.state::<AppState>();
@@ -153,7 +153,7 @@ pub async fn get_image_blob(
     })
     .await
     .map_err(|e| format!("读取图片任务异常终止: {}", e))??;
-    Ok(tauri::ipc::Response::new(bytes))
+    Ok(bytes)
 }
 
 /// 把笔记里的图片直接写进系统剪贴板（接收**相对路径**，加密图自动解密）。

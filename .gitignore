@@ -46,3 +46,4 @@ src-tauri/target/
 target/
 # sidecar 二进制（由 pnpm build:mcp 生成，各平台 triple 后缀）
 src-tauri/binaries/
+.workbuddy/

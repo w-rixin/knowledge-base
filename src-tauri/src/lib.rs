@@ -937,7 +937,7 @@ pub fn run() {
 
                 match app
                     .path_resolver()
-                    .resolve(PDFIUM_LIB, tauri::path::BaseDirectory::Resource)
+                    .resolve(PDFIUM_LIB, tauri::api::path::BaseDirectory::Resource)
                 {
                     Ok(lib_path) => match services::pdf::init_pdfium(&lib_path) {
                         Ok(()) => log::info!("PDFium 绑定成功: {}", lib_path.display()),
@@ -959,7 +959,7 @@ pub fn run() {
                 const OCR_ENGINE: &str = "resources/ocr/RapidOCR-json";
                 let ocr_exe = app
                     .path_resolver()
-                    .resolve(OCR_ENGINE, tauri::path::BaseDirectory::Resource)
+                    .resolve(OCR_ENGINE, tauri::api::path::BaseDirectory::Resource)
                     .ok()
                     .filter(|p| p.exists());
                 match &ocr_exe {
