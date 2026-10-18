@@ -71,8 +71,13 @@ jobs:
           echo "===== cargo check 退出码: ${STATUS} ====="
           ERRORS=$(grep -c "^error" /tmp/check.log || true)
           echo "===== error 行数: ${ERRORS} ====="
-          echo "===== 前 200 行输出 ====="
-          head -200 /tmp/check.log
+          echo "===== 日志尾部 250 行（编译错误通常在此）====="
+          # 🔴 必须用 tail 不是 head：依赖解析日志（Updating index / Locking N packages /
+          # Downgrading ...）本身就可能几百行，用 head 会把真正的 error 全部截掉，
+          # 导致「退出码 101 但 error 行数 0」的假象（已踩过一次）。
+          tail -250 /tmp/check.log
           echo "===== 错误摘要（去重）====="
-          grep "^error" /tmp/check.log | sort | uniq -c | sort -rn | head -40 || true
+          grep -E "^error(\[E[0-9]+\])?:" /tmp/check.log | sed 's/ -->.*//' | sort | uniq -c | sort -rn | head -40 || true
+          echo "===== 出错文件清单 ====="
+          grep -oE "^\s+--> [^:]+" /tmp/check.log | sed 's/.*--> //' | sort | uniq -c | sort -rn | head -30 || true
           exit ${STATUS}
