@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/tauri";
-import { check } from "@tauri-apps/api/updater";
+import { checkUpdate } from "@tauri-apps/api/updater";
 import {
   enable as autostartEnable,
   disable as autostartDisable,
@@ -183,10 +183,21 @@ export const systemApi = {
     invoke<TextHealthReport>("check_db_text_health", { repair }),
 };
 
-/** 更新相关 API */
-export const updaterApi = {
-  checkUpdate: () => check(),
-};
+  /** 更新相关 API
+   *
+   * 🔴 Tauri 1.x 适配：
+   * v2 的 `check()` 直接返回 `Update | null`；
+   * v1 对应函数叫 `checkUpdate()`，返回 `{ shouldUpdate, manifest }`。
+   * 这里做一层归一：上层仍拿到「有更新就返回 manifest，否则 null」的语义，
+   * 因此 useUpdateChecker 等调用方不需要改。
+   */
+  export const updaterApi = {
+    checkUpdate: async () => {
+      const r = await checkUpdate();
+      if (!r?.shouldUpdate || !r.manifest) return null;
+      return r.manifest;
+    },
+  };
 
 /** 开机启动 API
  *

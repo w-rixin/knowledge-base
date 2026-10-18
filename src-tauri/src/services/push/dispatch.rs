@@ -5,7 +5,6 @@
 //! 命中未实现通道时仅记日志、不报错（保证主链路不被未完成功能阻断）。
 
 use tauri::AppHandle;
-use tauri_plugin_notification::NotificationExt;
 
 use crate::models::PushJob;
 
@@ -46,9 +45,7 @@ pub fn dispatch(app: &AppHandle, job: &PushJob, content: &str, log_id: i64) {
 /// 执行失败时给用户一声轻提示，避免"没反应"的困惑。仅发系统通知。
 pub fn dispatch_failure(app: &AppHandle, job: &PushJob, err: &str) {
     let body: String = format!("生成失败：{}", err).chars().take(200).collect();
-    if let Err(e) = app
-        .notification()
-        .builder()
+    if let Err(e) = tauri::api::notification::Notification::new(&app.config().tauri.bundle.identifier)
         .title(format!("📡 {}（失败）", job.name))
         .body(&body)
         .show()
@@ -60,9 +57,7 @@ pub fn dispatch_failure(app: &AppHandle, job: &PushJob, err: &str) {
 /// 系统通知：标题用推送名，正文用生成内容（截断到 ~300 字，系统通知本身也会截断）。
 fn send_notification(app: &AppHandle, name: &str, content: &str) {
     let body: String = content.chars().take(300).collect();
-    if let Err(e) = app
-        .notification()
-        .builder()
+    if let Err(e) = tauri::api::notification::Notification::new(&app.config().tauri.bundle.identifier)
         .title(format!("📡 {}", name))
         .body(&body)
         .show()

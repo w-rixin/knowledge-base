@@ -705,7 +705,7 @@ pub fn run() {
                 // 该按存档还原，这里再 set_size 就等于每次启动都把用户拖出来的尺寸抹掉。
                 let has_saved_window_state = app
                     .handle()
-                    .path()
+                    .path_resolver()
                     .app_config_dir()
                     .map(|dir| dir.join(window_state_filename()).exists())
                     .unwrap_or(false);
@@ -936,7 +936,7 @@ pub fn run() {
                 const PDFIUM_LIB: &str = "resources/pdfium/libpdfium.so";
 
                 match app
-                    .path()
+                    .path_resolver()
                     .resolve(PDFIUM_LIB, tauri::path::BaseDirectory::Resource)
                 {
                     Ok(lib_path) => match services::pdf::init_pdfium(&lib_path) {
@@ -958,7 +958,7 @@ pub fn run() {
                 #[cfg(not(target_os = "windows"))]
                 const OCR_ENGINE: &str = "resources/ocr/RapidOCR-json";
                 let ocr_exe = app
-                    .path()
+                    .path_resolver()
                     .resolve(OCR_ENGINE, tauri::path::BaseDirectory::Resource)
                     .ok()
                     .filter(|p| p.exists());

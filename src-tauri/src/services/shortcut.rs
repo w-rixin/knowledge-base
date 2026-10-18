@@ -18,9 +18,6 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use tauri::{AppHandle, Manager};
-use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
-use tauri_plugin_notification::NotificationExt;
 
 use crate::database::Database;
 use crate::error::AppError;
@@ -207,20 +204,26 @@ fn check_no_conflict(db: &Database, self_id: &str, accel: &str) -> Result<(), Ap
 }
 
 /// 绑定 accel 到 id 对应的 handler；同步刷新缓存
-fn bind(app: &AppHandle, id: &str, accel: &str) -> Result<(), tauri_plugin_global_shortcut::Error> {
+///
+/// 🔴 Tauri 1.x 迁移：v2 的 `app.global_shortcut().on_shortcut(accel, cb)`
+/// 在 v1 中对应 `app.global_shortcut_manager().register(accel, cb)`。
+/// 两点差异（属功能退化，已知）：
+///   1) v1 回调**没有 event 参数**，无法区分「按下/松开」，只会在触发时调用一次；
+///      v2 里靠 `ShortcutState::Pressed` 过滤的防重逻辑在 v1 不再需要。
+///   2) v1 的 manager 要求 `&mut self`，故需先 `let mut m = ...`。
+fn bind(app: &AppHandle, id: &str, accel: &str) -> Result<(), tauri::api::global_shortcut::Error> {
+    use tauri::api::global_shortcut::GlobalShortcutManager;
+
     let app_for_handler = app.clone();
     let id_for_handler = id.to_string();
-    app.global_shortcut()
-        .on_shortcut(accel, move |_, _, event| {
-            if event.state() != ShortcutState::Pressed {
-                return;
-            }
-            let app_clone = app_for_handler.clone();
-            let id_clone = id_for_handler.clone();
-            tauri::async_runtime::spawn(async move {
-                dispatch_action(app_clone, &id_clone);
-            });
-        })?;
+    let mut manager = app.global_shortcut_manager();
+    manager.register(accel, move || {
+        let app_clone = app_for_handler.clone();
+        let id_clone = id_for_handler.clone();
+        tauri::async_runtime::spawn(async move {
+            dispatch_action(app_clone, &id_clone);
+        });
+    })?;
     cache()
         .lock()
         .map(|mut g| g.insert(id.to_string(), accel.to_string()))
@@ -230,10 +233,20 @@ fn bind(app: &AppHandle, id: &str, accel: &str) -> Result<(), tauri_plugin_globa
 
 /// 解绑当前 id 缓存的 accel；若缓存为空则当作"已经没注册"
 fn unbind_if_any(app: &AppHandle, id: &str) {
+    use std::str::FromStr;
+    use tauri::api::global_shortcut::{GlobalShortcut, GlobalShortcutManager};
+
     let prev = cache().lock().ok().and_then(|mut g| g.remove(id));
     if let Some(accel) = prev {
-        if let Err(e) = app.global_shortcut().unregister(accel.as_str()) {
-            log::warn!("[shortcut] 解绑 {} ({}) 失败: {}", id, accel, e);
+        let mut manager = app.global_shortcut_manager();
+        // v1 的 unregister 要 GlobalShortcut，先解析；解析失败说明这个 accel 本来就没注册成功
+        match GlobalShortcut::from_str(&accel) {
+            Ok(sc) => {
+                if let Err(e) = manager.unregister(sc) {
+                    log::warn!("[shortcut] 解绑 {} ({}) 失败: {}", id, accel, e);
+                }
+            }
+            Err(e) => log::warn!("[shortcut] 解析快捷键 {} 失败，跳过解绑: {}", accel, e),
         }
     }
 }
@@ -274,13 +287,11 @@ fn focus_main(app: &AppHandle) {
 
 /// 剪贴板 → 新笔记的具体动作（从 lib.rs 的 handle_quick_capture 迁移过来）
 fn action_quick_capture(app: AppHandle) {
-    let text = match app.clipboard().read_text() {
+    let text = match tauri::api::clipboard::read_text() {
         Ok(t) => t,
         Err(e) => {
             log::warn!("[quick_capture] 读取剪贴板失败: {}", e);
-            let _ = app
-                .notification()
-                .builder()
+            let _ = tauri::api::notification::Notification::new(&app.config().tauri.bundle.identifier)
                 .title("剪贴板捕获失败")
                 .body(&format!("无法读取剪贴板：{}", e))
                 .show();
@@ -292,9 +303,7 @@ fn action_quick_capture(app: AppHandle) {
     match QuickCaptureService::capture_from_text(&state.db, &text) {
         Ok(note) => {
             log::info!("[quick_capture] 已创建笔记 #{}: {}", note.id, note.title);
-            let _ = app
-                .notification()
-                .builder()
+            let _ = tauri::api::notification::Notification::new(&app.config().tauri.bundle.identifier)
                 .title("已保存到知识库")
                 .body(&note.title)
                 .show();
@@ -302,9 +311,7 @@ fn action_quick_capture(app: AppHandle) {
         }
         Err(e) => {
             log::warn!("[quick_capture] 创建笔记失败: {}", e);
-            let _ = app
-                .notification()
-                .builder()
+            let _ = tauri::api::notification::Notification::new(&app.config().tauri.bundle.identifier)
                 .title("剪贴板捕获失败")
                 .body(&e.to_string())
                 .show();

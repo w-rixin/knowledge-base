@@ -16,7 +16,6 @@ use std::time::Duration;
 
 use chrono::NaiveDateTime;
 use tauri::{AppHandle, Manager};
-use tauri_plugin_notification::NotificationExt;
 
 use crate::error::AppError;
 use crate::state::AppState;
@@ -148,9 +147,7 @@ fn tick_once(app: &AppHandle) -> Result<(), AppError> {
                 .unwrap_or_default()
         });
 
-        if let Err(e) = app
-            .notification()
-            .builder()
+        if let Err(e) = tauri::api::notification::Notification::new(&app.config().tauri.bundle.identifier)
             .title(format!("待办提醒：{}", task.title))
             .body(&body)
             .show()

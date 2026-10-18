@@ -260,7 +260,7 @@ pub fn export_diagnostics(app: tauri::AppHandle) -> Result<String, String> {
     // 输出位置：桌面端优先桌面，回退下载目录，再回退数据目录
     #[cfg(desktop)]
     let out_base = app
-        .path()
+        .path_resolver()
         .desktop_dir()
         .or_else(|_| app.path_resolver().download_dir())
         .or_else(|_| crate::framework_app_data_dir(&app))

@@ -170,39 +170,23 @@ pub async fn get_image_blob(
 /// （`generate_handler!` 列表里放 `#[cfg]` 项不可靠），移动端调用会拿到明确的错误，
 /// 前端据此回退到 Web Clipboard。
 ///
-/// **必须 `spawn_blocking`**：插件文档明确警告 `write_image` 不可在主线程调用，
-/// 否则 Linux 上底层库可能死锁、冻住整个应用。
-#[tauri::command]
-pub async fn copy_image_to_clipboard(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    #[cfg(not(desktop))]
-    {
+    /// **必须 `spawn_blocking`**：插件文档明确警告 `write_image` 不可在主线程调用，
+    /// 否则 Linux 上底层库可能死锁、冻住整个应用。
+    ///
+    /// 🔴 Tauri 1.x 迁移说明（见 docs/tauri-v1-migration.md）：
+    /// Tauri 1.x 的 `tauri::api::clipboard` **只有 read_text / write_text，没有 write_image**
+    /// —— 位图写入是 v2 的 clipboard-manager 插件才引入的能力。
+    /// 因此本 Command 在 1.x 上统一返回 Err，由**前端已有**的降级路径接管
+    /// （buildBlob → `navigator.clipboard.write()`，见调用处注释）。
+    /// 这样接口签名不变、前端无需改动，只是"复制图片"改走浏览器剪贴板 API。
+    #[tauri::command]
+    pub async fn copy_image_to_clipboard(app: tauri::AppHandle, path: String) -> Result<(), String> {
         let _ = (app, path);
-        Err("当前平台不支持把图片写入系统剪贴板".to_string())
+        Err("当前版本（Tauri 1.x）不支持从后端写入图片剪贴板，请使用浏览器剪贴板 API".to_string())
     }
-    #[cfg(desktop)]
-    {
-        tauri::async_runtime::spawn_blocking(move || {
-            use tauri::Manager;
-            use tauri_plugin_clipboard_manager::ClipboardExt;
 
-            let state = app.state::<AppState>();
-            let abs = resolve_image_path(&state, &path)?;
-            let bytes = ImageService::read_for_render(&state.vault, &abs.to_string_lossy())
-                .map_err(|e| e.to_string())?;
-            // 系统剪贴板要的是 RGBA 位图，PNG/JPEG 原字节喂进去没有平台认，必须先解码。
-            // 用 image crate 直解而不是 `tauri::image::Image::from_bytes`：后者受 tauri 的
-            // image-png feature 限制、只认 png/ico，而本项目允许 png/jpg/jpeg/webp/gif/bmp
-            // （见 commands::system 的扩展名白名单）。
-            let decoded = image::load_from_memory(&bytes)
-                .map_err(|e| format!("图片解码失败（格式不支持？）: {}", e))?;
-            let rgba = decoded.to_rgba8();
-            let (width, height) = (rgba.width(), rgba.height());
-            let image = tauri::image::Image::new_owned(rgba.into_raw(), width, height);
-            app.clipboard()
-                .write_image(&image)
-                .map_err(|e| format!("写入剪贴板失败: {}", e))
-        })
-        .await
-        .map_err(|e| format!("复制图片任务异常终止: {}", e))?
-    }
-}
+    /// 旧实现（Tauri 2.x，保留备查，勿删）：
+    /// 走 clipboard-manager 插件的 `app.clipboard().write_image()`，
+    /// 并在 spawn_blocking 里用 image crate 解码成 RGBA。1.x 无此插件，故停用。
+    #[allow(dead_code)]
+    fn _copy_image_to_clipboard_v2_reference() {}

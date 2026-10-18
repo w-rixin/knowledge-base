@@ -184,7 +184,7 @@ pub async fn download_mobile_update(
     }
 
     let cache_dir = app
-        .path()
+        .path_resolver()
         .app_cache_dir()
         .map_err(|e| format!("取 cache 目录失败: {e}"))?;
     std::fs::create_dir_all(&cache_dir).map_err(|e| format!("建 cache 目录失败: {e}"))?;

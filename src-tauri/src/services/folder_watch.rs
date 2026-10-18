@@ -113,7 +113,7 @@ async fn scan_once(
     // ── 扫目录（只扫一层，不递归：剪藏插件都是平铺落文件）──
     let entries = std::fs::read_dir(dir_path).map_err(|e| format!("读取目录失败: {}", e))?;
     let app_data_dir = app
-        .path()
+        .path_resolver()
         .app_data_dir()
         .map_err(|e| format!("取 app_data_dir 失败: {}", e))?;
 

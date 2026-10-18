@@ -204,7 +204,7 @@ pub(crate) fn run_pull_blocking(
     let app_version = app.package_info().version.to_string();
     let device = hostname_short();
     let conflicts_dir = app
-        .path()
+        .path_resolver()
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join("sync_conflicts")

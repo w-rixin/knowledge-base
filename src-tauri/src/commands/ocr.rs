@@ -39,7 +39,7 @@ pub async fn ocr_pdf(
     let cap = max_pages.unwrap_or(30).clamp(1, 200);
     // OCR 临时图放应用缓存目录下独立子目录，识别完清掉
     let tmp_root = app
-        .path()
+        .path_resolver()
         .app_cache_dir()
         .map_err(|e| format!("取缓存目录失败: {e}"))?
         .join("ocr-tmp");

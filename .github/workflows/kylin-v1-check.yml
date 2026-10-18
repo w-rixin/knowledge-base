@@ -57,8 +57,22 @@ jobs:
         working-directory: ./src-tauri
         # 不用 -D warnings：迁移期先把「能不能编过」这件事确认下来，
         # warning 留到功能跑通后再逐个清理。
+        #
+        # 🔴 退出码必须直接取自 cargo，不能用 ${PIPESTATUS[0]}：
+        #    早先写成 `cargo check | tee log` 后先跑 grep 再 exit ${PIPESTATUS[0]}，
+        #    此时 PIPESTATUS 已被 grep 覆盖（grep 找到 error 返回 0），
+        #    导致**编译失败却显示 job 成功**，把真实错误完全掩盖。
+        #    正确做法：先把日志落盘，立即取 $?，再分析日志。
         run: |
-          cargo check --all-targets 2>&1 | tee /tmp/check.log
-          echo "=== 错误统计 ==="
-          grep -c "^error" /tmp/check.log || echo "0 errors"
-          exit ${PIPESTATUS[0]}
+          set +e
+          cargo check --all-targets > /tmp/check.log 2>&1
+          STATUS=$?
+          set -e
+          echo "===== cargo check 退出码: ${STATUS} ====="
+          ERRORS=$(grep -c "^error" /tmp/check.log || true)
+          echo "===== error 行数: ${ERRORS} ====="
+          echo "===== 前 200 行输出 ====="
+          head -200 /tmp/check.log
+          echo "===== 错误摘要（去重）====="
+          grep "^error" /tmp/check.log | sort | uniq -c | sort -rn | head -40 || true
+          exit ${STATUS}
