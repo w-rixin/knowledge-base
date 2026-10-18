@@ -58,26 +58,46 @@ jobs:
         # 不用 -D warnings：迁移期先把「能不能编过」这件事确认下来，
         # warning 留到功能跑通后再逐个清理。
         #
-        # 🔴 退出码必须直接取自 cargo，不能用 ${PIPESTATUS[0]}：
-        #    早先写成 `cargo check | tee log` 后先跑 grep 再 exit ${PIPESTATUS[0]}，
-        #    此时 PIPESTATUS 已被 grep 覆盖（grep 找到 error 返回 0），
-        #    导致**编译失败却显示 job 成功**，把真实错误完全掩盖。
-        #    正确做法：先把日志落盘，立即取 $?，再分析日志。
+        # 🔴 本步骤踩过的三个坑（都是"日志分析"自身的问题，与代码无关）：
+        #   1. `cargo check | tee log; grep ...; exit ${PIPESTATUS[0]}`
+        #      —— PIPESTATUS 在 grep 之后已指向 grep，编译失败却显示成功。
+        #      改：先落盘、立即取 $?、最后 exit $STATUS。
+        #   2. `head -200 log`
+        #      —— 依赖解析日志（Locking N packages / Downgrading ...）本身几百行，
+        #      真正的编译错误在后面被截掉。改：不再打印全文，直接 grep 错误上下文。
+        #   3. **环境带 CARGO_TERM_COLOR=always，日志含 ANSI 颜色码**
+        #      —— `grep "^error"` 永远匹配不到（行首实际是 \033[31m 等转义），
+        #      表现为「退出码 101、error 行数 0」，误导了整整两轮排查。
+        #      改：显式 CARGO_TERM_COLOR=never + sed 兜底剥离 ANSI。
+        env:
+          CARGO_TERM_COLOR: never
         run: |
           set +e
           cargo check --all-targets > /tmp/check.log 2>&1
           STATUS=$?
           set -e
+
+          # 兜底剥离 ANSI 转义序列（即使环境变量被上层覆盖也能正确 grep）
+          sed -i 's/\x1b\[[0-9;]*[a-zA-Z]//g' /tmp/check.log
+
           echo "===== cargo check 退出码: ${STATUS} ====="
-          ERRORS=$(grep -c "^error" /tmp/check.log || true)
-          echo "===== error 行数: ${ERRORS} ====="
-          echo "===== 日志尾部 250 行（编译错误通常在此）====="
-          # 🔴 必须用 tail 不是 head：依赖解析日志（Updating index / Locking N packages /
-          # Downgrading ...）本身就可能几百行，用 head 会把真正的 error 全部截掉，
-          # 导致「退出码 101 但 error 行数 0」的假象（已踩过一次）。
-          tail -250 /tmp/check.log
-          echo "===== 错误摘要（去重）====="
-          grep -E "^error(\[E[0-9]+\])?:" /tmp/check.log | sed 's/ -->.*//' | sort | uniq -c | sort -rn | head -40 || true
-          echo "===== 出错文件清单 ====="
-          grep -oE "^\s+--> [^:]+" /tmp/check.log | sed 's/.*--> //' | sort | uniq -c | sort -rn | head -30 || true
+          echo "===== error 行数: $(grep -c '^error' /tmp/check.log || true) ====="
+          echo ""
+          echo "===== 错误详情（每条带 10 行上下文，最多 260 行）====="
+          grep -E -A10 '^error(\[E[0-9]+\])?:' /tmp/check.log | head -260 || true
+          echo ""
+          echo "===== 错误摘要（按错误码去重）====="
+          grep -oE '^error\[E[0-9]+\]' /tmp/check.log | sort | uniq -c | sort -rn | head -30 || true
+          echo ""
+          echo "===== 出错文件清单（按文件聚合）====="
+          grep -oE '^\s+--> [^:]+' /tmp/check.log | sed 's/.*--> //' | sort | uniq -c | sort -rn | head -30 || true
           exit ${STATUS}
+
+      - name: Upload full check log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-check-log
+          path: /tmp/check.log
+          retention-days: 3
+          if-no-files-found: ignore
