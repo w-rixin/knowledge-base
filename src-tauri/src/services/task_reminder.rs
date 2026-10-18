@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use chrono::NaiveDateTime;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 
 use crate::error::AppError;
@@ -173,7 +173,7 @@ fn tick_once(app: &AppHandle) -> Result<(), AppError> {
                 Err(e) => {
                     log::warn!("[reminder] 紧急窗口创建失败，回退主窗 Modal: {}", e);
                     surface_main_window(app);
-                    if let Err(e) = app.emit("task:reminder", &task) {
+                    if let Err(e) = app.emit_all("task:reminder", &task) {
                         log::warn!("[reminder] emit 事件失败: {}", e);
                     }
                 }
@@ -181,7 +181,7 @@ fn tick_once(app: &AppHandle) -> Result<(), AppError> {
             #[cfg(mobile)]
             {
                 // 移动端无紧急窗口，直接 emit 事件到主窗 Modal
-                if let Err(e) = app.emit("task:reminder", &task) {
+                if let Err(e) = app.emit_all("task:reminder", &task) {
                     log::warn!("[reminder] emit 事件失败: {}", e);
                 }
             }
@@ -189,7 +189,7 @@ fn tick_once(app: &AppHandle) -> Result<(), AppError> {
             // 普通/重要级：主窗如果被最小化或隐藏到托盘，必须先把它拉出来
             // 否则 Modal 弹在隐藏的主窗里用户看不见，只剩右下角系统通知 → 没法标记完成
             surface_main_window(app);
-            if let Err(e) = app.emit("task:reminder", &task) {
+            if let Err(e) = app.emit_all("task:reminder", &task) {
                 log::warn!("[reminder] emit 事件失败: {}", e);
             }
         }

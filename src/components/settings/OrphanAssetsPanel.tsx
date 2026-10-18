@@ -12,7 +12,7 @@
  */
 import { useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/tauri";
-import { openPath } from "@tauri-apps/api/shell";
+import { open } from "@/lib/tauriShell";
 import {
   Alert,
   Badge,
@@ -406,7 +406,7 @@ function PathList({
   /** 点击 → 用系统默认应用打开（PDF 启 Acrobat / Word 启 Office 等） */
   async function handleOpen(path: string) {
     try {
-      await openPath(path);
+      await open(path);
     } catch (e) {
       message.error(`无法打开: ${e}`);
     }

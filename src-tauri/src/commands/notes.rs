@@ -4,7 +4,7 @@ use crate::services::note::NoteService;
 use crate::services::popout_window;
 use crate::services::trash::TrashService;
 use crate::state::AppState;
-use tauri::{Emitter, Manager};
+use tauri::{Manager};
 
 /// 创建笔记
 #[tauri::command]

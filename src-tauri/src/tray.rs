@@ -1,7 +1,7 @@
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Listener, Manager,
+    Listener, Manager,
 };
 use tauri_plugin_autostart::ManagerExt;
 
@@ -119,7 +119,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "new-note" => {
                 bring_main_to_front(app);
-                let _ = app.emit("tray:new-note", ());
+                let _ = app.emit_all("tray:new-note", ());
             }
             "quick-add" => {
                 // 快速记一笔悬浮窗：不前置主窗，直接弹独立小窗（应用在后台也能记）
@@ -127,11 +127,11 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             }
             "open-daily" => {
                 bring_main_to_front(app);
-                let _ = app.emit("tray:open-daily", ());
+                let _ = app.emit_all("tray:open-daily", ());
             }
             "open-search" => {
                 bring_main_to_front(app);
-                let _ = app.emit("tray:open-search", ());
+                let _ = app.emit_all("tray:open-search", ());
             }
             "sync-now" => {
                 // 不需要主窗口在前台也能同步；结果通过 sync:manual-push-result 广播
@@ -152,7 +152,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 // 通知前端同步 Zustand + 右上角按钮 UI
-                let _ = app.emit("rust:always-on-top-changed", checked);
+                let _ = app.emit_all("rust:always-on-top-changed", checked);
             }
             "autostart" => {
                 let checked = autostart_ref.is_checked().unwrap_or(false);
@@ -169,7 +169,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             }
             "check-update" => {
                 bring_main_to_front(app);
-                let _ = app.emit("tray:check-update", ());
+                let _ = app.emit_all("tray:check-update", ());
             }
             "show" => {
                 bring_main_to_front(app);
@@ -178,7 +178,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 // 走前端确认流程：让 React 检查未保存草稿，弹 Modal 给用户三选一
                 // 前端确认后通过 tauri-plugin-process 的 exit() 真正退出
                 bring_main_to_front(app);
-                let _ = app.emit("tray:request-exit", ());
+                let _ = app.emit_all("tray:request-exit", ());
             }
             "force-quit" => {
                 // 不 emit、不等前端、不做任何 IPC —— WebView 已经死了才会用到这一项。

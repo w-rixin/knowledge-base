@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 use crate::services::import::ImportService;
 use crate::state::AppState;
@@ -206,7 +206,7 @@ async fn scan_once(
 
     if ok_count > 0 {
         // 复用外部写入侦测那条链路：前端已经在监听它刷新列表
-        let _ = app.emit("db:external-changed", ());
+        let _ = app.emit_all("db:external-changed", ());
     }
     Ok(())
 }

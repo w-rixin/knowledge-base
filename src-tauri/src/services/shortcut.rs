@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
@@ -253,11 +253,11 @@ fn dispatch_action(app: AppHandle, id: &str) {
         "global.showWindow" => focus_main(&app),
         "global.openDaily" => {
             focus_main(&app);
-            let _ = app.emit("tray:open-daily", ());
+            let _ = app.emit_all("tray:open-daily", ());
         }
         "global.openSearch" => {
             focus_main(&app);
-            let _ = app.emit("tray:open-search", ());
+            let _ = app.emit_all("tray:open-search", ());
         }
         _ => log::warn!("[shortcut] 未知 action id: {}", id),
     }
@@ -298,7 +298,7 @@ fn action_quick_capture(app: AppHandle) {
                 .title("已保存到知识库")
                 .body(&note.title)
                 .show();
-            let _ = app.emit("quick_capture:note_created", note);
+            let _ = app.emit_all("quick_capture:note_created", note);
         }
         Err(e) => {
             log::warn!("[quick_capture] 创建笔记失败: {}", e);

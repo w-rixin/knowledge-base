@@ -18,7 +18,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { message, theme as antdTheme } from "antd";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import rehypeRaw from "rehype-raw";
-import { openPath, openUrl } from "@tauri-apps/api/shell";
+import { open } from "@/lib/tauriShell";
 import { MarkdownContent } from "@/components/ai/MarkdownContent";
 import { KB_ASSET_SCHEME, parseKbAsset } from "@/lib/assetUrl";
 import { systemApi } from "@/lib/api";
@@ -125,19 +125,19 @@ export function SlideshowView({ open, onClose, html, title }: Props) {
         const rel = parseKbAsset(href) ?? "";
         void systemApi
           .resolveAssetAbsolute(rel)
-          .then((abs) => openPath(abs))
+          .then((abs) => open(abs))
           .catch((e) => message.error(`打开附件失败: ${e}`));
       } else if (href.startsWith("file://")) {
         const path = decodeURIComponent(href.replace(/^file:\/\/\/?/, ""));
-        void openPath(path).catch((e) => message.error(`打开失败: ${e}`));
+        void open(path).catch((e) => message.error(`打开失败: ${e}`));
       } else if (
         /^https?:\/\//i.test(href) ||
         href.startsWith("mailto:") ||
         href.startsWith("tel:")
       ) {
-        void openUrl(href).catch((e) => message.error(`打开链接失败: ${e}`));
+        void open(href).catch((e) => message.error(`打开链接失败: ${e}`));
       } else {
-        void openPath(href).catch((e) => message.error(`打开失败: ${e}`));
+        void open(href).catch((e) => message.error(`打开失败: ${e}`));
       }
     };
     dom.addEventListener("click", handler, true);

@@ -42,7 +42,7 @@ import {
   type ContextMenuEntry,
 } from "@/components/ui/ContextMenuOverlay";
 import { NewTodoButton } from "@/components/NewTodoButton";
-import { openPath } from "@tauri-apps/api/shell";
+import { open } from "@/lib/tauriShell";
 import { taskApi, taskCategoryApi } from "@/lib/api";
 import { filterTasksByDateRange } from "@/lib/taskDateFilter";
 import { MicButton } from "@/components/MicButton";
@@ -563,7 +563,7 @@ function DesktopTasksPage() {
       if (link.kind === "note") {
         navigate(`/notes/${link.target}`);
       } else {
-        await openPath(link.target);
+        await open(link.target);
       }
     } catch (e) {
       message.error(`打开失败: ${e}`);

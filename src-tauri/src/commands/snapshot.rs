@@ -7,7 +7,7 @@
 use crate::models::{Note, NoteSnapshot, NoteSnapshotMeta, SnapshotUsage};
 use crate::services::snapshot;
 use crate::state::AppState;
-use tauri::{Emitter, Manager};
+use tauri::{Manager};
 
 /// 列出笔记的历史版本（不含正文，只有时间 / 体积 / 来源）。
 #[tauri::command]

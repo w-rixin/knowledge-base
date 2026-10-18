@@ -15,7 +15,7 @@ import {
   Minimize2,
   PenLine,
 } from "lucide-react";
-import { revealItemInDir, openPath } from "@tauri-apps/api/shell";
+import { open } from "@/lib/tauriShell";
 import { writeImage } from "@tauri-apps/api/clipboard";
 import { useContextMenu } from "@/hooks/useContextMenu";
 import { useFeatureEnabled } from "@/hooks/useFeatureEnabled";
@@ -455,7 +455,7 @@ export function useEditorContextMenu(
         return;
       }
       try {
-        await openPath(abs);
+        await open(abs);
       } catch (err) {
         message.error(`打开失败：${err}`);
       }

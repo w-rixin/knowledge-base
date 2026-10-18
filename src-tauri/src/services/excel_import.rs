@@ -112,19 +112,19 @@ impl ExcelImportService {
     /// 每开始处理一个文件发一条 `excel:import-progress`。用独立事件名，
     /// 避免与 markdown / PDF 导入的进度事件互相串数字（理由同 PDF）。
     /// 事件尽力而为（`let _ =`）：发不出去只是没进度，不该让导入本身失败。
-    pub fn import_many<R: tauri::Runtime, E: tauri::Emitter<R>>(
+    pub fn import_many<R: tauri::Runtime>(
         app_data_dir: &Path,
         db: &Database,
         source_paths: &[String],
         folder_id: Option<i64>,
-        emitter: &E,
+        emitter: &tauri::AppHandle<R>,
     ) -> Vec<ExcelImportResult> {
         let total = source_paths.len();
         source_paths
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let _ = emitter.emit(
+                let _ = emitter.emit_all(
                     "excel:import-progress",
                     ImportProgress {
                         current: i + 1,

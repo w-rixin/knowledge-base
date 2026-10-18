@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 use crate::models::SyncScope;
 use crate::services::sync::SyncService;
@@ -111,7 +111,7 @@ pub async fn push_once(app: &AppHandle, origin: &str) {
     if url.is_empty() || username.is_empty() {
         let err = "WebDAV URL 或用户名未配置";
         log::warn!("[sync-scheduler/{}] {}, 跳过", origin, err);
-        let _ = app.emit(
+        let _ = app.emit_all(
             event_name,
             serde_json::json!({ "success": false, "error": err }),
         );
@@ -123,7 +123,7 @@ pub async fn push_once(app: &AppHandle, origin: &str) {
         Ok(None) => {
             let err = "未保存 WebDAV 密码";
             log::warn!("[sync-scheduler/{}] {}, 跳过", origin, err);
-            let _ = app.emit(
+            let _ = app.emit_all(
                 event_name,
                 serde_json::json!({ "success": false, "error": err }),
             );
@@ -131,7 +131,7 @@ pub async fn push_once(app: &AppHandle, origin: &str) {
         }
         Err(e) => {
             log::error!("[sync-scheduler/{}] 读取密码失败: {}", origin, e);
-            let _ = app.emit(
+            let _ = app.emit_all(
                 event_name,
                 serde_json::json!({ "success": false, "error": e.to_string() }),
             );
@@ -168,7 +168,7 @@ pub async fn push_once(app: &AppHandle, origin: &str) {
             if let Some(id) = history_id {
                 let _ = db.sync_history_finish(id, true, None, &stats_json);
             }
-            let _ = app.emit(
+            let _ = app.emit_all(
                 event_name,
                 serde_json::json!({ "success": true, "stats": &r.stats }),
             );
@@ -178,7 +178,7 @@ pub async fn push_once(app: &AppHandle, origin: &str) {
             if let Some(id) = history_id {
                 let _ = db.sync_history_finish(id, false, Some(&e.to_string()), "{}");
             }
-            let _ = app.emit(
+            let _ = app.emit_all(
                 event_name,
                 serde_json::json!({ "success": false, "error": e.to_string() }),
             );

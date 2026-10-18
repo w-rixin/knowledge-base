@@ -28,7 +28,7 @@ import { invoke } from "@tauri-apps/api/tauri";
 import dayjs, { type Dayjs } from "dayjs";
 import { TimePicker } from "antd";
 import { open } from "@tauri-apps/api/dialog";
-import { openUrl, revealItemInDir } from "@tauri-apps/api/shell";
+import { open } from "@/lib/tauriShell";
 import { useLocation } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import type { AiModel, AiModelInput, AiModelTestResult, ImportResult, ImportConflictPolicy, ScannedFile, ExportResult, ExportProgress, NoteTemplate, NoteTemplateInput } from "@/types";
@@ -1526,7 +1526,7 @@ function DesktopSettingsPage() {
           <Button
             type="link"
             size="small"
-            onClick={() => openUrl("https://kb.ruoyi.plus/")}
+            onClick={() => open("https://kb.ruoyi.plus/")}
           >
             官网 https://kb.ruoyi.plus/
           </Button>
@@ -3063,7 +3063,7 @@ function DesktopSettingsPage() {
             type="link"
             size="small"
             icon={<ExternalLink size={14} />}
-            onClick={() => openUrl(BILIBILI_URL)}
+            onClick={() => open(BILIBILI_URL)}
           >
             打开
           </Button>
@@ -3087,7 +3087,7 @@ function DesktopSettingsPage() {
             type="link"
             size="small"
             icon={<ExternalLink size={14} />}
-            onClick={() => openUrl(BILIBILI_TUTORIAL_URL)}
+            onClick={() => open(BILIBILI_TUTORIAL_URL)}
           >
             打开
           </Button>

@@ -7,7 +7,7 @@
 use crate::models::{EmbeddedWhiteboardSaved, Note, NoteSnapshotMeta};
 use crate::services::whiteboard;
 use crate::state::AppState;
-use tauri::{Emitter, Manager};
+use tauri::{Manager};
 
 /// 新建白板。`title` 传空则用「白板 年-月-日 时:分」作默认名。
 #[tauri::command]

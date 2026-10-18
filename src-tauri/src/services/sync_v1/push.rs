@@ -9,7 +9,7 @@
 //!
 //! v1 阶段简化：不支持本地软删除推送（tombstone），等 T-024 后续阶段补。
 
-use tauri::{Emitter, Runtime};
+use tauri::{Runtime};
 
 use crate::database::text_health::get_text_lossy;
 use crate::database::Database;
@@ -29,19 +29,19 @@ struct ProgressEvent {
     message: String,
 }
 
-pub fn push<R: Runtime, E: Emitter<R>>(
+pub fn push<R: Runtime>(
     db: &Database,
     backend_id: i64,
     backend: &dyn SyncBackendImpl,
     app_version: &str,
     device: &str,
     data_dir: &std::path::Path,
-    emitter: &E,
+    emitter: &tauri::AppHandle<R>,
 ) -> Result<SyncPushResult, AppError> {
     let mut result = SyncPushResult::default();
     let event_name = "sync_v1:progress";
 
-    let _ = emitter.emit(
+    let _ = emitter.emit_all(
         event_name,
         ProgressEvent {
             backend_id,
@@ -61,7 +61,7 @@ pub fn push<R: Runtime, E: Emitter<R>>(
         ),
     }
 
-    let _ = emitter.emit(
+    let _ = emitter.emit_all(
         event_name,
         ProgressEvent {
             backend_id,
@@ -73,7 +73,7 @@ pub fn push<R: Runtime, E: Emitter<R>>(
     );
     let local = manifest::compute_local_manifest(db, app_version, device)?;
 
-    let _ = emitter.emit(
+    let _ = emitter.emit_all(
         event_name,
         ProgressEvent {
             backend_id,
@@ -205,7 +205,7 @@ pub fn push<R: Runtime, E: Emitter<R>>(
     for (idx, entry) in diff.to_push.iter().enumerate() {
         // T-S012：tombstone entry 走删除分支
         if entry.tombstone {
-            let _ = emitter.emit(
+            let _ = emitter.emit_all(
                 event_name,
                 ProgressEvent {
                     backend_id,
@@ -331,7 +331,7 @@ pub fn push<R: Runtime, E: Emitter<R>>(
         std::collections::HashSet::new();
     if !pending.is_empty() {
         let total = pending.len();
-        let _ = emitter.emit(
+        let _ = emitter.emit_all(
             event_name,
             ProgressEvent {
                 backend_id,
@@ -374,7 +374,7 @@ pub fn push<R: Runtime, E: Emitter<R>>(
             let mut chunk_had_5xx = false;
             for (p, r) in chunk.iter().zip(chunk_results.into_iter()) {
                 done += 1;
-                let _ = emitter.emit(
+                let _ = emitter.emit_all(
                     event_name,
                     ProgressEvent {
                         backend_id,
@@ -431,7 +431,7 @@ pub fn push<R: Runtime, E: Emitter<R>>(
     let local_attachments = db.list_all_unique_attachments().unwrap_or_default();
     let total_attach = local_attachments.len();
     for (idx, att) in local_attachments.iter().enumerate() {
-        let _ = emitter.emit(
+        let _ = emitter.emit_all(
             event_name,
             ProgressEvent {
                 backend_id,
@@ -501,7 +501,7 @@ pub fn push<R: Runtime, E: Emitter<R>>(
     // 务实方案（不做完整 If-Match CAS，因为坚果云等 WebDAV server 的 ETag 实现不可靠）：
     // 写完后**重读校验**——如果远端的 hash 不等于刚写的 merged 的 hash，说明被别人覆盖了，
     // 重新合并（包含别人那次新增）+ 重写一次。最多重试 3 次（首次写 + 2 次重试），仍冲突就报错。
-    let _ = emitter.emit(
+    let _ = emitter.emit_all(
         event_name,
         ProgressEvent {
             backend_id,
@@ -646,7 +646,7 @@ pub fn push<R: Runtime, E: Emitter<R>>(
         }
     }
 
-    let _ = emitter.emit(
+    let _ = emitter.emit_all(
         event_name,
         ProgressEvent {
             backend_id,

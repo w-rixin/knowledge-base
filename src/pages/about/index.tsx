@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Card, Typography, Descriptions, Spin, message, Modal, Button, Tooltip, Tag, Image } from "antd";
 import { SyncOutlined, SettingOutlined } from "@ant-design/icons";
 import { FolderOpen, ExternalLink } from "lucide-react";
-import { openPath, openUrl, revealItemInDir } from "@tauri-apps/api/shell";
+import { open } from "@/lib/tauriShell";
 import { appLogDir } from "@tauri-apps/api/path";
 import type { SystemInfo } from "@/types";
 import { systemApi } from "@/lib/api";
@@ -95,7 +95,7 @@ export default function AboutPage() {
   async function handleOpenDataDir() {
     if (!info?.dataDir) return;
     try {
-      await openPath(info.dataDir);
+      await open(info.dataDir);
     } catch (e) {
       message.error(`打开目录失败: ${e}`);
     }
@@ -103,7 +103,7 @@ export default function AboutPage() {
 
   async function handleOpenLogs() {
     try {
-      await openPath(await appLogDir());
+      await open(await appLogDir());
     } catch (e) {
       message.error(`打开日志目录失败: ${e}`);
     }
@@ -256,7 +256,7 @@ export default function AboutPage() {
                     type="link"
                     size="small"
                     icon={<ExternalLink size={14} />}
-                    onClick={() => openUrl(OFFICIAL_SITE)}
+                    onClick={() => open(OFFICIAL_SITE)}
                   />
                 </Tooltip>
               </div>
@@ -336,7 +336,7 @@ export default function AboutPage() {
                   type="link"
                   size="small"
                   icon={<ExternalLink size={14} />}
-                  onClick={() => openUrl(BILIBILI_URL)}
+                  onClick={() => open(BILIBILI_URL)}
                 />
               </Tooltip>
             </div>
@@ -349,7 +349,7 @@ export default function AboutPage() {
                   type="link"
                   size="small"
                   icon={<ExternalLink size={14} />}
-                  onClick={() => openUrl(BILIBILI_TUTORIAL_URL)}
+                  onClick={() => open(BILIBILI_TUTORIAL_URL)}
                 />
               </Tooltip>
             </div>

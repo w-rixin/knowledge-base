@@ -20,7 +20,7 @@
 use std::time::Duration;
 
 use chrono::{Local, NaiveDateTime};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 use crate::models::{SyncBackend, SyncPullResult, SyncPushResult};
 use crate::services::sync_v1;
@@ -271,7 +271,7 @@ fn emit_result(
         "error": error,
         "encryptedSkipped": encrypted_skipped,
     });
-    let _ = app.emit("sync_v1:auto-triggered", payload);
+    let _ = app.emit_all("sync_v1:auto-triggered", payload);
 }
 
 /// 取本机 hostname 短名（与 commands/sync_v1.rs 同名工具一致）

@@ -222,7 +222,7 @@ const TableWithMarkdown = Table.extend({
   },
 });
 import { common, createLowlight } from "lowlight";
-import { openPath, openUrl } from "@tauri-apps/api/shell";
+import { open } from "@/lib/tauriShell";
 import { useEffect, useRef, useCallback, useState } from "react";
 import { message, Modal, Input } from "antd";
 import { theme as antdTheme } from "antd";
@@ -2280,7 +2280,7 @@ export function TiptapEditor({
         } else {
           void systemApi
             .resolveAssetAbsolute(rel)
-            .then((abs) => openPath(abs))
+            .then((abs) => open(abs))
             .catch((e) => {
               message.error(`打开附件失败: ${e}`);
             });
@@ -2288,15 +2288,15 @@ export function TiptapEditor({
       } else if (href.startsWith("file://")) {
         // 旧格式：迁移 SQL 跑完后历史链接已被替换；这里保留兜底兼容未迁移的笔记
         const path = fileUrlToPath(href);
-        void openPath(path).catch((e) => {
+        void open(path).catch((e) => {
           message.error(`打开附件失败: ${e}`);
         });
       } else if (/^https?:\/\//i.test(href) || href.startsWith("mailto:") || href.startsWith("tel:")) {
-        void openUrl(href).catch((e) => {
+        void open(href).catch((e) => {
           message.error(`打开链接失败: ${e}`);
         });
       } else {
-        void openPath(href).catch((e) => {
+        void open(href).catch((e) => {
           message.error(`打开失败: ${e}`);
         });
       }

@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use tauri::{Emitter, Runtime};
+use tauri::{Runtime};
 
 use crate::database::Database;
 use crate::error::AppError;
@@ -32,7 +32,7 @@ struct ProgressEvent {
     message: String,
 }
 
-pub fn pull<R: Runtime, E: Emitter<R>>(
+pub fn pull<R: Runtime>(
     db: &Database,
     backend_id: i64,
     backend: &dyn SyncBackendImpl,
@@ -40,12 +40,12 @@ pub fn pull<R: Runtime, E: Emitter<R>>(
     device: &str,
     conflicts_dir: &Path,
     data_dir: &Path,
-    emitter: &E,
+    emitter: &tauri::AppHandle<R>,
 ) -> Result<SyncPullResult, AppError> {
     let mut result = SyncPullResult::default();
     let event_name = "sync_v1:progress";
 
-    let _ = emitter.emit(
+    let _ = emitter.emit_all(
         event_name,
         ProgressEvent {
             backend_id,
@@ -148,7 +148,7 @@ pub fn pull<R: Runtime, E: Emitter<R>>(
 
     let local = manifest::compute_local_manifest(db, app_version, device)?;
 
-    let _ = emitter.emit(
+    let _ = emitter.emit_all(
         event_name,
         ProgressEvent {
             backend_id,
@@ -193,7 +193,7 @@ pub fn pull<R: Runtime, E: Emitter<R>>(
         }
 
         for (idx, att) in to_download.iter().enumerate() {
-            let _ = emitter.emit(
+            let _ = emitter.emit_all(
                 event_name,
                 ProgressEvent {
                     backend_id,
@@ -306,7 +306,7 @@ pub fn pull<R: Runtime, E: Emitter<R>>(
     // ── 处理 to_pull（远端独有 / 远端较新）
     let total_pull = diff.to_pull.len();
     for (idx, entry) in diff.to_pull.iter().enumerate() {
-        let _ = emitter.emit(
+        let _ = emitter.emit_all(
             event_name,
             ProgressEvent {
                 backend_id,
@@ -660,7 +660,7 @@ pub fn pull<R: Runtime, E: Emitter<R>>(
 
     db.touch_sync_backend_pull(backend_id)?;
 
-    let _ = emitter.emit(
+    let _ = emitter.emit_all(
         event_name,
         ProgressEvent {
             backend_id,

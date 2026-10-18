@@ -5,7 +5,7 @@ import {
   CopyOutlined,
   CheckOutlined,
 } from "@ant-design/icons";
-import { openUrl } from "@tauri-apps/api/shell";
+import { open } from "@/lib/tauriShell";
 // 产品 logo —— 各软件真实图标
 import aicoderLogo from "@/assets/promo/aicoder.png";
 import sigilLogo from "@/assets/promo/sigil.svg";
@@ -301,7 +301,7 @@ export function RecommendCards() {
         onCancel={() => setWorkstationOpen(false)}
         footer={[
           <Button key="close" onClick={() => setWorkstationOpen(false)}>关闭</Button>,
-          <Button key="site" type="primary" onClick={() => openUrl("https://ai-workstation.ruoyi.plus/")}>
+          <Button key="site" type="primary" onClick={() => open("https://ai-workstation.ruoyi.plus/")}>
             访问官网
           </Button>,
         ]}
@@ -368,13 +368,13 @@ export function RecommendCards() {
         </div>
 
         <div style={{ marginTop: 16, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-          <Button type="link" size="small" onClick={() => openUrl("https://www.bilibili.com/video/BV17cXNBkEEV")}>
+          <Button type="link" size="small" onClick={() => open("https://www.bilibili.com/video/BV17cXNBkEEV")}>
             观看教程 (B站)
           </Button>
-          <Button type="link" size="small" onClick={() => openUrl("https://ai-workstation-mcp.agilefr.com/")}>
+          <Button type="link" size="small" onClick={() => open("https://ai-workstation-mcp.agilefr.com/")}>
             MCP 试用
           </Button>
-          <Button type="link" size="small" onClick={() => openUrl("https://ai-workstation.ruoyi.plus/")}>
+          <Button type="link" size="small" onClick={() => open("https://ai-workstation.ruoyi.plus/")}>
             官网
           </Button>
         </div>
@@ -479,7 +479,7 @@ export function RecommendCards() {
         onCancel={() => setSigilOpen(false)}
         footer={[
           <Button key="close" onClick={() => setSigilOpen(false)}>关闭</Button>,
-          <Button key="site" type="primary" onClick={() => openUrl("https://sigil.ruoyi.plus")}>
+          <Button key="site" type="primary" onClick={() => open("https://sigil.ruoyi.plus")}>
             访问官网
           </Button>,
         ]}
@@ -554,7 +554,7 @@ export function RecommendCards() {
         onCancel={() => setReeveOpen(false)}
         footer={[
           <Button key="close" onClick={() => setReeveOpen(false)}>关闭</Button>,
-          <Button key="site" type="primary" onClick={() => openUrl("https://reeve.ruoyi.plus")}>
+          <Button key="site" type="primary" onClick={() => open("https://reeve.ruoyi.plus")}>
             访问官网
           </Button>,
         ]}
@@ -629,7 +629,7 @@ export function RecommendCards() {
         onCancel={() => setAgileshotOpen(false)}
         footer={[
           <Button key="close" onClick={() => setAgileshotOpen(false)}>关闭</Button>,
-          <Button key="site" type="primary" onClick={() => openUrl("https://agileshot.ruoyi.plus")}>
+          <Button key="site" type="primary" onClick={() => open("https://agileshot.ruoyi.plus")}>
             访问官网
           </Button>,
         ]}
@@ -697,7 +697,7 @@ export function RecommendCards() {
         </div>
 
         <div style={{ marginTop: 16, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-          <Button type="link" size="small" onClick={() => openUrl("https://www.bilibili.com/video/BV1uQ7k6nEvq")}>
+          <Button type="link" size="small" onClick={() => open("https://www.bilibili.com/video/BV1uQ7k6nEvq")}>
             B站介绍
           </Button>
         </div>
@@ -710,7 +710,7 @@ export function RecommendCards() {
         onCancel={() => setStoryloomOpen(false)}
         footer={[
           <Button key="close" onClick={() => setStoryloomOpen(false)}>关闭</Button>,
-          <Button key="site" type="primary" onClick={() => openUrl("https://storyloom.ruoyi.plus")}>
+          <Button key="site" type="primary" onClick={() => open("https://storyloom.ruoyi.plus")}>
             访问官网
           </Button>,
         ]}
@@ -778,10 +778,10 @@ export function RecommendCards() {
         </div>
 
         <div style={{ marginTop: 16, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-          <Button type="link" size="small" onClick={() => openUrl("https://www.bilibili.com/video/BV1S4Tu6cE55")}>
+          <Button type="link" size="small" onClick={() => open("https://www.bilibili.com/video/BV1S4Tu6cE55")}>
             B站介绍
           </Button>
-          <Button type="link" size="small" onClick={() => openUrl("https://storyloom.ruoyi.plus")}>
+          <Button type="link" size="small" onClick={() => open("https://storyloom.ruoyi.plus")}>
             官网
           </Button>
         </div>
@@ -794,7 +794,7 @@ export function RecommendCards() {
         onCancel={() => setAicoderOpen(false)}
         footer={[
           <Button key="close" onClick={() => setAicoderOpen(false)}>关闭</Button>,
-          <Button key="site" type="primary" onClick={() => openUrl("https://aicoder.ruoyi.plus/")}>
+          <Button key="site" type="primary" onClick={() => open("https://aicoder.ruoyi.plus/")}>
             访问官网
           </Button>,
         ]}
@@ -862,10 +862,10 @@ export function RecommendCards() {
         </div>
 
         <div style={{ marginTop: 16, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-          <Button type="link" size="small" onClick={() => openUrl("https://aicoder.ruoyi.plus/")}>
+          <Button type="link" size="small" onClick={() => open("https://aicoder.ruoyi.plus/")}>
             官网
           </Button>
-          <Button type="link" size="small" onClick={() => openUrl("https://aicoder.ruoyi.plus/download.html")}>
+          <Button type="link" size="small" onClick={() => open("https://aicoder.ruoyi.plus/download.html")}>
             下载
           </Button>
         </div>

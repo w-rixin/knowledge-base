@@ -175,7 +175,7 @@ pub async fn download_mobile_update(
     version: String,
 ) -> Result<String, String> {
     use futures::StreamExt;
-    use tauri::{Emitter, Manager};
+    use tauri::{Manager};
     use tokio::io::AsyncWriteExt;
 
     // 只收 http(s)，挡掉 file:// 之类的本地路径注入
@@ -275,7 +275,7 @@ pub async fn download_mobile_update(
             } else {
                 0
             };
-            let _ = app.emit(
+            let _ = app.emit_all(
                 EVENT_DOWNLOAD_PROGRESS,
                 DownloadProgress {
                     downloaded,
@@ -301,7 +301,7 @@ pub async fn download_mobile_update(
     std::fs::rename(&part, &dest).map_err(|e| format!("重命名失败: {e}"))?;
 
     // 收尾补一帧 100%，免得最后一个 chunk 没触发节流导致进度条停在 99%
-    let _ = app.emit(
+    let _ = app.emit_all(
         EVENT_DOWNLOAD_PROGRESS,
         DownloadProgress {
             downloaded,

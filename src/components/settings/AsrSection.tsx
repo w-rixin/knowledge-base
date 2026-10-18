@@ -23,7 +23,7 @@ import {
   theme as antdTheme,
 } from "antd";
 import { Mic, ExternalLink, Share2, Download } from "lucide-react";
-import { openUrl } from "@tauri-apps/api/shell";
+import { open } from "@/lib/tauriShell";
 import { asrApi } from "@/lib/api";
 import { ShareConfigModal } from "@/components/config-share/ShareConfigModal";
 import { ImportConfigModal } from "@/components/config-share/ImportConfigModal";
@@ -187,7 +187,7 @@ export function AsrSection() {
               <Text strong style={{ fontSize: 12 }}>使用步骤：</Text>
               ① 去
               <Typography.Link
-                onClick={() => openUrl(APPLY_KEY_URL)}
+                onClick={() => open(APPLY_KEY_URL)}
                 style={{ fontSize: 12, margin: "0 2px" }}
               >
                 阿里云百炼控制台
@@ -226,7 +226,7 @@ export function AsrSection() {
             <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
               API Key
               <Typography.Link
-                onClick={() => openUrl(APPLY_KEY_URL)}
+                onClick={() => open(APPLY_KEY_URL)}
                 style={{
                   fontSize: 12,
                   whiteSpace: "nowrap",

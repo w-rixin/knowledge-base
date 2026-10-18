@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use tauri::{Emitter, Runtime};
+use tauri::{Runtime};
 use walkdir::WalkDir;
 
 use crate::database::Database;
@@ -156,7 +156,7 @@ impl ImportService {
     ///
     /// 同名文件夹按 (parent_id, name) 复用已有记录，避免重复创建。
     /// 每条成功导入的笔记都会写入 canonical `source_file_path`，方便下次导入时去重。
-    pub async fn import_selected_files<R: Runtime, E: Emitter<R>>(
+    pub async fn import_selected_files<R: Runtime>(
         db: &Database,
         file_paths: &[String],
         base_folder_id: Option<i64>,
@@ -165,7 +165,7 @@ impl ImportService {
         policy: ImportConflictPolicy,
         daily_mode: bool,
         app_data_dir: &Path,
-        emitter: &E,
+        emitter: &tauri::AppHandle<R>,
     ) -> Result<ImportResult, AppError> {
         let total = file_paths.len();
         // 本批已认领的日期 —— 保证「一天一篇」，同一天的后续文件不再认领
@@ -239,7 +239,7 @@ impl ImportService {
                 .to_string();
 
             // 发送进度事件
-            let _ = emitter.emit(
+            let _ = emitter.emit_all(
                 "import:progress",
                 ImportProgress {
                     current: i + 1,
@@ -580,7 +580,7 @@ impl ImportService {
             daily_extra_notes,
         };
 
-        let _ = emitter.emit("import:done", &result);
+        let _ = emitter.emit_all("import:done", &result);
 
         Ok(result)
     }

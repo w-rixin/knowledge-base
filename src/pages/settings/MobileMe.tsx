@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { message, Modal, Progress } from "antd";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/api/shell";
+import { open } from "@/lib/tauriShell";
 import {
   Settings,
   Layers,
@@ -100,7 +100,7 @@ export function MobileMe() {
     // 下载地址可能是 release 发布页（update-mobile.json 没给直链时的回落），
     // 那种页面下不了 APK，直接交给浏览器
     if (!info.download_url.toLowerCase().endsWith(".apk")) {
-      await openUrl(info.download_url);
+      await open(info.download_url);
       return;
     }
 
@@ -161,7 +161,7 @@ export function MobileMe() {
         okText: "用浏览器下载",
         cancelText: "取消",
         onOk: () =>
-          openUrl(info.download_url).catch((err) =>
+          open(info.download_url).catch((err) =>
             message.error(`打开下载链接失败：${err}`),
           ),
       });

@@ -1,7 +1,7 @@
 import { Modal, Button, Progress, Typography, Space } from "antd";
 import { CheckCircleOutlined, SyncOutlined, DownloadOutlined } from "@ant-design/icons";
 import type { Update } from "@tauri-apps/api/updater";
-import { openUrl } from "@tauri-apps/api/shell";
+import { open } from "@/lib/tauriShell";
 import type { UpdatePhase } from "@/hooks/useUpdateChecker";
 
 const { Text, Paragraph } = Typography;
@@ -142,7 +142,7 @@ export function UpdateModal({
                   <Button
                     key={page.url}
                     block
-                    onClick={() => void openUrl(page.url)}
+                    onClick={() => void open(page.url)}
                     style={{ textAlign: "left" }}
                   >
                     {page.label}

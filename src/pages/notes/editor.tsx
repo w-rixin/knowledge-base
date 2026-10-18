@@ -40,7 +40,7 @@ import {
 import { VaultModal } from "@/components/vault/VaultModal";
 import { open as openDialog, save } from "@tauri-apps/api/dialog";
 import { convertFileSrc } from "@tauri-apps/api/tauri";
-import { openPath, revealItemInDir } from "@tauri-apps/api/shell";
+import { open } from "@/lib/tauriShell";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { relativeTime, stripHtml } from "@/lib/utils";
@@ -1779,7 +1779,7 @@ function DesktopNoteEditorPage() {
         setPdfPreviewAbsPath(abs);
         setPdfPreviewOpen(true);
       } else {
-        await openPath(abs);
+        await open(abs);
       }
     } catch (e) {
       message.error(`打开失败: ${e}`);
@@ -2969,7 +2969,7 @@ function DesktopNoteEditorPage() {
                 onClick={async () => {
                   if (!pdfPreviewAbsPath) return;
                   try {
-                    await openPath(pdfPreviewAbsPath);
+                    await open(pdfPreviewAbsPath);
                     setPdfPreviewOpen(false);
                   } catch (e) {
                     message.error(`打开失败: ${e}`);

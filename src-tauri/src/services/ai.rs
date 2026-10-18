@@ -3,7 +3,7 @@ use ai_profile::Protocol;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle};
 use tokio::sync::watch;
 
 use crate::database::Database;
@@ -33,10 +33,10 @@ struct WriteAssistEmitter {
 
 impl AiEventEmitter for WriteAssistEmitter {
     fn emit_token(&self, content: &str) {
-        let _ = self.app.emit("ai-write:token", content);
+        let _ = self.app.emit_all("ai-write:token", content);
     }
     fn emit_error(&self, error: &str) {
-        let _ = self.app.emit("ai-write:error", error);
+        let _ = self.app.emit_all("ai-write:error", error);
     }
 }
 
@@ -54,7 +54,7 @@ impl AiEventEmitter for ConversationEmitter<'_> {
         emit_ai_error(self.app, self.conversation_id, error);
     }
     fn emit_reasoning(&self, content: &str) {
-        let _ = self.app.emit(
+        let _ = self.app.emit_all(
             "ai:reasoning",
             json!({ "conversationId": self.conversation_id, "content": content }),
         );
@@ -388,7 +388,7 @@ fn format_openai_api_error(status: reqwest::StatusCode, body: &str) -> String {
 /// 带上会话 ID 是为了让前端能按会话过滤：会话 A 流式回答还没结束时，用户切到 / 新建
 /// 会话 B 发消息，A 后续吐出的 token 不能再贴到 B 的流式气泡上（多会话串台）。
 fn emit_ai_token(app: &AppHandle, conversation_id: i64, content: &str) {
-    let _ = app.emit(
+    let _ = app.emit_all(
         "ai:token",
         json!({ "conversationId": conversation_id, "content": content }),
     );
@@ -396,7 +396,7 @@ fn emit_ai_token(app: &AppHandle, conversation_id: i64, content: &str) {
 
 /// 发 `ai:error` 事件，payload `{ conversationId, error }`。同 `emit_ai_token`，带会话 ID。
 fn emit_ai_error(app: &AppHandle, conversation_id: i64, error: &str) {
-    let _ = app.emit(
+    let _ = app.emit_all(
         "ai:error",
         json!({ "conversationId": conversation_id, "error": error }),
     );
@@ -435,7 +435,7 @@ async fn send_unless_cancelled(
 fn emit_tool_call(app: &AppHandle, conversation_id: i64, sc: &SkillCall) {
     let mut payload = serde_json::to_value(sc).unwrap_or_else(|_| json!({}));
     payload["conversationId"] = json!(conversation_id);
-    let _ = app.emit("ai:tool_call", payload);
+    let _ = app.emit_all("ai:tool_call", payload);
 }
 
 /// 这条历史消息要不要发给模型当上下文
@@ -1290,7 +1290,7 @@ impl AiService {
             _ => Self::stream_openai_generic(&write_app, &model, &messages, cancel_rx).await?,
         };
 
-        let _ = app.emit("ai-write:done", "");
+        let _ = app.emit_all("ai-write:done", "");
         Ok(())
     }
 
@@ -2006,7 +2006,7 @@ impl AiService {
                         let _ = db.rename_ai_conversation_if_default(conversation_id, &auto_title);
                     }
 
-                    let _ = app.emit("ai:done", conversation_id);
+                    let _ = app.emit_all("ai:done", conversation_id);
                     return Ok(());
                 }
                 Err(failure) => {
@@ -2463,7 +2463,7 @@ impl AiService {
 
             // 告诉前端新一轮开始：之后的 token 属于这一轮。前端靠它把「调工具前说的话」
             // 和最终回答分开 —— 两者都走 ai:token，不分轮就只能糊成一段
-            let _ = app.emit(
+            let _ = app.emit_all(
                 "ai:round",
                 json!({ "conversationId": conversation_id, "round": round }),
             );
@@ -2558,7 +2558,7 @@ impl AiService {
                     &all_skill_calls,
                     &meta,
                 )?;
-                let _ = app.emit("ai:done", conversation_id);
+                let _ = app.emit_all("ai:done", conversation_id);
                 return Ok(());
             }
 
@@ -2689,7 +2689,7 @@ impl AiService {
             let _ = db.rename_ai_conversation_if_default(conversation_id, &auto_title);
         }
 
-        let _ = app.emit("ai:done", conversation_id);
+        let _ = app.emit_all("ai:done", conversation_id);
         Ok(())
     }
 

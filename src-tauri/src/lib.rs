@@ -19,7 +19,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use state::AppState;
-use tauri::{Emitter, Manager, WindowEvent};
+use tauri::{Manager, WindowEvent};
 
 /// 构建 macOS 风格的中文应用菜单（仅 macOS 实际挂载；Windows/Linux 默认不显示 menu bar）。
 /// 桌面三平台都能编译验证语法；移动端（Android/iOS）无 `tauri::menu`（menu feature 桌面专属），故 cfg gate。
@@ -400,7 +400,7 @@ fn start_md_deliver_watcher(handle: tauri::AppHandle, app_data_dir: PathBuf) {
                     continue;
                 }
                 log::info!("[deliver] 收到 md: {}", p);
-                let _ = handle.emit("open-md-file", p.to_string());
+                let _ = handle.emit_all("open-md-file", p.to_string());
             }
             // 清空文件准备下一轮投递
             let _ = std::fs::write(&path, "");
@@ -446,7 +446,7 @@ fn start_db_change_watcher(handle: tauri::AppHandle) {
             if cur != last {
                 last = cur;
                 // 外部写入可能改了笔记/文件夹/标签/任务任意一种 → 让相关列表都重拉
-                let _ = handle.emit("db:external-changed", ());
+                let _ = handle.emit_all("db:external-changed", ());
             }
         }
     });
@@ -466,7 +466,7 @@ fn run_data_dir_migration_with_splash(
     framework_app_data_dir: &std::path::Path,
     marker: &services::data_dir::MigrationMarker,
 ) -> Result<(), crate::error::AppError> {
-    use tauri::{Emitter, WindowUrl, WindowBuilder};
+    use tauri::{WindowUrl, WindowBuilder};
 
     log::info!(
         "[migration] 检测到 marker: {} → {} (status={:?})",
@@ -1740,7 +1740,7 @@ pub fn run() {
                             }
                         }
                         for p in &paths {
-                            let _ = handle.emit("open-md-file", p.clone());
+                            let _ = handle.emit_all("open-md-file", p.clone());
                         }
                         if let Some(win) = handle.get_window("main") {
                             let _ = win.unminimize();

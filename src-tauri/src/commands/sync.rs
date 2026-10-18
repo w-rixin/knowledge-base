@@ -72,8 +72,7 @@ pub fn sync_import_from_file(
     match state.db.reopen(&db_path_str) {
         Ok(_) => {
             if result.is_ok() {
-                use tauri::Emitter;
-                let _ = app.emit("db:reloaded", ());
+                                let _ = app.emit_all("db:reloaded", ());
             }
         }
         Err(e) => {
@@ -170,8 +169,7 @@ pub async fn sync_webdav_pull(
     match state.db.reopen(&db_path_str) {
         Ok(_) => {
             if result.is_ok() {
-                use tauri::Emitter;
-                let _ = app.emit("db:reloaded", ());
+                                let _ = app.emit_all("db:reloaded", ());
             }
         }
         Err(e) => {

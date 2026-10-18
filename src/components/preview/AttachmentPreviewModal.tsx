@@ -9,7 +9,7 @@ import {
   theme as antdTheme,
 } from "antd";
 import { FolderOpen, Maximize2, Minimize2 } from "lucide-react";
-import { openPath } from "@tauri-apps/api/shell";
+import { open } from "@/lib/tauriShell";
 import { convertFileSrc } from "@tauri-apps/api/tauri";
 import {
   useAttachmentPreviewStore,
@@ -87,7 +87,7 @@ export function AttachmentPreviewModal() {
   async function openExternal() {
     if (!absPath) return;
     try {
-      await openPath(absPath);
+      await open(absPath);
       close();
     } catch (e) {
       message.error(`打开失败：${e}`);

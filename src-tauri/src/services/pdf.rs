@@ -191,20 +191,20 @@ impl PdfService {
     /// 事件名会让它的进度条被 PDF 导入的数字带跑。
     ///
     /// 事件是尽力而为的（`let _ =`）：发不出去只是没进度，不该让导入本身失败。
-    pub fn import_many<R: tauri::Runtime, E: tauri::Emitter<R>>(
+    pub fn import_many<R: tauri::Runtime>(
         app_data_dir: &Path,
         db: &Database,
         source_paths: &[String],
         folder_id: Option<i64>,
         enable_ocr: bool,
-        emitter: &E,
+        emitter: &tauri::AppHandle<R>,
     ) -> Vec<PdfImportResult> {
         let total = source_paths.len();
         source_paths
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let _ = emitter.emit(
+                let _ = emitter.emit_all(
                     "pdf:import-progress",
                     crate::models::ImportProgress {
                         current: i + 1,

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use tauri::{Emitter, Runtime};
+use tauri::{Runtime};
 
 use base64::Engine;
 
@@ -23,13 +23,13 @@ impl ExportService {
     /// - `recursive`: `folder_id` 有值时是否连子文件夹一起导出。
     ///   旧调用方（设置页）曾只能导直属笔记，用户选父文件夹时子目录的笔记会**静默丢失**；
     ///   这里与「对此文件夹问 AI」对齐到同一个子树口径（`bfs_descendant_ids`）。
-    pub fn export_notes<R: Runtime, E: Emitter<R>>(
+    pub fn export_notes<R: Runtime>(
         db: &Database,
         instance_data_dir: &Path,
         output_dir: &str,
         folder_id: Option<i64>,
         recursive: bool,
-        emitter: &E,
+        emitter: &tauri::AppHandle<R>,
     ) -> Result<ExportResult, AppError> {
         let parent_path = Path::new(output_dir);
         std::fs::create_dir_all(parent_path)?;
@@ -159,7 +159,7 @@ impl ExportService {
             let file_path = dir.join(&file_name);
 
             // 发送进度事件
-            let _ = emitter.emit(
+            let _ = emitter.emit_all(
                 "export:progress",
                 ExportProgress {
                     current: i + 1,
@@ -198,7 +198,7 @@ impl ExportService {
             assets_copied: total_assets_copied,
         };
 
-        let _ = emitter.emit("export:done", &result);
+        let _ = emitter.emit_all("export:done", &result);
 
         Ok(result)
     }
