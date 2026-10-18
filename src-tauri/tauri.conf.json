@@ -95,7 +95,6 @@
         "renameFile": true,
         "copyFile": true,
         "exists": true,
-        "metadata": true,
         "scope": ["**"]
       },
       "http": {
