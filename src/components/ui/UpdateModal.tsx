@@ -1,7 +1,7 @@
 import { Modal, Button, Progress, Typography, Space } from "antd";
 import { CheckCircleOutlined, SyncOutlined, DownloadOutlined } from "@ant-design/icons";
-import type { Update } from "@tauri-apps/plugin-updater";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import type { Update } from "@tauri-apps/api/updater";
+import { openUrl } from "@tauri-apps/api/shell";
 import type { UpdatePhase } from "@/hooks/useUpdateChecker";
 
 const { Text, Paragraph } = Typography;

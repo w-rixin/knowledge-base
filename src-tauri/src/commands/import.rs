@@ -36,7 +36,7 @@ pub async fn import_selected_files(
     daily_mode: Option<bool>,
 ) -> Result<ImportResult, String> {
     // ⚠️ 必须用 state.data_dir（已经过 DataDirResolver 解析），
-    // 不能用 app.path().app_data_dir()（那是 OS 默认 framework 目录，不跟随用户改的数据目录）
+    // 不能用 app.path_resolver().app_data_dir()（那是 OS 默认 framework 目录，不跟随用户改的数据目录）
     let app_data_dir = state.data_dir.clone();
     services::import::ImportService::import_selected_files(
         &state.db,

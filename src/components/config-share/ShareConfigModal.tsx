@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Modal, Tabs, message, Alert, Input } from "antd";
 import { Copy, ShieldCheck, AlertTriangle, Lock, RefreshCw } from "lucide-react";
 import QRCode from "qrcode";
-import { writeText as writeClipboardText } from "@tauri-apps/plugin-clipboard-manager";
+import { writeText as writeClipboardText } from "@tauri-apps/api/clipboard";
 import {
   KIND_LABELS,
   stringifyEnvelope,

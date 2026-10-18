@@ -15,7 +15,7 @@
  * 提醒响错 < 提醒不响：宁可换个音也不能静默失败，否则用户会错过待办还不知道为什么。
  */
 
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/tauri";
 import { configApi, reminderSoundApi } from "@/lib/api";
 import {
   DEFAULT_PRESET_ID,

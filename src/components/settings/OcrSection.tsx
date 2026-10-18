@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Card, Typography, Button, Space, Alert, message, Input, Tag } from "antd";
 import { FileImage, FileText } from "lucide-react";
-import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { open as openFileDialog } from "@tauri-apps/api/dialog";
 import { ocrApi, noteApi } from "@/lib/api";
 
 const { Text, Paragraph } = Typography;

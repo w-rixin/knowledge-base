@@ -2,8 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Editor } from "@tiptap/react";
 import { CellSelection } from "@tiptap/pm/tables";
-import { invoke } from "@tauri-apps/api/core";
-import { save } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/tauri";
+import { save } from "@tauri-apps/api/dialog";
 import { Button, Tooltip, message, theme as antdTheme } from "antd";
 import { toPng } from "html-to-image";
 import {

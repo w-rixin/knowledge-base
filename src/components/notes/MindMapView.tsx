@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { Transformer } from "markmap-lib";
 import { Markmap } from "markmap-view";
-import { save } from "@tauri-apps/plugin-dialog";
+import { save } from "@tauri-apps/api/dialog";
 import { toPng } from "html-to-image";
 import { noteApi, systemApi } from "@/lib/api";
 

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Button, Dropdown, Space, message, type MenuProps } from "antd";
 import type { SizeType } from "antd/es/config-provider/SizeContext";
 import { useNavigate } from "react-router-dom";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/api/dialog";
 import {
   Plus,
   ChevronDown,

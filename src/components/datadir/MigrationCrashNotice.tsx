@@ -20,7 +20,7 @@ import {
   Space,
   Typography,
 } from "antd";
-import { relaunch } from "@tauri-apps/plugin-process";
+import { relaunch } from "@tauri-apps/api/process";
 import { dataDirApi } from "@/lib/api";
 import type { MigrationMarker, ResolvedDataDir } from "@/types";
 

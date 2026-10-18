@@ -81,7 +81,7 @@ const PERSIST_DEBOUNCE_MS: u64 = 1_200;
 /// 包一层只为把 `use tauri::Manager;` 收在一处 —— `app_handle()` 来自该 trait，
 /// 本文件其余函数不需要它，不值得提到模块顶部污染命名空间。
 #[cfg(desktop)]
-fn handle_of(window: &tauri::WebviewWindow) -> tauri::AppHandle {
+fn handle_of(window: &tauri::Window) -> tauri::AppHandle {
     use tauri::Manager;
     window.app_handle().clone()
 }
@@ -111,7 +111,7 @@ fn desired_size_filename() -> &'static str {
 #[cfg(desktop)]
 fn desired_size_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     use tauri::Manager;
-    app.path()
+    app.path_resolver()
         .app_config_dir()
         .ok()
         .map(|dir| dir.join(desired_size_filename()))
@@ -163,7 +163,7 @@ fn save_desired_to_disk(app: &tauri::AppHandle, (w, h): (f64, f64)) {
 /// 🔴 刻意不用 `window.scale_factor()`：那读的是 tao 缓存，而缓存跑偏正是要修的病
 /// （详见本节顶部根因 2 与 `services::window_size::physical_for_logical` 的注释）。
 #[cfg(desktop)]
-fn live_scale_factor(window: &tauri::WebviewWindow) -> Option<f64> {
+fn live_scale_factor(window: &tauri::Window) -> Option<f64> {
     let monitor = window
         .current_monitor()
         .ok()
@@ -175,7 +175,7 @@ fn live_scale_factor(window: &tauri::WebviewWindow) -> Option<f64> {
 
 /// 窗口当前的实测**逻辑**尺寸。最小化（尺寸为 0）时返回 `None`。
 #[cfg(desktop)]
-fn current_logical_size(window: &tauri::WebviewWindow, scale: f64) -> Option<(f64, f64)> {
+fn current_logical_size(window: &tauri::Window, scale: f64) -> Option<(f64, f64)> {
     let inner = window.inner_size().ok()?;
     if inner.width == 0 || inner.height == 0 {
         return None;
@@ -212,7 +212,7 @@ fn set_desired_logical_size(app: &tauri::AppHandle, size: (f64, f64)) {
 /// 记成新基准，从小屏切回大屏就再也回不到原尺寸 —— 基准必须始终是「用户想要的」，
 /// 而不是「这块屏当前能给的」。
 #[cfg(desktop)]
-pub(crate) fn init_desired_logical_size(window: &tauri::WebviewWindow) {
+pub(crate) fn init_desired_logical_size(window: &tauri::Window) {
     // 🔴 先撑开抑制窗口：setup 里的 restore_state / set_size / fit_into_work_area 都会
     // **异步**投递 `Resized`，那些事件在本函数返回之后才到达 `note_user_resize`。
     // 不挡住的话，fit clamp 出来的尺寸会被当成用户意图、覆盖掉下面刚载入的存档基准 ——
@@ -255,7 +255,7 @@ pub(crate) fn init_desired_logical_size(window: &tauri::WebviewWindow) {
 
 /// 记录用户手动调整出来的逻辑尺寸。挂在 `WindowEvent::Resized` 上。
 #[cfg(desktop)]
-pub(crate) fn note_user_resize(window: &tauri::WebviewWindow) {
+pub(crate) fn note_user_resize(window: &tauri::Window) {
     // 校正窗口期内的 Resized 是我们自己下发的（或 fit clamp 出来的），不是用户意图
     if now_ms() < SUPPRESS_RECORD_UNTIL.load(std::sync::atomic::Ordering::SeqCst) {
         return;
@@ -329,7 +329,7 @@ pub(crate) fn note_user_resize(window: &tauri::WebviewWindow) {
 
 /// 收到 `ScaleFactorChanged` 后排一次延迟校正。挂在 `WindowEvent::ScaleFactorChanged` 上。
 #[cfg(desktop)]
-pub(crate) fn schedule_geometry_reconcile(window: &tauri::WebviewWindow, new_scale: f64) {
+pub(crate) fn schedule_geometry_reconcile(window: &tauri::Window, new_scale: f64) {
     // 先把抑制窗口撑开，盖住「延迟 + 下发 + 系统回抛 Resized」全程
     SUPPRESS_RECORD_UNTIL.store(
         now_ms() + SUPPRESS_RECORD_MS,
@@ -353,7 +353,7 @@ pub(crate) fn schedule_geometry_reconcile(window: &tauri::WebviewWindow, new_sca
         // 窗口几何必须在主线程下发
         let _ = app.run_on_main_thread(move || {
             use tauri::Manager;
-            if let Some(w) = handle.get_webview_window(&label) {
+            if let Some(w) = handle.get_window(&label) {
                 reconcile_geometry(&w);
             }
         });
@@ -362,7 +362,7 @@ pub(crate) fn schedule_geometry_reconcile(window: &tauri::WebviewWindow, new_sca
 
 /// 按基准 + **实时**缩放重算并下发几何。
 #[cfg(desktop)]
-fn reconcile_geometry(window: &tauri::WebviewWindow) {
+fn reconcile_geometry(window: &tauri::Window) {
     // 最大化 / 全屏的几何由系统管，插手只会打架（与 fit_into_work_area 同一判断）。
     // 但不能就这么算了 —— 挂起，等还原成普通窗口时由 note_user_resize 补做。
     if window.is_maximized().unwrap_or(false) || window.is_fullscreen().unwrap_or(false) {
@@ -410,7 +410,7 @@ fn reconcile_geometry(window: &tauri::WebviewWindow) {
 ///
 /// 调用方紧接着会跑 `fit_into_work_area`，所以本函数只管尺寸、不管位置与 clamp。
 #[cfg(desktop)]
-pub(crate) fn rescue_after_restore(window: &tauri::WebviewWindow) {
+pub(crate) fn rescue_after_restore(window: &tauri::Window) {
     let app = handle_of(window);
     // 没有基准存档（首次升级到本版本）→ 认账还原出来的物理尺寸，不瞎猜
     let Some(want) = load_desired_from_disk(&app) else {
@@ -452,7 +452,7 @@ pub(crate) fn rescue_after_restore(window: &tauri::WebviewWindow) {
 /// `set_position` 内部同步抛 `WM_DPICHANGED` 并按新 DPI 重算窗口 rect，反过来的话
 /// 刚设好的尺寸会被再乘一次两屏缩放比（tauri-cc 项目在混合 DPI 双屏上实测过这个坑）。
 #[cfg(desktop)]
-pub(crate) fn fit_into_work_area(window: &tauri::WebviewWindow, center: bool) -> bool {
+pub(crate) fn fit_into_work_area(window: &tauri::Window, center: bool) -> bool {
     use crate::services::window_size::Rect;
 
     // 最大化 / 全屏的几何由系统管理，插手只会打架
@@ -596,7 +596,7 @@ pub fn reset_window_size(app: tauri::AppHandle) -> Result<(), String> {
         use tauri_plugin_window_state::AppHandleExt;
 
         let window = app
-            .get_webview_window("main")
+            .get_window("main")
             .ok_or_else(|| "找不到主窗口".to_string())?;
 
         // 1. 退出最大化（本来就不是最大化时这是空操作）

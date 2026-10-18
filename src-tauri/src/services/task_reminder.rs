@@ -200,10 +200,10 @@ fn tick_once(app: &AppHandle) -> Result<(), AppError> {
 /// 把主窗口拉到前台 + 闪烁任务栏抢用户注意。
 /// 用于普通/重要级提醒：用户可能把主窗最小化或隐藏到托盘了，必须先 show + unminimize +
 /// set_focus，否则 Modal 弹在隐藏窗口里用户看不见，只剩右下角系统通知 → 用户无从操作。
-/// 仅桌面端：移动端无最小化/任务栏概念，且 WebviewWindow 不提供这些方法。
+/// 仅桌面端：移动端无最小化/任务栏概念，且 Window 不提供这些方法。
 #[cfg(desktop)]
 fn surface_main_window(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
+    if let Some(win) = app.get_window("main") {
         let _ = win.unminimize();
         let _ = win.show();
         let _ = win.set_focus();

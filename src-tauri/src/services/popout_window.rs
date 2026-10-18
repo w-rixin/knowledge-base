@@ -10,9 +10,9 @@
 //!   Tauri 会在 dev/prod 下分别映射到 devUrl / app URL
 //! - **不使用 initialization_script 改 hash**：窗口创建阶段只负责加载稳定 URL，
 //!   避免 document-start 脚本在 WebView2 初始化期间触发二次导航
-//! - **精简模式判定**：前端读 `getCurrentWebviewWindow().label` 是否以 `popout-` 开头
+//! - **精简模式判定**：前端读 `getCurrentWindow().label` 是否以 `popout-` 开头
 
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WindowUrl, WindowBuilder};
 
 use crate::error::AppError;
 
@@ -24,7 +24,7 @@ const MIN_H: f64 = 200.0;
 pub fn open_note(app: &AppHandle, note_id: i64) -> Result<(), AppError> {
     let label = format!("popout-note-{}", note_id);
 
-    if let Some(existing) = app.get_webview_window(&label) {
+    if let Some(existing) = app.get_window(&label) {
         let _ = existing.unminimize();
         let _ = existing.show();
         let _ = existing.set_focus();
@@ -39,7 +39,7 @@ pub fn open_note(app: &AppHandle, note_id: i64) -> Result<(), AppError> {
         note_id
     );
 
-    let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
+    let builder = WindowBuilder::new(app, &label, WindowUrl::App(url.into()))
         .title("笔记")
         // popout 默认窗口宽一点，编辑器 topbar 工具按钮多，900px 会挤
         .inner_size(1200.0, 780.0)
@@ -70,7 +70,7 @@ pub fn open_note(app: &AppHandle, note_id: i64) -> Result<(), AppError> {
 pub fn open_mindmap(app: &AppHandle, note_id: i64) -> Result<(), AppError> {
     let label = format!("popout-mindmap-{}", note_id);
 
-    if let Some(existing) = app.get_webview_window(&label) {
+    if let Some(existing) = app.get_window(&label) {
         let _ = existing.unminimize();
         let _ = existing.show();
         let _ = existing.set_focus();
@@ -85,7 +85,7 @@ pub fn open_mindmap(app: &AppHandle, note_id: i64) -> Result<(), AppError> {
         note_id
     );
 
-    let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
+    let builder = WindowBuilder::new(app, &label, WindowUrl::App(url.into()))
         .title("思维导图")
         .inner_size(960.0, 720.0)
         .min_inner_size(480.0, 360.0)
@@ -115,7 +115,7 @@ pub fn open_mindmap(app: &AppHandle, note_id: i64) -> Result<(), AppError> {
 pub fn open_quick_add(app: &AppHandle) -> Result<(), AppError> {
     let label = "quick-add";
 
-    if let Some(win) = app.get_webview_window(label) {
+    if let Some(win) = app.get_window(label) {
         // 复用已建窗口：可见则收起，隐藏则前置（配合前端失焦自动 hide）
         if win.is_visible().unwrap_or(false) {
             let _ = win.hide();
@@ -129,10 +129,10 @@ pub fn open_quick_add(app: &AppHandle) -> Result<(), AppError> {
 
     log::info!("[quick-add] 创建快速记一笔悬浮窗");
 
-    let builder = WebviewWindowBuilder::new(
+    let builder = WindowBuilder::new(
         app,
         label,
-        WebviewUrl::App("index.html#/quick-add".into()),
+        WindowUrl::App("index.html#/quick-add".into()),
     )
     .title("快速记一笔")
     .inner_size(560.0, 240.0)
@@ -168,7 +168,7 @@ pub fn open_quick_add(app: &AppHandle) -> Result<(), AppError> {
 pub fn open_push_popup(app: &AppHandle, log_id: i64) -> Result<(), AppError> {
     let label = format!("push-popup-{}", log_id);
 
-    if let Some(existing) = app.get_webview_window(&label) {
+    if let Some(existing) = app.get_window(&label) {
         let _ = existing.unminimize();
         let _ = existing.show();
         let _ = existing.set_always_on_top(true);
@@ -180,7 +180,7 @@ pub fn open_push_popup(app: &AppHandle, log_id: i64) -> Result<(), AppError> {
 
     // 初始给个保守尺寸；前端内容加载后会按内容多少调用 setSize 智能调整（见 push-popup 页）。
     // resizable=true 让用户随后还能手动拉伸；min 防止被拉到不可用的小尺寸。
-    let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
+    let builder = WindowBuilder::new(app, &label, WindowUrl::App(url.into()))
         .title("定时推送")
         .inner_size(440.0, 300.0)
         .min_inner_size(MIN_W, MIN_H)

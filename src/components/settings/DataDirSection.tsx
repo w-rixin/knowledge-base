@@ -30,7 +30,7 @@ import {
   Copy,
   Sparkles,
 } from "lucide-react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/api/dialog";
 import { dataDirApi } from "@/lib/api";
 import type { DataDirSource, ResolvedDataDir } from "@/types";
 

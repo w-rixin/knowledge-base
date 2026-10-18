@@ -38,9 +38,9 @@ import {
   editorDomToSelfContainedHtml,
 } from "@/lib/printNote";
 import { VaultModal } from "@/components/vault/VaultModal";
-import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
-import { convertFileSrc } from "@tauri-apps/api/core";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { open as openDialog, save } from "@tauri-apps/api/dialog";
+import { convertFileSrc } from "@tauri-apps/api/tauri";
+import { openPath, revealItemInDir } from "@tauri-apps/api/shell";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { relativeTime, stripHtml } from "@/lib/utils";

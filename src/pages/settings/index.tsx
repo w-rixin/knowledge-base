@@ -24,11 +24,11 @@ import {
 import { SyncOutlined, PlusOutlined, CheckCircleFilled, CheckCircleOutlined } from "@ant-design/icons";
 import { Trash2, Pencil, FolderInput, FolderOutput, LayoutTemplate, Power, ExternalLink, Type, Zap, Share2, Download, PanelLeft, Palette, Image as ImageIcon, CalendarCheck, Maximize2, ListRestart } from "lucide-react";
 import { DailyImportModal } from "@/components/DailyImportModal";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/tauri";
 import dayjs, { type Dayjs } from "dayjs";
 import { TimePicker } from "antd";
-import { open } from "@tauri-apps/plugin-dialog";
-import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { open } from "@tauri-apps/api/dialog";
+import { openUrl, revealItemInDir } from "@tauri-apps/api/shell";
 import { useLocation } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import type { AiModel, AiModelInput, AiModelTestResult, ImportResult, ImportConflictPolicy, ScannedFile, ExportResult, ExportProgress, NoteTemplate, NoteTemplateInput } from "@/types";

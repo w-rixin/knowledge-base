@@ -222,7 +222,7 @@ const TableWithMarkdown = Table.extend({
   },
 });
 import { common, createLowlight } from "lowlight";
-import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl } from "@tauri-apps/api/shell";
 import { useEffect, useRef, useCallback, useState } from "react";
 import { message, Modal, Input } from "antd";
 import { theme as antdTheme } from "antd";

@@ -1,5 +1,5 @@
-import { save, open as openDialog } from "@tauri-apps/plugin-dialog";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { save, open as openDialog } from "@tauri-apps/api/dialog";
+import { revealItemInDir } from "@tauri-apps/api/shell";
 import { Modal, message } from "antd";
 
 import { exportApi } from "@/lib/api";

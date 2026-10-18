@@ -9,8 +9,8 @@ import {
   theme as antdTheme,
 } from "antd";
 import { FolderOpen, Maximize2, Minimize2 } from "lucide-react";
-import { openPath } from "@tauri-apps/plugin-opener";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { openPath } from "@tauri-apps/api/shell";
+import { convertFileSrc } from "@tauri-apps/api/tauri";
 import {
   useAttachmentPreviewStore,
   isTextAttachmentExt,

@@ -51,8 +51,8 @@ import {
 } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { ColumnsType } from "antd/es/table";
-import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { open as openDialog, save } from "@tauri-apps/api/dialog";
+import { revealItemInDir } from "@tauri-apps/api/shell";
 import { noteApi, exportApi, folderApi, tagApi, trashApi, vaultApi } from "@/lib/api";
 import { MicButton } from "@/components/MicButton";
 import { useContextMenu } from "@/hooks/useContextMenu";

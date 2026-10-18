@@ -1,17 +1,9 @@
 {
-  "$schema": "https://schema.tauri.app/config/2",
-  "bundle": {
-    "targets": ["deb"],
-    "createUpdaterArtifacts": false,
-    "linux": {
+  "$schema": "https://schema.tauri.app/config/1",
+  "tauri": {
+    "bundle": {
       "deb": {
-        "section": "utility",
-        "depends": [
-          "libc6",
-          "libayatana-appindicator3-1",
-          "librsvg2-2",
-          "fonts-noto-cjk"
-        ]
+        "depends": ["libc6", "libayatana-appindicator3-1", "librsvg2-2", "fonts-noto-cjk"]
       }
     }
   }

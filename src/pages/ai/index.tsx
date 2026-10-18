@@ -34,7 +34,7 @@ import {
 } from "lucide-react";
 import { CloseCircleFilled } from "@ant-design/icons";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/api/dialog";
 import { useNavigate, useLocation } from "react-router-dom";
 import {
   aiChatApi,

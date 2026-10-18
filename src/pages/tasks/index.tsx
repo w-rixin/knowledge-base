@@ -42,7 +42,7 @@ import {
   type ContextMenuEntry,
 } from "@/components/ui/ContextMenuOverlay";
 import { NewTodoButton } from "@/components/NewTodoButton";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { openPath } from "@tauri-apps/api/shell";
 import { taskApi, taskCategoryApi } from "@/lib/api";
 import { filterTasksByDateRange } from "@/lib/taskDateFilter";
 import { MicButton } from "@/components/MicButton";

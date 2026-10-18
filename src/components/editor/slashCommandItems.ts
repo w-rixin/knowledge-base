@@ -1,6 +1,6 @@
 import type { Editor, Range } from "@tiptap/core";
 import { message } from "antd";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open } from "@tauri-apps/api/dialog";
 import {
   Heading1,
   Heading2,

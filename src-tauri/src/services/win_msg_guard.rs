@@ -83,7 +83,7 @@ unsafe extern "system" fn subclass_proc(
 ///
 /// 失败只记 warn 不阻断启动：拿不到 hwnd 或安装失败时，退化成"和以前一样"，
 /// 不该因为一个加固措施让应用起不来。
-pub fn install(window: &tauri::WebviewWindow) {
+pub fn install(window: &tauri::Window) {
     if INSTALLED.swap(true, Ordering::SeqCst) {
         return;
     }

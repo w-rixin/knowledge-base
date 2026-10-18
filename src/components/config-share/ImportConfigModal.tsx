@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Modal, Tabs, message, Alert, Input } from "antd";
 import { ClipboardPaste, ScanLine, Lock } from "lucide-react";
 import { Html5Qrcode } from "html5-qrcode";
-import { readText as readClipboardText } from "@tauri-apps/plugin-clipboard-manager";
+import { readText as readClipboardText } from "@tauri-apps/api/clipboard";
 import {
   KIND_LABELS,
   applyEnvelope,

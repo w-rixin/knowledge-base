@@ -143,7 +143,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             "always-on-top" => {
                 // CheckMenuItem 点击后 Tauri 会先自动翻转 checked 状态，这里读到的是新状态
                 let checked = always_on_top_ref.is_checked().unwrap_or(false);
-                if let Some(window) = app.get_webview_window("main") {
+                if let Some(window) = app.get_window("main") {
                     if let Err(e) = window.set_always_on_top(checked) {
                         log::error!("[tray] 设置窗口置顶失败: {}", e);
                         // 状态回滚
@@ -201,7 +201,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             } = event
             {
                 let app = tray.app_handle();
-                if let Some(window) = app.get_webview_window("main") {
+                if let Some(window) = app.get_window("main") {
                     let is_visible = window.is_visible().unwrap_or(false);
                     let is_minimized = window.is_minimized().unwrap_or(false);
 
@@ -266,7 +266,7 @@ fn add_dev_badge(icon: &tauri::image::Image<'_>) -> tauri::image::Image<'static>
 
 /// 把主窗口从最小化/隐藏中恢复并聚焦
 fn bring_main_to_front(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();

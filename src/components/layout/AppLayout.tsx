@@ -5,7 +5,7 @@ import { SettingOutlined, PushpinOutlined, PushpinFilled } from "@ant-design/ico
 import { Search, Palette, ArrowLeft, ArrowRight, PanelLeftClose, PanelLeftOpen, FilePlus2 } from "lucide-react";
 import { getCurrentWindow, type Window } from "@tauri-apps/api/window";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/tauri";
 import { importApi } from "@/lib/api";
 import { showExternalMdIntroOnce } from "@/lib/externalMdIntro";
 import { resolveOpenMdMode } from "@/lib/openMdChoice";

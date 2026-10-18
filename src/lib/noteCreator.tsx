@@ -3,7 +3,7 @@
  * 让"+ 新建笔记"按钮能直接调用，不必再走 Tab 选择的 Modal 流程。
  */
 import { Button, List, Modal, Typography, message } from "antd";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/api/dialog";
 import { Copy } from "lucide-react";
 import type { NavigateFunction } from "react-router-dom";
 

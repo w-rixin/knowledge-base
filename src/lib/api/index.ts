@@ -1,5 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
-import { check } from "@tauri-apps/plugin-updater";
+import { invoke } from "@tauri-apps/api/tauri";
+import { check } from "@tauri-apps/api/updater";
 import {
   enable as autostartEnable,
   disable as autostartDisable,

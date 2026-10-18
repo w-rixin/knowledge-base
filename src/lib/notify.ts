@@ -2,7 +2,7 @@ import {
   isPermissionGranted,
   requestPermission,
   sendNotification,
-} from "@tauri-apps/plugin-notification";
+} from "@tauri-apps/api/notification";
 
 /**
  * 发送系统通知（跨桌面/移动）——用于"发完切走"的场景，让用户在别的 App 里也能看到结果。

@@ -23,7 +23,7 @@ import {
   FileSpreadsheet,
 } from "lucide-react";
 import dayjs, { type Dayjs } from "dayjs";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/api/dialog";
 import { aiPlanApi, taskApi } from "@/lib/api";
 import { MicButton } from "@/components/MicButton";
 import type {

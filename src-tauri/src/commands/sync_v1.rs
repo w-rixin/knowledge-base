@@ -249,10 +249,10 @@ pub fn sync_v1_list_conflicts(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<Vec<crate::services::sync_v1::conflicts::ConflictItem>, String> {
-    // 冲突文件由 sync_v1_pull 写在 `app.path().app_data_dir()/sync_conflicts/` 下，
+    // 冲突文件由 sync_v1_pull 写在 `app.path_resolver().app_data_dir()/sync_conflicts/` 下，
     // 这里必须用同一个基准目录（注意：这是 framework 默认 app_data_dir，dev 模式下与 -dev 隔离目录不同；
     // 若以后改了 sync_v1_pull 的 conflicts_dir 基准，本处需同步改）。
-    let base = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let base = app.path_resolver().app_data_dir().map_err(|e| e.to_string())?;
     crate::services::sync_v1::conflicts::list_conflicts(&state.db, &base)
         .map_err(|e: AppError| e.to_string())
 }
@@ -266,7 +266,7 @@ pub fn sync_v1_resolve_conflict(
     resolution: crate::services::sync_v1::conflicts::ConflictResolution,
     merged_content: Option<String>,
 ) -> Result<(), String> {
-    let base = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let base = app.path_resolver().app_data_dir().map_err(|e| e.to_string())?;
     crate::services::sync_v1::conflicts::resolve_conflict(
         &state.db,
         &base,

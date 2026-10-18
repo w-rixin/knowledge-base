@@ -40,7 +40,7 @@ import {
   Share2,
   Download,
 } from "lucide-react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/api/dialog";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { configApi, syncApi, syncV1Api } from "@/lib/api";
 import { ShareConfigModal } from "@/components/config-share/ShareConfigModal";

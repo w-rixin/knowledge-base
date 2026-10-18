@@ -1,6 +1,6 @@
 {
-  "$schema": "https://schema.tauri.app/config/2",
-  "app": {
+  "$schema": "https://schema.tauri.app/config/1",
+  "tauri": {
     "windows": [
       {
         "title": "知识库",
@@ -12,11 +12,11 @@
         "decorations": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "dragDropEnabled": false
+        "fileDropEnabled": false
       }
-    ]
-  },
-  "bundle": {
-    "targets": ["app", "dmg"]
+    ],
+    "bundle": {
+      "targets": ["app", "dmg"]
+    }
   }
 }

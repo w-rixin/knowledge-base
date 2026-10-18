@@ -15,8 +15,8 @@ import {
   Minimize2,
   PenLine,
 } from "lucide-react";
-import { revealItemInDir, openPath } from "@tauri-apps/plugin-opener";
-import { writeImage } from "@tauri-apps/plugin-clipboard-manager";
+import { revealItemInDir, openPath } from "@tauri-apps/api/shell";
+import { writeImage } from "@tauri-apps/api/clipboard";
 import { useContextMenu } from "@/hooks/useContextMenu";
 import { useFeatureEnabled } from "@/hooks/useFeatureEnabled";
 import {

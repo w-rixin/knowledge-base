@@ -13,7 +13,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Button, Popconfirm, Select, Slider, Switch, Tooltip, Typography, message } from "antd";
 import { Play, Square, Trash2, Upload, Volume2 } from "lucide-react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/api/dialog";
 
 import { configApi, reminderSoundApi } from "@/lib/api";
 import type { CustomReminderSound } from "@/types";

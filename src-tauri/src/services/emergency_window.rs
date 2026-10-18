@@ -10,7 +10,7 @@
 //! - 用 maximized + decorations:false 模拟「全屏接管」，比真 fullscreen 安全
 //!   （不切显示模式、Alt+Tab 仍可用、不会抢游戏 fullscreen 焦点）
 
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WindowUrl, WindowBuilder};
 
 use crate::error::AppError;
 
@@ -18,7 +18,7 @@ use crate::error::AppError;
 pub fn open_for_task(app: &AppHandle, task_id: i64) -> Result<(), AppError> {
     let label = format!("emergency-{}", task_id);
 
-    if let Some(existing) = app.get_webview_window(&label) {
+    if let Some(existing) = app.get_window(&label) {
         let _ = existing.unminimize();
         let _ = existing.show();
         let _ = existing.set_always_on_top(true);
@@ -30,7 +30,7 @@ pub fn open_for_task(app: &AppHandle, task_id: i64) -> Result<(), AppError> {
     // 设计取舍：参考 Outlook 会议提醒——小窗 + 置顶 + 居中。
     // 不再 maximized：用户能看到底层应用、能切焦点处理别的事，但弹窗始终可见。
     // resizable=true 给用户调整空间；shadow=true 让置顶弹窗在浅色背景上仍有立体感。
-    WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
+    WindowBuilder::new(app, &label, WindowUrl::App(url.into()))
         .title("紧急待办提醒")
         .inner_size(560.0, 380.0)
         .min_inner_size(420.0, 300.0)

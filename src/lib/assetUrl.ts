@@ -1,4 +1,4 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/tauri";
 
 /**
  * 笔记 content 里素材的虚拟 scheme：

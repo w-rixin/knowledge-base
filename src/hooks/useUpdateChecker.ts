@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from "react";
-import type { Update } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
+import type { Update } from "@tauri-apps/api/updater";
+import { relaunch } from "@tauri-apps/api/process";
 import { updaterApi } from "@/lib/api";
 import { flushSettingsToDisk } from "@/store";
 

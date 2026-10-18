@@ -990,7 +990,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   aiWritable: true,
   loadAiWritable: async () => {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("@tauri-apps/api/tauri");
       const v = await invoke<boolean>("mcp_get_ai_writable");
       set({ aiWritable: v });
     } catch {
@@ -1002,7 +1002,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     // 乐观更新让 Switch 不卡顿；失败回滚
     set({ aiWritable: enabled });
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("@tauri-apps/api/tauri");
       await invoke("mcp_set_ai_writable", { enabled });
     } catch (e) {
       console.warn("[ai_writable] persist failed:", e);
@@ -1689,7 +1689,7 @@ export async function applyThemeOverrides(state: {
   // 让用户重新选图，避免"开关打开但图始终不显示"的诡异状态
   if (state.themeOverridesEnabled && state.customBgImage) {
     try {
-      const { convertFileSrc, invoke } = await import("@tauri-apps/api/core");
+      const { convertFileSrc, invoke } = await import("@tauri-apps/api/tauri");
       const exists = await invoke<boolean>("path_exists", {
         path: state.customBgImage,
       });

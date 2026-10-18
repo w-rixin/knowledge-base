@@ -22,7 +22,7 @@ import {
   LinkOutlined,
   HistoryOutlined,
 } from "@ant-design/icons";
-import { save, open } from "@tauri-apps/plugin-dialog";
+import { save, open } from "@tauri-apps/api/dialog";
 import { listen } from "@tauri-apps/api/event";
 import { syncApi, configApi } from "@/lib/api";
 import type {

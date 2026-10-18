@@ -1,6 +1,6 @@
 import { Tooltip } from "antd";
 import { ArrowUpCircle, Download, RefreshCw } from "lucide-react";
-import type { Update } from "@tauri-apps/plugin-updater";
+import type { Update } from "@tauri-apps/api/updater";
 import type { UpdatePhase } from "@/hooks/useUpdateChecker";
 
 interface Props {

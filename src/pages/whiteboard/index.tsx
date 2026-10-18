@@ -28,7 +28,7 @@ import {
   Minimize2,
   StickyNote,
 } from "lucide-react";
-import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
+import { save as saveDialog, open as openDialog } from "@tauri-apps/api/dialog";
 import { useAppStore } from "@/store";
 import { noteApi, whiteboardApi, systemApi, searchApi } from "@/lib/api";
 import type { Note, SearchResult } from "@/types";

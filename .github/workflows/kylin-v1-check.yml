@@ -1,0 +1,64 @@
+# =============================================================================
+# Tauri 1.x（麒麟 glibc 2.31 适配线）编译检查
+# =============================================================================
+#
+# 用途：只跑 `cargo check`，不打包，用于在迁移期间快速暴露 API 不兼容点。
+#       完整打包仍走 release.yml。
+#
+# 🔴 为什么用 ubuntu-22.04-arm 而不是 24.04-arm：
+#    Tauri 1.x 需要 libwebkit2gtk-4.0-dev，Ubuntu 24.04 已移除该开发包。
+#    jammy 同时有 4.0/4.1，官方支持到 2027-04。
+#
+# 触发：手动（Actions 页面 Run workflow）或推 kylin-v1* tag
+# =============================================================================
+
+name: Kylin v1 Check
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - tauri-v1
+    paths:
+      - 'src-tauri/**'
+      - '.github/workflows/kylin-v1-check.yml'
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies (webkit2gtk-4.0 for Tauri 1.x)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.0-dev \
+            libjavascriptcoregtk-4.0-dev \
+            libsoup2.4-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential \
+            file \
+            patchelf
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: cargo check (lib + bin)
+        working-directory: ./src-tauri
+        # 不用 -D warnings：迁移期先把「能不能编过」这件事确认下来，
+        # warning 留到功能跑通后再逐个清理。
+        run: |
+          cargo check --all-targets 2>&1 | tee /tmp/check.log
+          echo "=== 错误统计 ==="
+          grep -c "^error" /tmp/check.log || echo "0 errors"
+          exit ${PIPESTATUS[0]}

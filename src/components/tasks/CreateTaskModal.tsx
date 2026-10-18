@@ -18,7 +18,7 @@ import {
 import type { InputRef, MenuProps, RefSelectProps } from "antd";
 import dayjs, { type Dayjs } from "dayjs";
 import { Plus, NotebookText, Folder as FolderIcon, File as FileIcon, Link as LinkIcon, X, Settings } from "lucide-react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/api/dialog";
 import { useNavigate } from "react-router-dom";
 import { taskApi, taskCategoryApi, noteApi, configApi, projectApi } from "@/lib/api";
 import { relativeTime } from "@/lib/utils";

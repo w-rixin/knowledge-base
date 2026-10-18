@@ -30,7 +30,7 @@ import {
   message,
   Typography,
 } from "antd";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/api/dialog";
 import { CalendarCheck, RefreshCw, FolderInput } from "lucide-react";
 import { dailyApi, importApi } from "@/lib/api";
 import { useAppStore } from "@/store";

@@ -211,7 +211,7 @@ pub async fn clip_url_to_note(
     folder_id: Option<i64>,
 ) -> Result<Note, String> {
     // ⚠️ 用 state.data_dir（DataDirResolver 解析过的实际数据目录），
-    // 不能用 app.path().app_data_dir()——那是 OS 默认目录，不跟随用户改的数据目录
+    // 不能用 app.path_resolver().app_data_dir()——那是 OS 默认目录，不跟随用户改的数据目录
     let app_data_dir = state.data_dir.clone();
     NoteService::clip_url(&state.db, &url, folder_id, &app_data_dir)
         .await

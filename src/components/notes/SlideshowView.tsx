@@ -18,7 +18,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { message, theme as antdTheme } from "antd";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import rehypeRaw from "rehype-raw";
-import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl } from "@tauri-apps/api/shell";
 import { MarkdownContent } from "@/components/ai/MarkdownContent";
 import { KB_ASSET_SCHEME, parseKbAsset } from "@/lib/assetUrl";
 import { systemApi } from "@/lib/api";

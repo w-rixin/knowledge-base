@@ -175,7 +175,7 @@ pub struct DataDirResolver;
 impl DataDirResolver {
     /// 启动早期调用：把"逻辑数据根目录"算出来
     ///
-    /// 注意 `default_app_data_dir` 必须是框架的 `app.path().app_data_dir()`，
+    /// 注意 `default_app_data_dir` 必须是框架的 `app.path_resolver().app_data_dir()`，
     /// 而**不是**已经被 instance-N 叠加过的实例目录。
     pub fn resolve(default_app_data_dir: &Path) -> Result<ResolvedDataDir, AppError> {
         let default_str = default_app_data_dir.to_string_lossy().to_string();

@@ -54,7 +54,7 @@ import {
   isBlankText,
   type TextCleanupRules,
 } from "@/lib/editorCleanup";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open } from "@tauri-apps/api/dialog";
 import { toKbAsset, toKbAssetHref } from "@/lib/assetUrl";
 import { attachmentApi, imageApi, noteApi, systemApi, videoApi } from "@/lib/api";
 import { extractFirstUrl } from "@/lib/extractUrl";

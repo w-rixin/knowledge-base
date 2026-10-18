@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Modal, Button, App as AntdApp, List } from "antd";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { exit } from "@tauri-apps/plugin-process";
+import { exit } from "@tauri-apps/api/process";
 import { useTabsStore, type NoteTab } from "@/store/tabs";
 import { noteApi, syncV1Api } from "@/lib/api";
 

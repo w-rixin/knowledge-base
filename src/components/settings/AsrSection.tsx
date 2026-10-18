@@ -23,7 +23,7 @@ import {
   theme as antdTheme,
 } from "antd";
 import { Mic, ExternalLink, Share2, Download } from "lucide-react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/api/shell";
 import { asrApi } from "@/lib/api";
 import { ShareConfigModal } from "@/components/config-share/ShareConfigModal";
 import { ImportConfigModal } from "@/components/config-share/ImportConfigModal";

@@ -11,8 +11,8 @@
  * 2. 加密笔记 content 是密文，对应 note 目录整体跳过判定
  */
 import { useMemo, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { convertFileSrc } from "@tauri-apps/api/tauri";
+import { openPath } from "@tauri-apps/api/shell";
 import {
   Alert,
   Badge,

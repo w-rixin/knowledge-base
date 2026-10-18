@@ -9,7 +9,7 @@ import { useState } from "react";
 import { NodeViewWrapper, type NodeViewProps } from "@tiptap/react";
 import { Button, Tooltip, message } from "antd";
 import { Copy, ExternalLink, Trash2 } from "lucide-react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/api/shell";
 import type { EmbedProviderId } from "./embedVideoProviders";
 
 const PROVIDER_DISPLAY: Record<EmbedProviderId, { label: string; icon: string }> = {

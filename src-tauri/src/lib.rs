@@ -178,7 +178,7 @@ fn setup_internal_mcp(
 /// - dev:  `com.agilefr.kb-dev`（整目录隔离，方便用户备份/清理 dev 数据；
 ///         比"同目录加 dev- 文件前缀"更直观）
 ///
-/// 注意：Tauri 内置的 `app.path().app_data_dir()` 永远返回 prod 名（因为它读
+/// 注意：Tauri 内置的 `app.path_resolver().app_data_dir()` 永远返回 prod 名（因为它读
 /// `tauri.conf.json` 的 identifier）。setup 中需要在这个返回值上手动改写到
 /// `app_data_dir_name()`，所有依赖 framework_app_data_dir 的下游都跟着走。
 fn app_data_dir_name() -> String {
@@ -206,11 +206,11 @@ fn window_state_filename() -> String {
 
 /// 取当前进程实际使用的 framework_app_data_dir（dev 已隔离到 `-dev` 目录）。
 ///
-/// Tauri 内置 `app.path().app_data_dir()` 永远返回 prod 名（基于 tauri.conf.json
+/// Tauri 内置 `app.path_resolver().app_data_dir()` 永远返回 prod 名（基于 tauri.conf.json
 /// 的 identifier），所有运行期 Command 拿 framework_app_data_dir 都要经过本函数，
 /// 否则 dev 单实例锁 / multi_instance flag / 指针文件 等会落到 prod 目录里。
 pub(crate) fn framework_app_data_dir(handle: &tauri::AppHandle) -> Result<PathBuf, tauri::Error> {
-    let from_tauri = handle.path().app_data_dir()?;
+    let from_tauri = handle.path_resolver().app_data_dir()?;
     // 桌面端：dev 模式重写到 -dev 兄弟目录（应用对 OS 的 app_data_dir 父目录有写权限）
     // 移动端：Android 沙盒只允许应用写自己的 files/，不能在 parent 下建兄弟目录
     //         直接返回 tauri 给的（dev/prod 用同一个目录，反正每次卸载重装都重置）
@@ -371,7 +371,7 @@ fn ping_default_to_focus(app_data_dir: &Path) -> std::io::Result<()> {
 ///
 /// 第二个进程启动时会用 `ping_default_to_focus` 写空行触发这个唤起 ——
 /// 所以即使没有 .md 内容也要把窗口前置。
-/// 仅桌面端：移动端单实例 + 无 unminimize/show/set_focus 等 WebviewWindow 方法
+/// 仅桌面端：移动端单实例 + 无 unminimize/show/set_focus 等 Window 方法
 #[cfg(desktop)]
 fn start_md_deliver_watcher(handle: tauri::AppHandle, app_data_dir: PathBuf) {
     tauri::async_runtime::spawn(async move {
@@ -408,7 +408,7 @@ fn start_md_deliver_watcher(handle: tauri::AppHandle, app_data_dir: PathBuf) {
                 .and_then(|m| m.modified())
                 .unwrap_or(last_mtime);
             // mtime 变化即视为"有人想唤起这个窗口"——把主窗前置
-            if let Some(win) = handle.get_webview_window("main") {
+            if let Some(win) = handle.get_window("main") {
                 let _ = win.unminimize();
                 let _ = win.show();
                 let _ = win.set_focus();
@@ -459,14 +459,14 @@ fn start_db_change_watcher(handle: tauri::AppHandle) {
 /// 2. 主窗口此时还是 visible:false，splash 是用户唯一可见的窗口
 /// 3. setup 阻塞跑 `run_migration`，进度通过 `data_dir:migrate_progress` emit 到 splash
 /// 4. 迁移完毕 → close splash → setup 继续往下走 → 末尾 show 主窗
-/// 仅桌面端：移动端无多窗口 + 无 WebviewWindowBuilder.title() 方法
+/// 仅桌面端：移动端无多窗口 + 无 WindowBuilder.title() 方法
 #[cfg(desktop)]
 fn run_data_dir_migration_with_splash(
     app: &tauri::App,
     framework_app_data_dir: &std::path::Path,
     marker: &services::data_dir::MigrationMarker,
 ) -> Result<(), crate::error::AppError> {
-    use tauri::{Emitter, WebviewUrl, WebviewWindowBuilder};
+    use tauri::{Emitter, WindowUrl, WindowBuilder};
 
     log::info!(
         "[migration] 检测到 marker: {} → {} (status={:?})",
@@ -476,10 +476,10 @@ fn run_data_dir_migration_with_splash(
     );
 
     // 创建 splash 窗口
-    let splash = WebviewWindowBuilder::new(
+    let splash = WindowBuilder::new(
         app,
         "migration-splash",
-        WebviewUrl::App("index.html#/migration-splash".into()),
+        WindowUrl::App("index.html#/migration-splash".into()),
     )
     .title("正在迁移数据…")
     .inner_size(560.0, 360.0)
@@ -592,7 +592,7 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // 第二次启动：把已有主窗口唤到前台（被最小化 / 缩到托盘时也能拉回来），
             // 而不是无声无息地退出——否则用户双击图标"没反应"，会以为程序坏了。
-            if let Some(win) = app.get_webview_window("main") {
+            if let Some(win) = app.get_window("main") {
                 let _ = win.unminimize();
                 let _ = win.show();
                 let _ = win.set_focus();
@@ -601,19 +601,23 @@ pub fn run() {
     }
 
     builder = builder
-        .plugin(tauri_plugin_opener::init())
+        // ⚠️ Tauri 1.x 改造说明（见 docs/tauri-v1-migration.md）：
+        // 以下插件在 v2 时代是独立 crate，v1 中**没有对应版本**，能力已内置为
+        // tauri.conf.json 的 allowlist，故此处不再注册：
+        //   tauri_plugin_opener            → allowlist.shell.open
+        //   tauri_plugin_process           → allowlist.process
+        //   tauri_plugin_dialog            → allowlist.dialog
+        //   tauri_plugin_notification      → allowlist.notification
+        //   tauri_plugin_clipboard_manager → allowlist.clipboard
+        // 前端对应把 @tauri-apps/plugin-xxx 改为 @tauri-apps/api/xxx。
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(
             tauri_plugin_log::Builder::default()
                 .level(log::LevelFilter::Info)
                 .build(),
-        )
-        .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_clipboard_manager::init());
+        );
 
-    // ─── 桌面专属插件（移动端不可用：autostart / updater / global-shortcut）────
+    // ─── 桌面专属插件（Tauri 1.x 无移动端，故这里的 cfg(desktop) 恒成立）────
     #[cfg(desktop)]
     {
         builder = builder
@@ -622,8 +626,9 @@ pub fn run() {
                 tauri_plugin_autostart::MacosLauncher::LaunchAgent,
                 Some(vec!["--start-minimized"]),
             ))
-            .plugin(tauri_plugin_updater::Builder::new().build())
-            .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+            // ⚠️ 同样不在 v1 中注册：
+            //   tauri_plugin_updater           → tauri.conf.json 的 tauri.updater（含 active:true）
+            //   tauri_plugin_global_shortcut   → allowlist.globalShortcut
             // 窗口状态记忆：用户调过的大小 / 位置 / 最大化状态下次启动照原样还原。
             //
             // 只跟踪 SIZE|POSITION|MAXIMIZED，**刻意不跟踪 VISIBLE**：本应用支持
@@ -674,9 +679,9 @@ pub fn run() {
             // 任意一个失败都会让 setup 提前 Err return，window.show() 永远不调 → mac 白屏。
             // 改为 setup 第一行就 show，setup 中段失败也只是功能退化，不会黑屏。
             // 唯一例外：autostart --start-minimized 模式下面会重新 hide。
-            // 仅桌面端：移动端 WebviewWindow 不提供 show/hide（系统管理可见性）
+            // 仅桌面端：移动端 Window 不提供 show/hide（系统管理可见性）
             #[cfg(desktop)]
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_window("main") {
                 // 启动尺寸智能化：**首次启动**按主显示器逻辑分辨率给一个合适的默认尺寸。
                 // 公式在 services::window_size::default_window_size（纯函数 + 单测锁住边界），
                 // 「恢复窗口默认大小」Command 复用同一份，两处不会漂移。
@@ -1040,7 +1045,7 @@ pub fn run() {
             // 仅桌面端：移动端无窗口标题概念（标题栏由系统/状态栏管理）
             #[cfg(desktop)]
             if cfg!(debug_assertions) {
-                if let Some(window) = app.get_webview_window("main") {
+                if let Some(window) = app.get_window("main") {
                     let _ = window.set_title("知识库 [DEV]");
                 }
             }
@@ -1087,7 +1092,7 @@ pub fn run() {
                     .as_deref()
                     == Some("1");
                 if start_minimized {
-                    if let Some(window) = app.get_webview_window("main") {
+                    if let Some(window) = app.get_window("main") {
                         let _ = window.hide();
                         log::info!("[autostart] 启动最小化已启用，主窗口已隐藏到托盘");
                     }
@@ -1178,7 +1183,7 @@ pub fn run() {
             // - 主窗已在 setup 第一步 show 过，这里 show 是幂等的
             // - 真正作用是 set_focus：迁移 splash 关闭后 / 多窗口创建后把焦点拉回主窗
             // - autostart --start-minimized 模式下用户已选择隐藏到托盘，跳过此步
-            // 仅桌面端：移动端 WebviewWindow 不提供 show/set_focus 方法
+            // 仅桌面端：移动端 Window 不提供 show/set_focus 方法
             #[cfg(desktop)]
             {
                 let did_start_minimized = std::env::args().any(|a| a == "--start-minimized")
@@ -1191,7 +1196,7 @@ pub fn run() {
                         .as_deref()
                         == Some("1");
                 if !did_start_minimized {
-                    if let Some(window) = app.get_webview_window("main") {
+                    if let Some(window) = app.get_window("main") {
                         let _ = window.show();
                         let _ = window.set_focus();
                     }
@@ -1668,11 +1673,11 @@ pub fn run() {
             // 各自由 builder 决定，不该被基准机制接管。
             #[cfg(desktop)]
             if window.label() == "main" {
-                // on_window_event 给的是 `&Window`，而几何工具函数统一收 `&WebviewWindow`
+                // on_window_event 给的是 `&Window`，而几何工具函数统一收 `&Window`
                 // （与 fit_into_work_area 同口径），这里按 label 取一次。
                 let resolve = || {
                     use tauri::Manager;
-                    window.app_handle().get_webview_window("main")
+                    window.app_handle().get_window("main")
                 };
                 match event {
                     WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -1737,7 +1742,7 @@ pub fn run() {
                         for p in &paths {
                             let _ = handle.emit("open-md-file", p.clone());
                         }
-                        if let Some(win) = handle.get_webview_window("main") {
+                        if let Some(win) = handle.get_window("main") {
                             let _ = win.unminimize();
                             let _ = win.show();
                             let _ = win.set_focus();

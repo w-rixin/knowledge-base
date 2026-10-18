@@ -29,11 +29,11 @@ import {
   PlusOutlined,
 } from "@ant-design/icons";
 import { ExternalLink, Folder, Trash2 } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/tauri";
 import { McpHttpSection } from "./McpHttpSection";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { revealItemInDir } from "@tauri-apps/api/shell";
 import { MarkdownContent as Markdown } from "@/components/ai/MarkdownContent";
-import { save as saveDialog, open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { save as saveDialog, open as openFileDialog } from "@tauri-apps/api/dialog";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { systemApi } from "@/lib/api";
 import { useAppStore } from "@/store";

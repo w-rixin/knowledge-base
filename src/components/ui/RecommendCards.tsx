@@ -5,7 +5,7 @@ import {
   CopyOutlined,
   CheckOutlined,
 } from "@ant-design/icons";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/api/shell";
 // 产品 logo —— 各软件真实图标
 import aicoderLogo from "@/assets/promo/aicoder.png";
 import sigilLogo from "@/assets/promo/sigil.svg";

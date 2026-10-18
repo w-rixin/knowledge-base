@@ -25,25 +25,33 @@ name = "knowledge_base_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+# Tauri 1.x（为适配麒麟 glibc 2.31 + webkit2gtk-4.0 而整体降级，见 docs/tauri-v1-migration.md）
+tauri-build = { version = "1.5", features = [] }
 # #9 macOS 零二进制 OCR：build.rs 用 cc 编译 mac/ocr_vision.m（Apple Vision FFI）。
 # cc 是纯 Rust、体积极小；仅当 target_os=macos 时 build.rs 才实际调用它编译 .m。
 cc = "1"
 
 [dependencies]
 # ─── 跨平台核心依赖（桌面 + 移动端共用）────────────────
-# tauri：tray-icon feature 仅桌面端可用，已下移到 target.desktop dependencies
-tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-opener = "2"
-tauri-plugin-store = "2"
-tauri-plugin-log = "2"
+# Tauri 1.x 不支持移动端，故不再区分 target.desktop 分组，统一使用 1.8 全量 feature。
+#
+# 🔴 版本说明（勿随意升级回 2.x）：
+#   项目原为 Tauri 2.x，因目标机为麒麟 V10 GFB（glibc 2.31），
+#   而 Tauri 2 硬依赖 webkit2gtk-4.1（要求 glibc >= 2.35）无法安装，
+#   故整体降级到 Tauri 1.8，改用系统已有的 webkit2gtk-4.0（本机 2.38.5）。
+#   tray-icon / protocol-asset / image-png 在 1.x 中均为可用 feature。
+tauri = { version = "1.8", features = ["protocol-asset", "tray-icon", "image-png"] }
+# Tauri 1.x 中「打开文件/URL」由 allowlist 的 shell.open 提供，
+# 没有 tauri-plugin-opener（该插件仅 v2 存在）。
+# 保留的独立插件均为官方提供过 1.x 版本的：
+tauri-plugin-store = "1"
+tauri-plugin-log = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 rusqlite = { version = "0.31", features = ["bundled"] }
 log = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
-tauri-plugin-process = "2"
 # reqwest：移动端 NDK 不带 OpenSSL，统一用 rustls-tls（桌面端也能用，行为一致；
 # 系统证书池靠 rustls-native-certs 加载，避免迁移成本）
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "rustls-tls-native-roots"] }
@@ -62,7 +70,6 @@ tokio = { version = "1", features = ["sync", "fs", "io-util", "rt", "rt-multi-th
 rusty-s3 = "0.10"
 tokio-util = { version = "0.7", features = ["io"] }
 futures = "0.3"
-tauri-plugin-dialog = "2"
 walkdir = "2"
 pulldown-cmark = "0.13.1"
 html2md = "0.2"
@@ -84,8 +91,6 @@ uuid = { version = "1", features = ["v4"] }
 # T-007 笔记加密：Argon2id 密码派生 + zeroize 在 drop 时清零敏感内存；rand 生成盐/nonce
 argon2 = "0.5"
 zeroize = { version = "1", features = ["zeroize_derive"] }
-tauri-plugin-notification = "2"
-tauri-plugin-clipboard-manager = "2"
 rand = "0.8"
 # T-027 .txt 导入：很多旧 txt 是 GBK / GB18030 / Big5，必须先嗅探编码再转 UTF-8
 # chardetng / encoding_rs 是纯 Rust 编码识别工具，移动端可编译
@@ -115,26 +120,25 @@ dom_query = "0.28"
 # Excel / ODS 解析、Word 导出、txt 编码识别 — 双端通用纯 Rust 工具
 # 这些在原文件上面已声明 calamine / docx-rs / chardetng / encoding_rs 等，保持位置不变
 
-# ─── 桌面专属依赖（cfg(desktop) 编译时启用；移动端不引入）────
+# ─── 桌面专属依赖（Tauri 1.x 无移动端，故本段仅放桌面才需要的 crate）────
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
-# 系统托盘 feature
-# image-png：前端 `writeImage(pngBytes)` 走 clipboard-manager 插件时，插件内部用
-# `tauri::image::Image::from_bytes` 解码，没这个 feature 会报 "expected RGBA image data"。
-# 只是复制外链图时的降级路径；笔记内素材走 commands::image::copy_image_to_clipboard，
-# 那条路自己用 image crate 解码，不依赖这个 feature。
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
-# 桌面专属插件
-tauri-plugin-updater = "2"
-tauri-plugin-autostart = "2"
-tauri-plugin-global-shortcut = "2"
+# 注意：tauri 本身已在上面 [dependencies] 统一声明（含 tray-icon / image-png feature），
+# 这里不能再声明一次，否则 Cargo 会报重复依赖。
+
+# 以下三个在 Tauri 1.x 中**没有对应插件版本**，能力改由 allowlist 内置提供：
+#   tauri-plugin-updater          → allowlist.updater（前端 @tauri-apps/api/updater）
+#   tauri-plugin-global-shortcut  → allowlist.globalShortcut（@tauri-apps/api/globalShortcut）
+# 因此依赖列表里删除，配置改在 tauri.conf.json 的 allowlist。
+
+# 自动启动：Tauri 1.x 时期是独立 crate，版本 0.2.x
+tauri-plugin-autostart = "0.2"
 # 单实例：第二次启动直接唤起已开的窗口。
 # 不只是"体验好"——多实例下两份进程各持一份内存设置，任一方改设置都会
 # 用自己那份全量覆写 settings.json，把对方的改动抹掉（用户反馈"重启后编号设置没了"）。
-tauri-plugin-single-instance = "2"
+tauri-plugin-single-instance = "1"
 # 窗口状态记忆：记住上次的大小 / 位置 / 最大化状态，下次启动还原。
 # 没有它的话每次启动都会走 setup 里的自适应公式重算，用户手动调过的尺寸永远丢。
-# 移动端窗口由系统管理，不引入。
-tauri-plugin-window-state = "2"
+tauri-plugin-window-state = "1"
 # PDFium fallback（pdf-extract 对中文 CMap 不支持，运行时动态加载 pdfium.dll 兜底）
 # 移动端 NDK 加载动态库受沙盒限制，暂不支持，待 T-M012 决策
 pdfium-render = "0.8"

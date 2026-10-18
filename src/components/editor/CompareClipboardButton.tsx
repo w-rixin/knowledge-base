@@ -8,13 +8,13 @@
  *  - markdown 模式：左=剪贴板（只读），右=笔记 markdown 源码（可编辑，可逐块合并，「保存」用 markdown 重渲染笔记）
  *  - 纯文本模式：  左=剪贴板（只读），右=笔记可见纯文本（只读）—— 纯对比，不提供保存（纯文本塞回富文本笔记会丢格式）
  *
- * 纯前端：剪贴板走 `@tauri-apps/plugin-clipboard-manager`（权限 `clipboard-manager:allow-read-text` 已声明）。
+ * 纯前端：剪贴板走 `@tauri-apps/api/clipboard`（权限 `clipboard-manager:allow-read-text` 已声明）。
  */
 import { useState } from "react";
 import { Button, Segmented, Tooltip, message } from "antd";
 import { Diff } from "lucide-react";
 import type { Editor } from "@tiptap/react";
-import { readText } from "@tauri-apps/plugin-clipboard-manager";
+import { readText } from "@tauri-apps/api/clipboard";
 import { DiffMergeModal, type DiffSide } from "./DiffMergeModal";
 import { getNoteMarkdown, getNotePlainText, looksLikeMarkdown } from "./markdownDiffUtil";
 

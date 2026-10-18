@@ -11,7 +11,7 @@ import {
   Typography,
 } from "antd";
 import { CopyOutlined, ReloadOutlined } from "@ant-design/icons";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/tauri";
 
 const { Text, Paragraph } = Typography;
 
