@@ -22,8 +22,9 @@ use state::AppState;
 use tauri::{Manager, WindowEvent};
 
 /// 构建 macOS 风格的中文应用菜单（仅 macOS 实际挂载；Windows/Linux 默认不显示 menu bar）。
-/// 桌面三平台都能编译验证语法；移动端（Android/iOS）无 `tauri::menu`（menu feature 桌面专属），故 cfg gate。
-#[cfg(desktop)]
+/// 🔴 Tauri 1.x 迁移：仅 macOS 使用此菜单；Linux/Windows 无菜单栏。
+/// v1 的 tauri::menu 结构与 v2 差异大，故用 target_os 精确 gate，避免 Linux 编译它。
+#[cfg(target_os = "macos")]
 #[allow(dead_code)]
 fn build_chinese_app_menu(
     handle: &tauri::AppHandle,
@@ -195,12 +196,17 @@ fn app_data_dir_name() -> String {
 /// tauri.conf.json 的 identifier，dev 和 prod 落在同一个目录 —— 本项目的 `-dev`
 /// 隔离是 [`framework_app_data_dir`] 自己做的，插件不知道。共用一份的话，开着
 /// dev 拖窗口会把正式版记住的尺寸冲掉。
+///
+/// 🔴 v1 与 v2 差异：v1 插件的常量叫 `STATE_FILENAME`（值为 ".window-state"），
+/// v2 叫 `DEFAULT_FILENAME`；且 v1 的 Builder **不支持 with_filename**，
+/// 所以这个函数目前只用于「判断存档是否存在」（见下方 setup 里的
+/// has_saved_window_state），不再传给插件。
 #[cfg(desktop)]
 fn window_state_filename() -> String {
     if cfg!(debug_assertions) {
         ".window-state-dev.json".to_string()
     } else {
-        tauri_plugin_window_state::DEFAULT_FILENAME.to_string()
+        tauri_plugin_window_state::STATE_FILENAME.to_string()
     }
 }
 
@@ -652,14 +658,28 @@ pub fn run() {
             // （tauri `manager/window.rs:113`），排在我们 setup 闭包**之后** —— 也就是说
             // 在 setup 里做任何几何兜底都会被插件随后的还原原样覆盖掉。改成 setup 里自己调
             // `restore_state` 再紧接着 clamp，顺序确定、且都发生在 `show()` 之前，不会闪。
-            .plugin(
-                tauri_plugin_window_state::Builder::default()
-                    .with_state_flags(commands::window::TRACKED_STATE_FLAGS)
-                    .with_filename(window_state_filename())
-                    .with_filter(|label| label == "main")
-                    .skip_initial_state("main")
-                    .build(),
-            );
+              // 🔴 v1 的 window-state 插件只提供 with_state_flags / with_denylist /
+              // skip_initial_state / build，**没有 with_filename 与 with_filter**
+              // （那是 v2 才加的）。因此：
+              //   - 自定义文件名（dev/prod 分离）→ 退化为插件默认文件名。
+              //     dev 与 prod 的数据目录本就被 framework_app_data_dir 隔离，
+              //     但插件用的是 app_config_dir（只认 identifier），故 dev 调窗口
+              //     会冲掉正式版的记忆。属已知退化。
+              //   - with_filter（只跟踪 main）→ 用 with_denylist 反向排除动态窗口
+              //     前缀，避免 popout-note-* / push-popup-* 等一次性窗口污染存档。
+              .plugin(
+                  tauri_plugin_window_state::Builder::default()
+                      .with_state_flags(commands::window::TRACKED_STATE_FLAGS)
+                      .with_denylist(&[
+                          "popout-note",
+                          "popout-mindmap",
+                          "push-popup",
+                          "emergency",
+                          "quick-add",
+                      ])
+                      .skip_initial_state("main")
+                      .build(),
+              );
     }
 
     // ─── macOS 应用菜单中文化 ─────────────────────
@@ -935,18 +955,19 @@ pub fn run() {
                 #[cfg(target_os = "linux")]
                 const PDFIUM_LIB: &str = "resources/pdfium/libpdfium.so";
 
+                // 🔴 v1 的 PathResolver::resolve_resource 返回 Option<PathBuf>（v2 返回 Result）
                 match app
                     .path_resolver()
-                    .resolve(PDFIUM_LIB, tauri::api::path::BaseDirectory::Resource)
+                    .resolve_resource(PDFIUM_LIB)
                 {
-                    Ok(lib_path) => match services::pdf::init_pdfium(&lib_path) {
+                    Some(lib_path) => match services::pdf::init_pdfium(&lib_path) {
                         Ok(()) => log::info!("PDFium 绑定成功: {}", lib_path.display()),
                         Err(e) => log::warn!(
                             "PDFium 绑定失败（fallback 不可用，仅 pdf-extract 路径可用）: {}",
                             e
                         ),
                     },
-                    Err(e) => log::warn!("PDFium 资源路径解析失败: {}", e),
+                    None => log::warn!("PDFium 资源路径解析失败: 未找到 {}", PDFIUM_LIB),
                 }
 
                 // #9 本地 OCR 引擎路径解析（RapidOCR-json sidecar，桌面端，跨平台）。
@@ -957,10 +978,10 @@ pub fn run() {
                 const OCR_ENGINE: &str = "resources/ocr/RapidOCR-json.exe";
                 #[cfg(not(target_os = "windows"))]
                 const OCR_ENGINE: &str = "resources/ocr/RapidOCR-json";
+                // v1 的 resolve_resource 已返回 Option，无需再 .ok()
                 let ocr_exe = app
                     .path_resolver()
-                    .resolve(OCR_ENGINE, tauri::api::path::BaseDirectory::Resource)
-                    .ok()
+                    .resolve_resource(OCR_ENGINE)
                     .filter(|p| p.exists());
                 match &ocr_exe {
                     Some(p) => log::info!("[ocr] 本地 OCR 引擎就绪: {}", p.display()),

@@ -113,7 +113,6 @@ fn desired_size_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     use tauri::Manager;
     app.path_resolver()
         .app_config_dir()
-        .ok()
         .map(|dir| dir.join(desired_size_filename()))
 }
 

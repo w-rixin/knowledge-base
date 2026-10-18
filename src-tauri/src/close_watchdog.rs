@@ -25,7 +25,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use tauri::{AppHandle, Listener};
+use tauri::{AppHandle, Manager};
 
 /// 等待前端 ack 的上限。前端 ack 是监听回调的第一行、无 IO 前置，
 /// 正常情况下毫秒级返回；给到 5s 是为了覆盖"主线程正巧被一次长任务占住"的极端情况。

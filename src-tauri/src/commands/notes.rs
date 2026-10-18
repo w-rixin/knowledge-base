@@ -27,7 +27,7 @@ pub fn update_note(
     input: NoteInput,
 ) -> Result<Note, String> {
     let note = NoteService::update(&state.db, id, &input).map_err(|e| e.to_string())?;
-    let _ = window.app_handle().emit(
+    let _ = window.app_handle().emit_all(
         "note:updated",
         serde_json::json!({
             "id": id,

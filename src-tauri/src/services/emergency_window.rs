@@ -40,7 +40,6 @@ pub fn open_for_task(app: &AppHandle, task_id: i64) -> Result<(), AppError> {
         .always_on_top(true)
         .skip_taskbar(false)
         .focused(true)
-        .shadow(true)
         .visible(true)
         .build()
         .map_err(|e| AppError::Custom(format!("紧急提醒窗口创建失败: {}", e)))?;

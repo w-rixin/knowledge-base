@@ -53,7 +53,6 @@ pub fn open_note(app: &AppHandle, note_id: i64) -> Result<(), AppError> {
         .visible(true);
 
     #[cfg(debug_assertions)]
-    let builder = builder.devtools(true);
 
     builder
         .build()
@@ -96,7 +95,6 @@ pub fn open_mindmap(app: &AppHandle, note_id: i64) -> Result<(), AppError> {
         .visible(true);
 
     #[cfg(debug_assertions)]
-    let builder = builder.devtools(true);
 
     builder
         .build()
@@ -148,7 +146,6 @@ pub fn open_quick_add(app: &AppHandle) -> Result<(), AppError> {
     .visible(false);
 
     #[cfg(debug_assertions)]
-    let builder = builder.devtools(true);
 
     builder
         .build()
@@ -190,11 +187,9 @@ pub fn open_push_popup(app: &AppHandle, log_id: i64) -> Result<(), AppError> {
         .always_on_top(true)
         .skip_taskbar(false)
         .focused(true)
-        .shadow(true)
         .visible(true);
 
     #[cfg(debug_assertions)]
-    let builder = builder.devtools(true);
 
     builder
         .build()

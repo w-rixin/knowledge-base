@@ -252,7 +252,7 @@ pub fn export_diagnostics(app: tauri::AppHandle) -> Result<String, String> {
     use tauri::Manager;
 
     // 来源目录：app_log_dir（tauri-plugin-log）+ <framework_app_data>/crash（panic hook）
-    let log_dir = app.path_resolver().app_log_dir().ok();
+    let log_dir = app.path_resolver().app_log_dir();
     let crash_dir = crate::framework_app_data_dir(&app)
         .ok()
         .map(|d| d.join("crash"));
@@ -262,9 +262,9 @@ pub fn export_diagnostics(app: tauri::AppHandle) -> Result<String, String> {
     let out_base = app
         .path_resolver()
         .desktop_dir()
-        .or_else(|_| app.path_resolver().download_dir())
-        .or_else(|_| crate::framework_app_data_dir(&app))
-        .map_err(|e| format!("无法确定诊断包输出目录: {e}"))?;
+        .or_else(|| app.path_resolver().download_dir())
+        .or_else(|| crate::framework_app_data_dir(&app))
+        .ok_or_else(|| "无法确定诊断包输出目录".to_string())?;
     // 移动端无 desktop_dir（PathResolver 不提供）；沙盒环境直接落应用数据目录
     #[cfg(not(desktop))]
     let out_base = crate::framework_app_data_dir(&app)

@@ -70,8 +70,6 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             "知识库"
         })
         .with_menu(menu)
-        // Linux 上左键点击不支持事件，故让左键也弹菜单，保证用户总能操作到
-        .with_menu_on_left_click(true)
         .on_event(move |event| {
             // v1 的事件只带 tray_id，所有动作都通过捕获的 app_handle 完成
             if let SystemTrayEvent::MenuItemClick { id, .. } = event {
@@ -120,9 +118,27 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             }
         });
 
+    // 托盘图标：v1 的 Icon::File 受 icon-png/icon-ico feature 控制，而 build.rs 要求
+    // Cargo feature 与 allowlist 严格对应（不允许随意加 feature），故这里改用
+    // Icon::Rgba —— 该变体**不受 feature gate 限制**，只需自己把 PNG 解成 RGBA。
+    // 项目本身已依赖 image crate（见 Cargo.toml target.desktop 段），直接复用。
     if let Some(p) = icon_path {
         if p.exists() {
-            tray = tray.with_icon(tauri::Icon::File(p));
+            match std::fs::read(&p) {
+                Ok(bytes) => match image::load_from_memory(&bytes) {
+                    Ok(img) => {
+                        let rgba = img.to_rgba8();
+                        let (w, h) = (rgba.width(), rgba.height());
+                        tray = tray.with_icon(tauri::Icon::Rgba {
+                            rgba: rgba.into_raw(),
+                            width: w,
+                            height: h,
+                        });
+                    }
+                    Err(e) => log::warn!("[tray] 图标解码失败: {}", e),
+                },
+                Err(e) => log::warn!("[tray] 图标读取失败: {}", e),
+            }
         } else {
             log::warn!("[tray] 图标文件不存在，使用无图标托盘: {}", p.display());
         }

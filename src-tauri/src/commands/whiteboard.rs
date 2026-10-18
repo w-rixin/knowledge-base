@@ -80,7 +80,7 @@ pub fn save_whiteboard_scene(
 ) -> Result<(), String> {
     whiteboard::save_scene(&state.db, &state.vault, &state.data_dir, id, &scene)
         .map_err(|e| e.to_string())?;
-    let _ = window.app_handle().emit(
+    let _ = window.app_handle().emit_all(
         "note:updated",
         serde_json::json!({
             "id": id,
@@ -142,7 +142,7 @@ pub fn restore_whiteboard_snapshot(
     .map_err(|e| e.to_string())?;
     let _ = window
         .app_handle()
-        .emit("note:updated", serde_json::json!({ "id": note_id }));
+        .emit_all("note:updated", serde_json::json!({ "id": note_id }));
     Ok(())
 }
 

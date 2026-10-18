@@ -56,7 +56,7 @@ pub fn restore_note_snapshot(
         snapshot::restore(&state.db, note_id, snapshot_id).map_err(|e| e.to_string())?;
     let _ = window
         .app_handle()
-        .emit("note:updated", serde_json::json!({ "id": note_id }));
+        .emit_all("note:updated", serde_json::json!({ "id": note_id }));
     Ok(note)
 }
 
