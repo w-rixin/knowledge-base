@@ -15,6 +15,21 @@ authors = ["抓蛙师"]
 edition = "2021"
 license = "AGPL-3.0-or-later"
 
+# 🔴 Tauri 1.x 迁移说明
+# 本项目原为 Tauri 2.x。因目标运行环境为银河麒麟桌面 V10 GFB（glibc 2.31），
+# 而 Tauri 2 硬依赖 webkit2gtk-4.1（Debian/Ubuntu 打包要求 libc6 >= 2.35），
+# 在 glibc 2.31 上无法安装；Tauri 1.x 依赖 webkit2gtk-4.0（该机已有 2.38.5），
+# 故整体降级到 1.x 分支。完整迁移说明见 docs/tauri-v1-migration.md。
+#
+# 关键差异（勿照搬 v2 写法）：
+#   1) v1 没有 tauri-plugin-opener / -process / -dialog / -notification /
+#      -clipboard-manager / -global-shortcut / -updater —— 这些能力是
+#      tauri.conf.json 里的 allowlist 内置项，不是插件。
+#   2) v1 没有 Emitter trait：广播用 AppHandle::emit_all()，单窗口用 Window::emit()。
+#   3) v1 没有 WebviewWindow / WebviewWindowBuilder / WebviewUrl，
+#      统一为 Window / WindowBuilder / WindowUrl。
+#   4) v1 不支持移动端（Android/iOS），相关代码需 cfg 隔离。
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
