@@ -59,10 +59,57 @@ cc = "1"
 #   v2: tray-icon   → v1: system-tray
 #   v2: image-png   → v1: icon-png
 #   protocol-asset 两版同名
-# 其余 allowlist 能力（dialog/notification/clipboard/global-shortcut/shell/fs/http/
-# os/path/process/window/updater）由 tauri-build 依据 tauri.conf.json 的 allowlist
-# **自动注入**对应 feature，无需在此手写。
-tauri = { version = "1", features = ["protocol-asset", "system-tray", "icon-png"] }
+#
+# 🔴 v1 与 v2 的**最大机制差异**：v1 要求 Cargo 的 feature 列表与
+#    tauri.conf.json 的 allowlist **精确一一对应**（v2 是根据 capabilities 自动生成的）。
+#    不一致时 build.rs 直接失败：
+#      The `tauri` dependency features on the `Cargo.toml` file does not match
+#      the allowlist defined under `tauri.conf.json`.
+#    所以下面这份列表必须与 tauri.conf.json 的 allowlist 同步修改，改一处就要改另一处。
+#
+# 当前 allowlist → feature 对应关系：
+#   app{all}            → app-all
+#   clipboard{all}      → clipboard-all
+#   dialog{all}         → dialog-all
+#   notification{all}   → notification-all
+#   globalShortcut{all} → global-shortcut-all
+#   os{all}             → os-all
+#   path{all}           → path-all
+#   process{all}        → process-all
+#   window{all}         → window-all
+#   http{request}       → http-request
+#   shell{open}         → shell-open
+#   fs{逐项}             → fs-read-file / fs-write-file / fs-read-dir / fs-create-dir /
+#                          fs-remove-file / fs-remove-dir / fs-rename-file /
+#                          fs-copy-file / fs-exists
+#   protocol{asset}     → protocol-asset
+#   tauri.updater.active → updater
+#   (托盘由 tauri.trayIcon 配置驱动) → system-tray
+tauri = { version = "1", features = [
+  "protocol-asset",
+  "system-tray",
+  "app-all",
+  "clipboard-all",
+  "dialog-all",
+  "notification-all",
+  "global-shortcut-all",
+  "os-all",
+  "path-all",
+  "process-all",
+  "window-all",
+  "http-request",
+  "shell-open",
+  "updater",
+  "fs-read-file",
+  "fs-write-file",
+  "fs-read-dir",
+  "fs-create-dir",
+  "fs-remove-file",
+  "fs-remove-dir",
+  "fs-rename-file",
+  "fs-copy-file",
+  "fs-exists",
+] }
 # Tauri 1.x 中「打开文件/URL」由 allowlist 的 shell.open 提供，
 # 没有 tauri-plugin-opener（该插件仅 v2 存在）。
 # 保留的独立插件均为官方提供过 1.x 版本的：
