@@ -59,8 +59,14 @@ tauri = { version = "1.8", features = ["protocol-asset", "tray-icon", "image-png
 # Tauri 1.x 中「打开文件/URL」由 allowlist 的 shell.open 提供，
 # 没有 tauri-plugin-opener（该插件仅 v2 存在）。
 # 保留的独立插件均为官方提供过 1.x 版本的：
-tauri-plugin-store = "1"
-tauri-plugin-log = "0.5"
+# 🔴 Tauri 1.x 的插件必须用 **git 分支依赖**，不能用 crates.io 版本号：
+#    crates.io 上的 tauri-plugin-* 全部属于 v2 体系（版本号直接是 2.0.0-alpha.0 起，
+#    从未发布过 0.x/1.x）。写 `tauri-plugin-log = "0.5"` 会报
+#      failed to select a version for the requirement `tauri-plugin-log = "^0.5"`
+#      candidate versions found which didn't match: 3.0.0-alpha.3, ...
+#    Tauri 1.x 对应的实现放在各仓库的 `v1` 分支上。
+tauri-plugin-store = { git = "https://github.com/tauri-apps/tauri-plugin-store", branch = "v1" }
+tauri-plugin-log = { git = "https://github.com/tauri-apps/tauri-plugin-log", branch = "v1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -145,15 +151,12 @@ dom_query = "0.28"
 #   tauri-plugin-global-shortcut  → allowlist.globalShortcut（@tauri-apps/api/globalShortcut）
 # 因此依赖列表里删除，配置改在 tauri.conf.json 的 allowlist。
 
-# 自动启动：Tauri 1.x 时期是独立 crate，版本 0.2.x
-tauri-plugin-autostart = "0.2"
-# 单实例：第二次启动直接唤起已开的窗口。
-# 不只是"体验好"——多实例下两份进程各持一份内存设置，任一方改设置都会
-# 用自己那份全量覆写 settings.json，把对方的改动抹掉（用户反馈"重启后编号设置没了"）。
-tauri-plugin-single-instance = "1"
-# 窗口状态记忆：记住上次的大小 / 位置 / 最大化状态，下次启动还原。
-# 没有它的话每次启动都会走 setup 里的自适应公式重算，用户手动调过的尺寸永远丢。
-tauri-plugin-window-state = "1"
+# Tauri 1.x 插件一律走 v1 分支（理由见上面 [dependencies] 处的说明）。
+# single-instance 没有独立仓库的 v1 分支，它的 v1 实现留在 plugins-workspace
+# 的 v1 分支里（`plugins/single-instance`），Cargo 会按 package 名自动定位。
+tauri-plugin-autostart = { git = "https://github.com/tauri-apps/tauri-plugin-autostart", branch = "v1" }
+tauri-plugin-single-instance = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v1" }
+tauri-plugin-window-state = { git = "https://github.com/tauri-apps/tauri-plugin-window-state", branch = "v1" }
 # PDFium fallback（pdf-extract 对中文 CMap 不支持，运行时动态加载 pdfium.dll 兜底）
 # 移动端 NDK 加载动态库受沙盒限制，暂不支持，待 T-M012 决策
 pdfium-render = "0.8"
