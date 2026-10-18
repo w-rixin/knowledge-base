@@ -101,9 +101,6 @@
         "all": false,
         "request": true,
         "scope": ["https://**", "http://**"]
-      },
-      "updater": {
-        "active": true
       }
     },
     "windows": [
