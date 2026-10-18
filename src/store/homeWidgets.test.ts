@@ -14,7 +14,7 @@ const mocks = vi.hoisted(() => ({
   get: vi.fn(),
 }));
 
-vi.mock("@tauri-apps/plugin-store", () => ({
+vi.mock("@/lib/tauriStore", () => ({
   Store: {
     load: vi.fn(async () => ({
       set: mocks.set,

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { Store } from "@tauri-apps/plugin-store";
+import { Store } from "@/lib/tauriStore";
 
 /**
  * 首页卡片的「隐藏（模糊遮盖）」偏好。

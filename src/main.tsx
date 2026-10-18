@@ -3,7 +3,7 @@ import ReactDOM from "react-dom/client";
 import dayjs from "dayjs";
 import "dayjs/locale/zh-cn";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { error as logError } from "@tauri-apps/plugin-log";
+import { error as logError } from "@/lib/tauriLog";
 import App from "./App";
 import { RootErrorBoundary } from "@/components/ui/RootErrorBoundary";
 import { loadThemeFromStore, useAppStore } from "@/store";

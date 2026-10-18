@@ -1,5 +1,5 @@
 import { Component, type ReactNode } from "react";
-import { error as logError } from "@tauri-apps/plugin-log";
+import { error as logError } from "@/lib/tauriLog";
 
 interface Props {
   children: ReactNode;

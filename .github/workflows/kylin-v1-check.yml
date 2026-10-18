@@ -24,6 +24,54 @@ on:
       - '.github/workflows/kylin-v1-check.yml'
 
 jobs:
+  frontend-check:
+    # 前端类型与构建检查。Rust 编译已通过，但前端 API 降级（plugin-store/log/
+    # autostart 在 npm 上只有 v2，已改用自写 shim）仍需 tsc 验证。
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: pnpm install
+        # 注意：package.json 已降级到 Tauri 1.x 生态，lock 文件仍是旧的，
+        # 因此不能加 --frozen-lockfile（会直接失败）。
+        run: pnpm install
+      - name: TypeScript 类型检查
+        run: |
+          set +e
+          pnpm exec tsc --noEmit -p tsconfig.json > /tmp/tsc.log 2>&1
+          ST=$?
+          set -e
+          sed -i 's/\x1b\[[0-9;]*[a-zA-Z]//g' /tmp/tsc.log
+          echo "===== tsc 退出码: ${ST} ====="
+          echo "===== 错误数: $(grep -cE 'error TS' /tmp/tsc.log || true) ====="
+          grep -E "error TS" /tmp/tsc.log | head -60 || true
+          exit $ST
+      - name: Vite 构建
+        run: |
+          set +e
+          pnpm build > /tmp/vite.log 2>&1
+          ST=$?
+          set -e
+          sed -i 's/\x1b\[[0-9;]*[a-zA-Z]//g' /tmp/vite.log
+          echo "===== vite 退出码: ${ST} ====="
+          tail -60 /tmp/vite.log
+          exit $ST
+      - name: Upload frontend logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-logs
+          path: |
+            /tmp/tsc.log
+            /tmp/vite.log
+          retention-days: 3
+          if-no-files-found: ignore
+
   check:
     runs-on: ubuntu-22.04-arm
     steps:

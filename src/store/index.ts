@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { Store } from "@tauri-apps/plugin-store";
+import { Store } from "@/lib/tauriStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { emit } from "@tauri-apps/api/event";
 import {

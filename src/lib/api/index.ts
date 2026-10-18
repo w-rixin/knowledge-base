@@ -4,7 +4,7 @@ import {
   enable as autostartEnable,
   disable as autostartDisable,
   isEnabled as autostartIsEnabled,
-} from "@tauri-apps/plugin-autostart";
+} from "@/lib/tauriAutostart";
 import type {
   Card,
   CreateCardInput,
