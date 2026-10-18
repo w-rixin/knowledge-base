@@ -71,6 +71,12 @@ jobs:
         #      改：显式 CARGO_TERM_COLOR=never + sed 兜底剥离 ANSI。
         env:
           CARGO_TERM_COLOR: never
+          # 本 job 只做 cargo check（不打包），无需 sidecar 二进制。
+          # 但 build.rs 会校验 bundle.externalBin 指向的文件是否存在，缺失即报
+          #   path matching binaries/kb-mcp-aarch64-unknown-linux-gnu not found.
+          # 用 TAURI_CONFIG 局部覆盖成空数组即可跳过该校验（JSON 浅合并，
+          # 不影响其余配置）。真正打包时由 release.yml 先 pnpm build:mcp 生成。
+          TAURI_CONFIG: '{"tauri":{"bundle":{"externalBin":[]}}}'
         run: |
           set +e
           cargo check --all-targets > /tmp/check.log 2>&1
