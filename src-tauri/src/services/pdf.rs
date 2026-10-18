@@ -1,3 +1,4 @@
+use tauri::Manager;
 use std::path::{Path, PathBuf};
 #[cfg(desktop)]
 use std::sync::{Mutex, OnceLock};

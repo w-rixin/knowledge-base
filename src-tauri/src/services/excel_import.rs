@@ -9,6 +9,7 @@
 //! 而笔记正文本来就不是看大表的地方。所以每个工作表只放前 [`MAX_ROWS_PER_SHEET`] 行，
 //! 被截掉的行数**明确写进正文**（不静默丢），完整数据留在源文件里。
 
+use tauri::Manager;
 use std::path::Path;
 
 use serde::Serialize;

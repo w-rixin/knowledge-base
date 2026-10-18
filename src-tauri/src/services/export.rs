@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use tauri::{Runtime};
+use tauri::{Runtime, Manager};
 
 use base64::Engine;
 

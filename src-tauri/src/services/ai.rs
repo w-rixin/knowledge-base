@@ -3,7 +3,7 @@ use ai_profile::Protocol;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
-use tauri::{AppHandle};
+use tauri::{AppHandle, Manager};
 use tokio::sync::watch;
 
 use crate::database::Database;

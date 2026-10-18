@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use tauri::State;
+use tauri::Manager;
 
 use crate::models::{
     SyncHistoryItem, SyncImportMode, SyncManifest, SyncResult, SyncScope, WebDavConfig,

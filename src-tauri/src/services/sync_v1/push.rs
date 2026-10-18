@@ -9,7 +9,7 @@
 //!
 //! v1 阶段简化：不支持本地软删除推送（tombstone），等 T-024 后续阶段补。
 
-use tauri::{Runtime};
+use tauri::{Runtime, Manager};
 
 use crate::database::text_health::get_text_lossy;
 use crate::database::Database;

@@ -114,8 +114,7 @@ async fn scan_once(
     let entries = std::fs::read_dir(dir_path).map_err(|e| format!("读取目录失败: {}", e))?;
     let app_data_dir = app
         .path_resolver()
-        .app_data_dir()
-        .map_err(|e| format!("取 app_data_dir 失败: {}", e))?;
+        .app_data_dir().ok_or_else(|| format!("取 app_data_dir 失败"))?;
 
     let mut current: HashMap<PathBuf, Fingerprint> = HashMap::new();
     let mut pending: Vec<PathBuf> = Vec::new();

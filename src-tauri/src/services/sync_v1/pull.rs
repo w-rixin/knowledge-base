@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use tauri::{Runtime};
+use tauri::{Runtime, Manager};
 
 use crate::database::Database;
 use crate::error::AppError;

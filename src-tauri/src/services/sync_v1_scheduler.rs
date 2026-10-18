@@ -205,8 +205,7 @@ pub(crate) fn run_pull_blocking(
     let device = hostname_short();
     let conflicts_dir = app
         .path_resolver()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
+        .app_data_dir().ok_or_else(|| "app_data_dir unavailable".to_string())?
         .join("sync_conflicts")
         .join(format!("backend_{}", backend_id));
 

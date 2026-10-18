@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use tauri::{Runtime};
+use tauri::{Runtime, Manager};
 use walkdir::WalkDir;
 
 use crate::database::Database;
