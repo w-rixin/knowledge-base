@@ -470,9 +470,11 @@ pub(crate) fn fit_into_work_area(window: &tauri::Window, center: bool) -> bool {
     };
 
     // 工作区被报成 0 的显示器（虚拟屏 / 远程桌面）退回整屏几何
-    let wa = monitor.work_area();
-    let work = if wa.size.width > 0 && wa.size.height > 0 {
-        Rect { x: wa.position.x, y: wa.position.y, width: wa.size.width, height: wa.size.height }
+    // 🔴 v1 的 Monitor 没有 work_area()（v2 才有），退化用整块屏幕几何
+    let mpos = monitor.position();
+    let msize = monitor.size();
+    let work = if msize.width > 0 && msize.height > 0 {
+        Rect { x: mpos.x, y: mpos.y, width: msize.width, height: msize.height }
     } else {
         Rect {
             x: monitor.position().x,

@@ -261,9 +261,12 @@ pub fn export_diagnostics(app: tauri::AppHandle) -> Result<String, String> {
     #[cfg(desktop)]
     let out_base = app
         .path_resolver()
-        .desktop_dir()
-        .or_else(|| app.path_resolver().download_dir())
-        .or_else(|| crate::framework_app_data_dir(&app))
+        // 🔴 v1 的 PathResolver 没有 desktop_dir()/download_dir()，用 home 目录拼
+        .home_dir()
+        .map(|h| h.join("Desktop"))
+        .filter(|p| p.exists())
+        .or_else(|| app.path_resolver().home_dir().map(|h| h.join("Downloads")).filter(|p| p.exists()))
+        .or_else(|| crate::framework_app_data_dir(&app).ok())
         .ok_or_else(|| "无法确定诊断包输出目录".to_string())?;
     // 移动端无 desktop_dir（PathResolver 不提供）；沙盒环境直接落应用数据目录
     #[cfg(not(desktop))]

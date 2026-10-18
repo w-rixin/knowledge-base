@@ -216,7 +216,10 @@ fn window_state_filename() -> String {
 /// 的 identifier），所有运行期 Command 拿 framework_app_data_dir 都要经过本函数，
 /// 否则 dev 单实例锁 / multi_instance flag / 指针文件 等会落到 prod 目录里。
 pub(crate) fn framework_app_data_dir(handle: &tauri::AppHandle) -> Result<PathBuf, tauri::Error> {
-    let from_tauri = handle.path_resolver().app_data_dir()?;
+    let from_tauri = handle
+        .path_resolver()
+        .app_data_dir()
+        .ok_or_else(|| tauri::Error::AssetNotFound("app_data_dir".into()))?;
     // 桌面端：dev 模式重写到 -dev 兄弟目录（应用对 OS 的 app_data_dir 父目录有写权限）
     // 移动端：Android 沙盒只允许应用写自己的 files/，不能在 parent 下建兄弟目录
     //         直接返回 tauri 给的（dev/prod 用同一个目录，反正每次卸载重装都重置）
@@ -1246,10 +1249,10 @@ pub fn run() {
             commands::mcp::plugin_install_from_manifest,
             commands::mcp::plugin_install_from_file,
             commands::mcp::plugin_scaffold,
-            // #9 本地 OCR（RapidOCR sidecar，仅桌面端）
-            #[cfg(desktop)]
+            // #9 本地 OCR（RapidOCR sidecar）
+            // ⚠️ generate_handler! 宏不解析 #[cfg] 属性（v1 会报 expected identifier），
+            //    且这两个函数本身没有平台 gate（内部按 cfg 分支降级），故直接列出。
             commands::ocr::ocr_available,
-            #[cfg(desktop)]
             commands::ocr::ocr_image,
             #[cfg(desktop)]
             commands::ocr::ocr_pdf,
@@ -1688,7 +1691,10 @@ pub fn run() {
             commands::mobile_update::open_install_permission_settings,
         ])
         // ─── 窗口事件处理 ─────────────────────────
-        .on_window_event(|window, event| {
+        .on_window_event(|__we| {
+              // 🔴 v1 的 on_window_event 闭包只接受一个 GlobalWindowEvent（v2 是两个参数）
+              let window = __we.window().clone();
+              let event = __we.event().clone();
             // ─── 跨 DPI / 显示器热插拔的几何自愈（仅主窗口）───
             // 只有主窗口参与：子窗口（popout-* / push-popup-* / emergency-*）的几何
             // 各自由 builder 决定，不该被基准机制接管。
@@ -1703,7 +1709,7 @@ pub fn run() {
                 match event {
                     WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                         if let Some(w) = resolve() {
-                            commands::window::schedule_geometry_reconcile(&w, *scale_factor);
+                            commands::window::schedule_geometry_reconcile(&w, scale_factor);
                         }
                     }
                     WindowEvent::Resized(_) => {

@@ -41,7 +41,7 @@ pub async fn ocr_pdf(
     let tmp_root = app
         .path_resolver()
         .app_cache_dir()
-        .map_err(|e| format!("取缓存目录失败: {e}"))?
+        .ok_or_else(|| "取缓存目录失败".to_string())?
         .join("ocr-tmp");
 
     tauri::async_runtime::spawn_blocking(move || {

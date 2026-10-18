@@ -77,7 +77,7 @@ fn ensure_listener(app: &AppHandle) {
     if LISTENER_READY.swap(true, Ordering::SeqCst) {
         return;
     }
-    app.listen(ACK_EVENT, |_| {
+    app.listen_global(ACK_EVENT, |_| {
         ACKED.store(true, Ordering::SeqCst);
     });
 }
