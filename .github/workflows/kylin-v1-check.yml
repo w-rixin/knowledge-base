@@ -104,6 +104,36 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
 
+      # ─── 为什么需要这一步（58fba7a 之后 cargo check 必挂的根因）──────────
+      # 补回官方模板的 [features] 节（default = ["custom-protocol"]）之后，
+      # 本包的 custom-protocol 经 tauri/custom-protocol 传递给
+      # tauri-macros/custom-protocol，而 generate_context! 的 proc macro
+      # 编译时就带上了这个特性：
+      #     tauri-macros-1.4.x/src/context.rs:76
+      #       dev: cfg!(not(feature = "custom-protocol")),
+      # → dev = false，codegen 进入**生产模式**：
+      #     tauri-codegen-1.4.x/src/context.rs:205
+      #       if !assets_path.exists() { panic!("distDir ... doesn't exist") }
+      # 即 distDir（tauri.conf.json 里是 ../dist，相对 src-tauri）必须存在。
+      #
+      # 本 job 只做 cargo check、不跑前端构建，dist/ 自然不存在 → panic
+      # （表现为 exit 101、约 20 秒失败——依赖都被缓存，只有本包的宏展开炸了）。
+      # deb 工作流同一 commit 却成功，因为它先跑了 pnpm build。
+      #
+      # 修法选择（为什么不选另外两个）：
+      #   ✗ 真跑 pnpm install + pnpm build：+2~3 分钟，且 frontend-check job
+      #     已经跑了 tsc + vite build，纯属重复；deb 工作流也会做真实构建。
+      #   ✗ --no-default-features：检查集偏离生产特性（正是 [features] 节要
+      #     对齐的东西），会把"生产模式编不过"这类回归重新藏起来。
+      #   ✓ 造一个最小 stub dist/：满足存在性校验，资产嵌入的是占位文件，
+      #     而本 job 的产物（check 元数据）永远不会被执行。
+      - name: Create stub dist/（生产模式 codegen 的前置条件）
+        run: |
+          mkdir -p dist
+          printf '<!doctype html><title>kylin-v1-check stub</title>' > dist/index.html
+          echo "stub dist 内容："
+          ls -la dist/
+
       - name: cargo check (lib + bin)
         working-directory: ./src-tauri
         # 不用 -D warnings：迁移期先把「能不能编过」这件事确认下来，
@@ -120,6 +150,10 @@ jobs:
         #      —— `grep "^error"` 永远匹配不到（行首实际是 \033[31m 等转义），
         #      表现为「退出码 101、error 行数 0」，误导了整整两轮排查。
         #      改：显式 CARGO_TERM_COLOR=never + sed 兜底剥离 ANSI。
+        #
+        # 🔴 第四个坑（2026-10-19 定位，非日志问题）：
+        #   生产模式下 generate_context! 强制校验 distDir 存在（见上一步
+        #   「Create stub dist/」的长注释）。没有那一步，本步骤必挂。
         env:
           CARGO_TERM_COLOR: never
           # 本 job 只做 cargo check（不打包），无需 sidecar 二进制。
