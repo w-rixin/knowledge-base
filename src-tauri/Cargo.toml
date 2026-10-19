@@ -39,6 +39,30 @@ license = "AGPL-3.0-or-later"
 name = "knowledge_base_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# ─── 包级 feature 转发（Tauri 1.x 模板自带，勿删） ────────────────────
+# 🔴 这一节在从 Tauri 2.x 迁移时整节丢失，导致 `tauri build` 必然失败：
+#      error: the package 'knowledge_base' does not contain this feature:
+#             custom-protocol
+#    根因（tauri-cli 1.6.6 源码实锤）：
+#      AppInterface::build() 无条件 options.features.push("custom-protocol")
+#      （src/interface/rust.rs:176），最终以
+#          cargo build --release --features custom-protocol
+#      调用 cargo（src/interface/rust/desktop.rs::build_command:285-292）。
+#      `--features` 后的裸名是**本包**的特性，不是 tauri crate 的特性，
+#      必须经下面的转发才能生效。Tauri 1.x 官方模板 Cargo.toml 一直带这一节
+#      （default = ["custom-protocol"] + custom-protocol = ["tauri/custom-protocol"]）。
+#
+#    附带效果：default 含 custom-protocol 后，裸 `cargo build --release`
+#    与 tauri-cli 的 `--features custom-protocol` 产出**完全一致**，
+#    CI 里先跑裸 cargo build 预热、再跑 tauri build 不会触发二次全量重编
+#    （本项目 lto=true + codegen-units=1，一轮 fat-LTO 约 8-10 分钟）。
+[features]
+# by default Tauri runs in production mode
+# when `tauri dev` runs it is executed with `cargo run --no-default-features` if `devPath` is an URL
+default = ["custom-protocol"]
+# this feature is used used for production builds where `tauri build` is called
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 # Tauri 1.x（为适配麒麟 glibc 2.31 + webkit2gtk-4.0 而整体降级，见 docs/tauri-v1-migration.md）
 tauri-build = { version = "1.5", features = [] }
