@@ -29,7 +29,7 @@
       "shortDescription": "本地知识库桌面应用",
       "longDescription": "基于 Tauri 构建的本地知识库管理工具，支持 Markdown 编辑、全文搜索、双向链接、知识图谱、AI 问答等功能。",
       "deb": {
-        "depends": ["libc6", "libayatana-appindicator3-1", "librsvg2-2", "fonts-noto-cjk"]
+        "depends": ["libc6", "librsvg2-2", "fonts-noto-cjk"]
       },
       "windows": {
         "nsis": {

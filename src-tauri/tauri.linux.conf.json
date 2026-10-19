@@ -3,7 +3,7 @@
   "tauri": {
     "bundle": {
       "deb": {
-        "depends": ["libc6", "libayatana-appindicator3-1", "librsvg2-2", "fonts-noto-cjk"]
+        "depends": ["libc6", "librsvg2-2", "fonts-noto-cjk"]
       }
     }
   }
