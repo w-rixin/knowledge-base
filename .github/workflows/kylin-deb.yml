@@ -61,6 +61,7 @@ jobs:
             libjavascriptcoregtk-4.0-dev \
             libsoup2.4-dev \
             libayatana-appindicator3-dev \
+            libappindicator3-dev \
             librsvg2-dev \
             libxdo-dev \
             libssl-dev \
@@ -216,6 +217,18 @@ jobs:
           #    后，托盘经回退路径正常工作，无需任何符号链接 hack。
           #    设成 appindicator 只是让 Depends 写上麒麟认识的包名，
           #    dpkg -i 一把过；运行时若目标机有 ayatana 仍优先用它。
+          # 🔴 二阶效应（run 6 踩坑，tauri-cli src/build.rs:248-272 实锤）：
+          #    TAURI_TRAY != "ayatana" 时，tauri-cli 在**打包阶段**还会
+          #    用 pkg-config 探测 appindicator3-0.1 模块来设
+          #    TRAY_LIBRARY_PATH（只被 AppImage 模板用，deb 不碰），
+          #    探测不到就 expect panic：
+          #      get_library_path("appindicator3-0.1")
+          #        .expect("failed to get libappindicator-gtk library
+          #                 path using pkg-config.")
+          #    所以 CI 必须同时装 libappindicator3-dev（提供
+          #    appindicator3-0.1.pc）；只有 libayatana-appindicator3-dev
+          #    时该 panic 会让 deb 静默不产出（run 6：tauri build 退出
+          #    码 0 但无 deb，最后 Locate deb 步骤才暴露）。
           TAURI_TRAY: appindicator
         run: |
           set +e
