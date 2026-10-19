@@ -9,14 +9,22 @@
 #   目标机只要 aarch64 deb，就单独构建一个快速迭代通道。
 #
 # 触发：推送 kylin-deb-* 标签，或在 Actions 页面手动 Run workflow
-#   git tag kylin-deb-20261019-1
-#   git push origin kylin-deb-20261019-1
+#   git tag kylin-deb-20261019-4
+#   git push origin kylin-deb-20261019-4
 #
-# 🔴 为什么必须用 ubuntu-22.04-arm（不能用 24.04-arm）：
+# 🔴 为什么必须用 ubuntu-22.04-arm（不能用 24.04）：
 #    Tauri 1.x 依赖 libwebkit2gtk-**4.0**-dev；Ubuntu 24.04 (noble) 已移除该
 #    开发包（只剩 4.0 运行时库）。jammy (22.04) 同时提供 4.0/4.1 两套 dev 包，
 #    官方支持到 2027-04。且目标机麒麟 V10 GFB 只有 4.0 运行时，
 #    编译侧必须对齐同一 ABI，否则链出 4.1 依赖照样装不上。
+#
+# 🔴 为什么每个失败步骤都要发 ::error:: 注解（run 3 的教训）：
+#    Actions 日志下载、artifact 下载都要认证，本机没有可用 token。
+#    免认证能读的只有：run/job/step 状态、artifacts 列表、
+#    **check-run annotations**（/repos/{o}/{r}/check-runs/{id}/annotations）。
+#    所以让 CI 把失败摘要自己写成注解，重跑后直接读注解就能定位，不必猜。
+#    注意：workflow command 的多行消息必须把换行编码成 %0A，
+#    否则只有第一行会成为注解、其余沦为普通输出（下面的 annotate() 处理）。
 # =============================================================================
 
 name: Kylin Deb (aarch64)
@@ -63,10 +71,14 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      # cache-on-failure: true —— run 3 的教训：job 在 deb 打包步骤失败，
+      # 而 swatinem/rust-cache 默认失败轮不存缓存，导致重跑又全量冷编
+      # （lto=true + codegen-units=1，一轮 8-10 分钟）。打开后失败轮也留缓存。
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
+          cache-on-failure: true
 
       - name: Install frontend dependencies
         run: pnpm install
@@ -121,15 +133,13 @@ jobs:
       - name: Build kb-mcp sidecar
         run: pnpm build:mcp
 
-      # ─── 为什么要拆成 3 步，而不是一句 `pnpm tauri build` ──────────────
+      # ─── 为什么拆成 3 步，而不是一句 `pnpm tauri build` ──────────────
       # `tauri build` 内部依次做三件事：跑 beforeBuildCommand（vite build）→
       # cargo build --release → bundle。任何一步失败，对外只表现为
       # 「Build deb 这一步红了」，无法判断是前端、Rust 还是打包器的问题。
-      # 而 CI 日志下载需要认证（免认证只能拿到步骤结论）。
-      # 拆开后，失败落在哪一步直接从步骤颜色就能读出来，不必看日志。
-      #
-      # 代价：vite build 会多跑一遍（tauri build 内部还会再跑一次）。
-      # 换来的是不依赖日志即可定位问题，值得。
+      # 而 CI 日志下载需要认证（免认证只能拿到步骤结论 + 注解）。
+      # 拆开后，失败落在哪一步直接从步骤颜色就能读出来；同时每步失败时
+      # 把摘要写成 ::error:: 注解，重跑后读注解即可拿到真实报错。
       # ------------------------------------------------------------------
 
       - name: Build step 1/3 — 前端构建（beforeBuildCommand）
@@ -137,11 +147,22 @@ jobs:
           NODE_OPTIONS: '--max-old-space-size=8192'
         run: pnpm build
 
+      # 🔴 为什么这里要加 --features custom-protocol：
+      #    tauri-cli 的 AppInterface::build() 会无条件 push("custom-protocol")
+      #    （interface/rust.rs:176），最终以
+      #        cargo build --release --features custom-protocol
+      #    调用 cargo（desktop.rs::build_command:285-292）。
+      #    如果本步用裸 `cargo build --release`，下一步 `tauri build` 的 cargo
+      #    调用会因为 feature 集合不同而**整个 tauri 依赖链全部重编**——
+      #    本项目 lto=true + codegen-units=1，一轮 fat-LTO 要 8-10 分钟。
+      #    参数对齐后，下一步的 cargo 是纯 no-op，失败排查与整体耗时都受益。
+      #    custom-protocol 只经命令行传入、不进 Cargo.toml，
+      #    不影响 tauri-build 的 allowlist 校验（该校验只看 Cargo.toml vs conf）。
       - name: Build step 2/3 — Rust release 编译（主程序）
         working-directory: src-tauri
         run: |
           set +e
-          cargo build --release > /tmp/cargo.log 2>&1
+          cargo build --release --features custom-protocol > /tmp/cargo.log 2>&1
           STATUS=$?
           set -e
 
@@ -157,6 +178,22 @@ jobs:
           echo ""
           echo "===== 最后 60 行 ====="
           tail -60 /tmp/cargo.log
+
+          if [ ${STATUS} -ne 0 ]; then
+            # 免认证读日志的唯一通道：把失败摘要写成 check-run 注解。
+            # annotate() 负责把多行文本编码成单行 workflow command
+            # （% → %25 先行转义，换行 → %0A；否则只有第一行会成为注解）。
+            annotate() {
+              sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}'
+            }
+            MSG=$( {
+              echo "[rust-build] cargo build --release 失败，退出码 ${STATUS}"
+              grep -E -A8 '^error(\[[A-Z0-9]+\])?(:|\[)' /tmp/cargo.log | head -80
+              echo "----- 日志最后 50 行 -----"
+              tail -50 /tmp/cargo.log
+            } | annotate )
+            echo "::error::${MSG}"
+          fi
           exit ${STATUS}
 
       - name: Build step 3/3 — Tauri 打包 deb
@@ -175,7 +212,7 @@ jobs:
           echo "===== tauri build 退出码: ${STATUS} ====="
           echo "===== error 行数: $(grep -c '^error' /tmp/build.log || true) ====="
           echo ""
-          echo "===== 错误详情（每条带 12 行上下文）====="
+          echo "===== error 详情（每条带 12 行上下文）====="
           grep -E -A12 '^error(\[[A-Z0-9]+\])?(:|\[)' /tmp/build.log | head -240 || true
           echo ""
           echo "===== 最后 80 行（看卡在哪一步）====="
@@ -187,26 +224,68 @@ jobs:
             echo ""
             echo "===== bundle 目录现状 ====="
             find src-tauri/target/release/bundle -maxdepth 2 -exec ls -ld {} \; 2>/dev/null || echo "(bundle 目录为空或不存在)"
-            echo "===== 主程序产物 ====="
-            ls -la src-tauri/target/release/knowledge_base 2>/dev/null || echo "(主程序未生成)"
+            echo "===== 主程序产物（knowledge_base vs knowledge-base）====="
+            ls -la src-tauri/target/release/ 2>/dev/null | grep -i knowledge || echo "(target/release 下无 knowledge* 产物)"
             echo "===== sidecar 产物 ====="
             ls -la src-tauri/binaries/ 2>/dev/null || echo "(sidecar 未生成)"
+            echo "===== Cargo.toml 累计改动（sed 摘 updater + rewrite_manifest）====="
+            git -C src-tauri diff -- Cargo.toml | head -40 || true
+
+            # 免认证读日志的唯一通道：把失败摘要写成 check-run 注解。
+            # annotate() 负责把多行文本编码成单行 workflow command
+            # （% → %25 先行转义，换行 → %0A；否则只有第一行会成为注解）。
+            annotate() {
+              sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}'
+            }
+            MSG=$( {
+              echo "[deb-bundle] tauri build 失败，退出码 ${STATUS}"
+              echo "----- bundler/打包相关行 -----"
+              grep -E -i 'bundle|dpkg|icon|resource|failed|panic|not found|caused by' /tmp/build.log | tail -40
+              echo "----- error 行（带上下文）-----"
+              grep -E -A8 '^error(\[[A-Z0-9]+\])?(:|\[)' /tmp/build.log | head -60
+              echo "----- 日志最后 60 行 -----"
+              tail -60 /tmp/build.log
+              echo "----- target/release 主程序产物 -----"
+              ls -la src-tauri/target/release/ 2>/dev/null | grep -i knowledge || echo "(无 knowledge* 产物)"
+              echo "----- bundle 目录 -----"
+              find src-tauri/target/release/bundle -maxdepth 2 2>/dev/null || echo "(bundle 目录为空或不存在)"
+              echo "----- 打包器输入预检 -----"
+              for p in \
+                src-tauri/binaries/kb-mcp-aarch64-unknown-linux-gnu \
+                src-tauri/resources/pdfium/pdfium.dll \
+                src-tauri/resources/ocr/RapidOCR-json.exe \
+                src-tauri/icons/32x32.png \
+                src-tauri/icons/128x128.png \
+                src-tauri/icons/128x128@2x.png; do
+                if [ -e "$p" ]; then echo "OK   $p"; else echo "MISS $p"; fi
+              done
+              echo "----- Cargo.toml diff -----"
+              git -C src-tauri diff -- Cargo.toml | head -30 || true
+            } | annotate )
+            echo "::error::${MSG}"
           fi
           exit ${STATUS}
 
-      # ─── 失败时把日志推到独立分支，供免认证读取 ───────────────────────
+      # ─── 失败时把日志推到独立分支 + 写成注解，供免认证读取 ─────────────
       # 背景：Actions 日志与 artifact 下载都要求认证，而本机没有可用 token
       # （用户给的 PAT 已删除）。免认证能读到的只有：run 状态、job 状态、
-      # 每一步的 conclusion、artifacts 列表。job 的 outputs 字段不返回。
+      # 每一步的 conclusion、artifacts 列表、**check-run 注解**。
       #
-      # 所以让 CI 自己把日志写进仓库的 ci-debug-logs 分支：
-      #   - 公开仓库的 contents API 免认证可读，立刻能拿到日志全文；
-      #   - 推的是独立分支，不会污染 tauri-v1，也不会触发任何工作流
+      # 双通道冗余：
+      #   a) 注解（主通道）：步骤 2/3、3/3 失败时已各自写入，本步再兜底一次；
+      #   b) ci-debug-logs 分支（备通道）：公开仓库 contents API 免认证可读。
+      #     推的是独立分支，不会污染 tauri-v1，也不会触发任何工作流
       #     （kylin-v1-check.yml 只监听 tauri-v1 分支且带 paths 过滤，
       #      kylin-deb.yml 只监听 tag）。
-      # 定位完成后删掉这个分支即可。
+      #
+      # 🔴 本步骤**永不许失败**（run 3 的教训）：它自己失败会盖住真实失败的
+      #    信号。历史上两个坑都修掉：
+      #     1) `[ -s "$f" ] && sed ...` 在 GitHub Actions 默认 bash -e 下，
+      #        文件不存在/为空即使整个步骤失败 → 改成 if 包裹；
+      #     2) git push 可能因 token 权限失败 → `|| echo` 兜底，不再致命。
       - name: 失败时推送日志到 ci-debug-logs 分支
         if: failure()
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -214,8 +293,24 @@ jobs:
           #   Build step 2/3 → /tmp/cargo.log
           #   Build step 3/3 → /tmp/build.log
           for f in /tmp/cargo.log /tmp/build.log; do
-            [ -s "$f" ] && sed -i 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$f"
+            if [ -s "$f" ]; then
+              sed -i 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$f"
+            fi
           done
+
+          # 注解兜底：万一前面步骤的注解写入被跳过，这里再发一次完整尾部。
+          annotate() {
+            sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}'
+          }
+          if [ -s /tmp/build.log ]; then
+            MSG=$( { echo "[deb-bundle-fallback] /tmp/build.log 尾部"; tail -60 /tmp/build.log; } | annotate )
+            echo "::error::${MSG}"
+          fi
+          if [ -s /tmp/cargo.log ]; then
+            MSG=$( { echo "[rust-build-fallback] /tmp/cargo.log 尾部"; tail -40 /tmp/cargo.log; } | annotate )
+            echo "::error::${MSG}"
+          fi
+
           mkdir -p .ci-logs
           TS=$(date +%Y%m%d-%H%M%S)
           for f in /tmp/cargo.log /tmp/build.log; do
@@ -232,7 +327,7 @@ jobs:
           git checkout -B ci-debug-logs
           git add -f .ci-logs
           git commit -m "ci: ${TS} 构建失败日志 (run ${{ github.run_id }})" || echo "无新内容可提交"
-          git push -f origin ci-debug-logs
+          git push -f origin ci-debug-logs || echo "推送 ci-debug-logs 失败（不影响结论，注解通道已有摘要）"
           echo "已推送到 ci-debug-logs 分支"
 
       - name: Locate deb
