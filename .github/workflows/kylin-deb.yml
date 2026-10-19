@@ -99,22 +99,55 @@ jobs:
       - name: Build kb-mcp sidecar
         run: pnpm build:mcp
 
-      - name: Build deb (Tauri 1.x)
+      # ─── 为什么要拆成 3 步，而不是一句 `pnpm tauri build` ──────────────
+      # `tauri build` 内部依次做三件事：跑 beforeBuildCommand（vite build）→
+      # cargo build --release → bundle。任何一步失败，对外只表现为
+      # 「Build deb 这一步红了」，无法判断是前端、Rust 还是打包器的问题。
+      # 而 CI 日志下载需要认证（免认证只能拿到步骤结论）。
+      # 拆开后，失败落在哪一步直接从步骤颜色就能读出来，不必看日志。
+      #
+      # 代价：vite build 会多跑一遍（tauri build 内部还会再跑一次）。
+      # 换来的是不依赖日志即可定位问题，值得。
+      # ------------------------------------------------------------------
+
+      - name: Build step 1/3 — 前端构建（beforeBuildCommand）
         env:
-          # tauri build 的 beforeBuildCommand 会跑 vite build。自 v1.50.0 引入
-          # Excalidraw 后前端涨到 9600+ 模块，terser 压缩阶段堆峰值会越过 Node
-          # 默认的 ~2GB 上限（macOS runner 上实测 collapse 到 "FATAL ERROR:
-          # Reached heap limit"，exit 134）。显式放宽覆盖全平台。
           NODE_OPTIONS: '--max-old-space-size=8192'
+        run: pnpm build
+
+      - name: Build step 2/3 — Rust release 编译（主程序）
+        working-directory: src-tauri
         run: |
           set +e
-          pnpm tauri build --bundles deb > /tmp/build.log 2>&1
+          cargo build --release > /tmp/cargo.log 2>&1
           STATUS=$?
           set -e
 
-          # 剥离 ANSI 转义序列：环境里若有 CARGO_TERM_COLOR=always，
-          # 日志行首会是 \033[31m 之类，`grep "^error"` 永远匹配不到，
-          # 会误报成「失败但 0 错误」（本项目踩过，误导了两轮排查）。
+          # 剥离 ANSI：环境若带 CARGO_TERM_COLOR=always，行首会是 \033[31m，
+          # `grep "^error"` 永远匹配不到，会误报成「失败但 0 错误」。
+          sed -i 's/\x1b\[[0-9;]*[a-zA-Z]//g' /tmp/cargo.log
+
+          echo "===== cargo build --release 退出码: ${STATUS} ====="
+          echo "===== error 行数: $(grep -c '^error' /tmp/cargo.log || true) ====="
+          echo ""
+          echo "===== 错误详情（每条带 12 行上下文）====="
+          grep -E -A12 '^error(\[[A-Z0-9]+\])?(:|\[)' /tmp/cargo.log | head -240 || true
+          echo ""
+          echo "===== 最后 60 行 ====="
+          tail -60 /tmp/cargo.log
+          exit ${STATUS}
+
+      - name: Build step 3/3 — Tauri 打包 deb
+        env:
+          NODE_OPTIONS: '--max-old-space-size=8192'
+        run: |
+          set +e
+          # --verbose：打包器的报错（资源缺失 / dpkg 调用 / 图标）比
+          # 默认输出详细得多，是这里最可能失败的一环。
+          pnpm tauri build --bundles deb --verbose > /tmp/build.log 2>&1
+          STATUS=$?
+          set -e
+
           sed -i 's/\x1b\[[0-9;]*[a-zA-Z]//g' /tmp/build.log
 
           echo "===== tauri build 退出码: ${STATUS} ====="
@@ -123,8 +156,20 @@ jobs:
           echo "===== 错误详情（每条带 12 行上下文）====="
           grep -E -A12 '^error(\[[A-Z0-9]+\])?(:|\[)' /tmp/build.log | head -240 || true
           echo ""
-          echo "===== 最后 80 行（看失败发生在哪一步）====="
+          echo "===== 最后 80 行（看卡在哪一步）====="
           tail -80 /tmp/build.log
+
+          # 失败时把 bundle 目录的状态也打出来：能区分"没进打包器"和
+          # "进打包器后挂了"两种情况。
+          if [ ${STATUS} -ne 0 ]; then
+            echo ""
+            echo "===== bundle 目录现状 ====="
+            find src-tauri/target/release/bundle -maxdepth 2 -exec ls -ld {} \; 2>/dev/null || echo "(bundle 目录为空或不存在)"
+            echo "===== 主程序产物 ====="
+            ls -la src-tauri/target/release/knowledge_base 2>/dev/null || echo "(主程序未生成)"
+            echo "===== sidecar 产物 ====="
+            ls -la src-tauri/binaries/ 2>/dev/null || echo "(sidecar 未生成)"
+          fi
           exit ${STATUS}
 
       - name: Locate deb
@@ -158,6 +203,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kylin-deb-build-log
-          path: /tmp/build.log
+          path: |
+            /tmp/build.log
+            /tmp/cargo.log
           retention-days: 7
           if-no-files-found: ignore
