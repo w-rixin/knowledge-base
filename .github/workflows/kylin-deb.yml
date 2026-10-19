@@ -56,11 +56,19 @@ jobs:
       - name: Install Linux system dependencies (webkit2gtk-4.0 for Tauri 1.x)
         run: |
           sudo apt-get update
+          # 🔴 libappindicator3-dev 与 libayatana-appindicator3-dev 在 Ubuntu
+          #    22.04 上互相 Conflicts，不能共存（run 7 实锤：
+          #    "libayatana-appindicator3-dev : Conflicts: libappindicator3-dev"）。
+          #    而且编译期根本不需要任何 appindicator dev 包：
+          #    tauri-runtime-wry → tao → libappindicator → libappindicator-sys
+          #    是纯 dlopen（无 build.rs、无 pkg-config）。dev 包只为
+          #    TAURI_TRAY=appindicator 时 tauri-cli 打包期的探测提供
+          #    appindicator3-0.1.pc（见下面 TAURI_TRAY 注释），所以只装
+          #    libappindicator3-dev，不装 ayatana 的。
           sudo apt-get install -y \
             libwebkit2gtk-4.0-dev \
             libjavascriptcoregtk-4.0-dev \
             libsoup2.4-dev \
-            libayatana-appindicator3-dev \
             libappindicator3-dev \
             librsvg2-dev \
             libxdo-dev \
@@ -225,10 +233,12 @@ jobs:
           #      get_library_path("appindicator3-0.1")
           #        .expect("failed to get libappindicator-gtk library
           #                 path using pkg-config.")
-          #    所以 CI 必须同时装 libappindicator3-dev（提供
-          #    appindicator3-0.1.pc）；只有 libayatana-appindicator3-dev
-          #    时该 panic 会让 deb 静默不产出（run 6：tauri build 退出
-          #    码 0 但无 deb，最后 Locate deb 步骤才暴露）。
+          #    所以 CI 要装 libappindicator3-dev（提供 appindicator3-0.1.pc）。
+          #    注意它和 libayatana-appindicator3-dev 在 Ubuntu 22.04 上
+          #    Conflicts 不能共存，且编译期两者都不需要（dlopen），
+          #    故只装前者。该 panic 在分离线程里，退出码仍是 0——
+          #    run 6 因此静默失败（步骤绿但无 deb），靠 Locate deb 兜底
+          #    才暴露；现已在步骤内加产物断言。
           TAURI_TRAY: appindicator
         run: |
           set +e
@@ -302,18 +312,27 @@ jobs:
             # 就能确认 Depends 已经是麒麟 V10 认识的包名。
             # 重点核对 Depends 里是 libappindicator3-1 而不是
             # libayatana-appindicator3-1（TAURI_TRAY 是否生效的直接证据）。
+            #
+            # 🔴 退出码 0 ≠ 打包成功（run 6 实锤的静默失败）：
+            #    tauri-cli 打包阶段设 TRAY_LIBRARY_PATH 的 pkg-config 探测
+            #    失败时，panic 发生在**分离线程**（日志里 thread '<unnamed>'
+            #    panicked），不搞崩进程——pnpm 拿到退出码 0、步骤显示
+            #    success，但 deb 根本没产出。所以这里必须做产物断言：
+            #    退出 0 却找不到 .deb，一律判失败并报警解。
             annotate() {
               sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}'
             }
             DEB=$(ls src-tauri/target/release/bundle/deb/*.deb 2>/dev/null | head -1)
-            if [ -n "$DEB" ]; then
-              MSG=$( {
-                echo "[deb-bundle] 打包成功，deb 控制字段："
-                dpkg-deb -f "$DEB" Package Version Architecture Depends Installed-Size
-                echo "文件: $(basename "$DEB") ($(stat -c %s "$DEB") bytes)"
-              } | annotate )
-              echo "::notice::${MSG}"
+            if [ -z "${DEB}" ]; then
+              echo "::error::[deb-bundle] tauri build 退出码 0 但未产出 .deb —— 疑似打包阶段静默失败，请查 /tmp/build.log 末尾的 panic"
+              exit 1
             fi
+            MSG=$( {
+              echo "[deb-bundle] 打包成功，deb 控制字段："
+              dpkg-deb -f "${DEB}" Package Version Architecture Depends Installed-Size
+              echo "文件: $(basename "${DEB}") ($(stat -c %s "${DEB}") bytes)"
+            } | annotate )
+            echo "::notice::${MSG}"
           fi
           exit ${STATUS}
 
