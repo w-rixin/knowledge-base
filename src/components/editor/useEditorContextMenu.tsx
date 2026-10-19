@@ -15,8 +15,7 @@ import {
   Minimize2,
   PenLine,
 } from "lucide-react";
-import { open } from "@/lib/tauriShell";
-import { writeImage } from "@tauri-apps/api/clipboard";
+import { open, revealItemInDir } from "@/lib/tauriShell";
 import { useContextMenu } from "@/hooks/useContextMenu";
 import { useFeatureEnabled } from "@/hooks/useFeatureEnabled";
 import {
@@ -435,14 +434,14 @@ export function useEditorContextMenu(
           return;
         }
         const pngBlob = await toPngBlob(bytes);
-        try {
-          await writeImage(new Uint8Array(await pngBlob.arrayBuffer()));
-        } catch {
-          // 插件不可用（移动端）→ 最后回退 Web Clipboard；此路径受手势限制，可能仍失败
-          await navigator.clipboard.write([
-            new ClipboardItem({ "image/png": pngBlob }),
-          ]);
-        }
+        // ⚠️ Tauri 1.x 的 clipboard API 只有文本能力（readText / writeText），
+        //    **没有 writeImage**（v2 的 clipboard-manager 插件才有）。
+        //    所以这里只能直接用 Web Clipboard API。
+        //    它是异步的、且要求用户手势激活 —— 本函数由右键菜单点击触发，满足该要求。
+        //    （v2 时这段代码原本是「先走原生 writeImage，失败才回退 Web 路径」。）
+        await navigator.clipboard.write([
+          new ClipboardItem({ "image/png": pngBlob }),
+        ]);
         message.success("已复制图片");
       } catch (err) {
         message.error(`复制图片失败：${err}`);

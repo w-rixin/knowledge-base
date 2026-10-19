@@ -31,7 +31,7 @@ import {
 import { ExternalLink, Folder, Trash2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/tauri";
 import { McpHttpSection } from "./McpHttpSection";
-import { open } from "@/lib/tauriShell";
+import { revealItemInDir } from "@/lib/tauriShell";
 import { MarkdownContent as Markdown } from "@/components/ai/MarkdownContent";
 import { save as saveDialog, open as openFileDialog } from "@tauri-apps/api/dialog";
 import { homeDir, join } from "@tauri-apps/api/path";

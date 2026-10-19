@@ -8,6 +8,8 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+# 隔离用的旧依赖目录（mv node_modules node_modules_xxx 后暂存的副本）
+node_modules_*/
 dist
 dist-ssr
 *.local

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { getCurrentWindow, type Window } from "@tauri-apps/api/window";
+import { getCurrentWindow, type Window } from "@/lib/tauriWindow";
 import { Minus, Square, Copy, X } from "lucide-react";
 import { theme as antdTheme } from "antd";
 

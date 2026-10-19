@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { Empty, App as AntdApp } from "antd";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { getCurrentWebviewWindow } from "@/lib/tauriWindow";
 import { MindMapView } from "@/components/notes/MindMapView";
 import { noteApi } from "@/lib/api";
 

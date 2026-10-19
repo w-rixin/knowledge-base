@@ -15,7 +15,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Input, Button, App as AntdApp, theme as antdTheme } from "antd";
 import type { InputRef } from "antd";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow } from "@/lib/tauriWindow";
 import { Sparkles, X } from "lucide-react";
 import { dailyApi } from "@/lib/api";
 

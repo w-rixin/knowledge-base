@@ -1,7 +1,9 @@
 import { Modal, Button, Progress, Typography, Space } from "antd";
 import { CheckCircleOutlined, SyncOutlined, DownloadOutlined } from "@ant-design/icons";
-import type { Update } from "@tauri-apps/api/updater";
-import { open } from "@/lib/tauriShell";
+import type { Update } from "@/lib/tauriUpdater";
+// ⚠️ 取别名：Props 里有 `open: boolean`（下面 Modal 的 open={open}），
+// 直接 import { open } 会被遮蔽。
+import { open as shellOpen } from "@/lib/tauriShell";
 import type { UpdatePhase } from "@/hooks/useUpdateChecker";
 
 const { Text, Paragraph } = Typography;
@@ -142,7 +144,7 @@ export function UpdateModal({
                   <Button
                     key={page.url}
                     block
-                    onClick={() => void open(page.url)}
+                    onClick={() => void shellOpen(page.url)}
                     style={{ textAlign: "left" }}
                   >
                     {page.label}

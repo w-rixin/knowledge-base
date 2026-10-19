@@ -3,7 +3,7 @@ import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { Layout, Button, theme as antdTheme, Tooltip, Dropdown, message } from "antd";
 import { SettingOutlined, PushpinOutlined, PushpinFilled } from "@ant-design/icons";
 import { Search, Palette, ArrowLeft, ArrowRight, PanelLeftClose, PanelLeftOpen, FilePlus2 } from "lucide-react";
-import { getCurrentWindow, type Window } from "@tauri-apps/api/window";
+import { getCurrentWindow, type Window } from "@/lib/tauriWindow";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/tauri";
 import { importApi } from "@/lib/api";

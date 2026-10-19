@@ -52,7 +52,7 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { ColumnsType } from "antd/es/table";
 import { open as openDialog, save } from "@tauri-apps/api/dialog";
-import { open } from "@/lib/tauriShell";
+import { revealItemInDir } from "@/lib/tauriShell";
 import { noteApi, exportApi, folderApi, tagApi, trashApi, vaultApi } from "@/lib/api";
 import { MicButton } from "@/components/MicButton";
 import { useContextMenu } from "@/hooks/useContextMenu";

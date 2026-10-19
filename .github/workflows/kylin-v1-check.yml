@@ -21,6 +21,9 @@ on:
       - tauri-v1
     paths:
       - 'src-tauri/**'
+      - 'src/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/kylin-v1-check.yml'
 
 jobs:

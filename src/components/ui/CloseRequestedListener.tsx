@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Modal, Checkbox, Button, Space, App as AntdApp } from "antd";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { emit } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow } from "@/lib/tauriWindow";
 import { configApi } from "@/lib/api";
 
 const CFG_KEY = "window.close_action";

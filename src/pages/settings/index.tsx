@@ -28,7 +28,10 @@ import { invoke } from "@tauri-apps/api/tauri";
 import dayjs, { type Dayjs } from "dayjs";
 import { TimePicker } from "antd";
 import { open } from "@tauri-apps/api/dialog";
-import { open } from "@/lib/tauriShell";
+// ⚠️ 必须取别名：上一行已从 dialog 导入了 open。原 v2 代码里这两个 open 分属
+// plugin-opener 与 plugin-dialog 两个包，天然不冲突；v1 下都叫 open，直接导入会
+// 撞名（TS2300 Duplicate identifier），且 URL 会被误当文件对话框参数。
+import { open as openUrl, revealItemInDir } from "@/lib/tauriShell";
 import { useLocation } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import type { AiModel, AiModelInput, AiModelTestResult, ImportResult, ImportConflictPolicy, ScannedFile, ExportResult, ExportProgress, NoteTemplate, NoteTemplateInput } from "@/types";
@@ -1526,7 +1529,7 @@ function DesktopSettingsPage() {
           <Button
             type="link"
             size="small"
-            onClick={() => open("https://kb.ruoyi.plus/")}
+            onClick={() => openUrl("https://kb.ruoyi.plus/")}
           >
             官网 https://kb.ruoyi.plus/
           </Button>
@@ -3063,7 +3066,7 @@ function DesktopSettingsPage() {
             type="link"
             size="small"
             icon={<ExternalLink size={14} />}
-            onClick={() => open(BILIBILI_URL)}
+            onClick={() => openUrl(BILIBILI_URL)}
           >
             打开
           </Button>
@@ -3087,7 +3090,7 @@ function DesktopSettingsPage() {
             type="link"
             size="small"
             icon={<ExternalLink size={14} />}
-            onClick={() => open(BILIBILI_TUTORIAL_URL)}
+            onClick={() => openUrl(BILIBILI_TUTORIAL_URL)}
           >
             打开
           </Button>

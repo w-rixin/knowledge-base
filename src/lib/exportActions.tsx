@@ -1,5 +1,5 @@
 import { save, open as openDialog } from "@tauri-apps/api/dialog";
-import { open } from "@/lib/tauriShell";
+import { revealItemInDir } from "@/lib/tauriShell";
 import { Modal, message } from "antd";
 
 import { exportApi } from "@/lib/api";

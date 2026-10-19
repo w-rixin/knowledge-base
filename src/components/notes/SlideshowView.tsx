@@ -18,7 +18,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { message, theme as antdTheme } from "antd";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import rehypeRaw from "rehype-raw";
-import { open } from "@/lib/tauriShell";
+// ⚠️ 必须取别名：本组件的 Props 里有一个 `open: boolean`，
+// 直接 import { open } 会被 prop 遮蔽，导致下方 open(...) 拿到的是 boolean。
+import { open as shellOpen } from "@/lib/tauriShell";
 import { MarkdownContent } from "@/components/ai/MarkdownContent";
 import { KB_ASSET_SCHEME, parseKbAsset } from "@/lib/assetUrl";
 import { systemApi } from "@/lib/api";
@@ -125,19 +127,19 @@ export function SlideshowView({ open, onClose, html, title }: Props) {
         const rel = parseKbAsset(href) ?? "";
         void systemApi
           .resolveAssetAbsolute(rel)
-          .then((abs) => open(abs))
+          .then((abs) => shellOpen(abs))
           .catch((e) => message.error(`打开附件失败: ${e}`));
       } else if (href.startsWith("file://")) {
         const path = decodeURIComponent(href.replace(/^file:\/\/\/?/, ""));
-        void open(path).catch((e) => message.error(`打开失败: ${e}`));
+        void shellOpen(path).catch((e) => message.error(`打开失败: ${e}`));
       } else if (
         /^https?:\/\//i.test(href) ||
         href.startsWith("mailto:") ||
         href.startsWith("tel:")
       ) {
-        void open(href).catch((e) => message.error(`打开链接失败: ${e}`));
+        void shellOpen(href).catch((e) => message.error(`打开链接失败: ${e}`));
       } else {
-        void open(href).catch((e) => message.error(`打开失败: ${e}`));
+        void shellOpen(href).catch((e) => message.error(`打开失败: ${e}`));
       }
     };
     dom.addEventListener("click", handler, true);

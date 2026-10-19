@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { Button, Spin, Tag } from "antd";
 import { AlertOctagon, Bell, BellOff, Check, X } from "lucide-react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow } from "@/lib/tauriWindow";
 import { taskApi } from "@/lib/api";
 import type { Task } from "@/types";
 import { startUrgentReminderLoop } from "@/lib/audio/reminderSound";

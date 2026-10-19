@@ -9,7 +9,9 @@ import {
   theme as antdTheme,
 } from "antd";
 import { FolderOpen, Maximize2, Minimize2 } from "lucide-react";
-import { open } from "@/lib/tauriShell";
+// ⚠️ 取别名：组件内 `open` 已被 useAttachmentPreviewStore 的状态占用（见 Modal 的 open={open}），
+// 直接 import { open } 会被遮蔽，openExternal 里拿到的会是 boolean。
+import { open as shellOpen } from "@/lib/tauriShell";
 import { convertFileSrc } from "@tauri-apps/api/tauri";
 import {
   useAttachmentPreviewStore,
@@ -87,7 +89,7 @@ export function AttachmentPreviewModal() {
   async function openExternal() {
     if (!absPath) return;
     try {
-      await open(absPath);
+      await shellOpen(absPath);
       close();
     } catch (e) {
       message.error(`打开失败：${e}`);

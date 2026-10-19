@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from "react";
-import type { Update } from "@tauri-apps/api/updater";
+import type { Update } from "@/lib/tauriUpdater";
+import { installUpdate, onUpdaterEvent } from "@/lib/tauriUpdater";
 import { relaunch } from "@tauri-apps/api/process";
 import { updaterApi } from "@/lib/api";
 import { flushSettingsToDisk } from "@/store";
@@ -45,8 +46,15 @@ interface Options {
  * - 下载完进入 ready，UI（徽章/Modal）提示「重启以更新」。
  * - 用户点重启时走 `install()`（复用已下载好的字节，不二次下载）+ `relaunch()`。
  *
- * Update 对象用 ref 跨渲染保活：download() 下好的字节绑定在这个实例上，
- * install() 必须用同一个实例才能复用，绝不能重新 check() 拿新实例。
+ * ⚠️ Tauri 1.x 降级说明（与上面 v2 描述有出入，务必先看这段）：
+ *   v1 **没有** Update 对象，也没有可分离的「下载」步骤 ——
+ *   installUpdate() 是「下载 + 安装」一条龙。因此：
+ *     - 做不到「后台静默预下载、用户点重启秒装」；
+ *     - 发现新版本后直接进入 ready（含义变为「可以安装了」，不是「已下载完」）；
+ *     - startDownload() 退化为幂等空操作，仅推进状态；
+ *     - 字节级进度拿不到（v1 只有 PENDING/ERROR/DONE/UPTODATE 四个粗状态），
+ *       progress / downloadedSize / totalSize 在 v1 下恒为 0。
+ *   UI 文案相应从「已下载完成，点击重启秒装」改为「点击安装并重启」。
  */
 export function useUpdateChecker(options: Options = {}) {
   const { initialDelay = 5000, interval = 30 * 60 * 1000, enabled = true } = options;
@@ -69,58 +77,61 @@ export function useUpdateChecker(options: Options = {}) {
     setPhaseState(p);
   }, []);
 
-  /** 后台下载更新包（只下载、不安装）。下载完进入 ready。 */
+  /**
+   * 后台下载更新包（v2 语义：只下载、不安装）。
+   *
+   * ⚠️ Tauri 1.x 下这是**降级实现**：v1 的 installUpdate() 把下载和安装合成一步，
+   *    不存在「先下好、待会儿再装」的中间态，所以这里拿不到字节进度，
+   *    也不真正发起任何网络请求 —— 只是把状态推进到 ready，其余保持幂等。
+   *
+   *    保留这个函数是为了让 runCheck / UpdateModal 的调用面不用改动。
+   */
   const startDownload = useCallback(async () => {
-    const u = updateRef.current;
-    if (!u) return;
-    // 正在下载 / 已下完 / 正在装，不重复触发。
-    if (phaseRef.current === "downloading" || phaseRef.current === "installing") return;
+    if (!updateRef.current) return;
+    // 正在装 / 已就绪，不重复触发。
+    if (phaseRef.current === "installing") return;
 
-    setPhase("downloading");
     setProgress(0);
     setDownloadedSize(0);
     setTotalSize(0);
     setError(null);
-
-    try {
-      let total = 0;
-      let done = 0;
-      await u.download((event) => {
-        if (event.event === "Started") {
-          total = event.data.contentLength ?? 0;
-          setTotalSize(total);
-        } else if (event.event === "Progress") {
-          done += event.data.chunkLength;
-          setDownloadedSize(done);
-          // contentLength 为权威总大小；累加值偶有虚高（tauri 进度事件特性），
-          // 百分比 clamp 到 100，避免出现「138%」「已下载 > 总」的观感问题。
-          if (total > 0) setProgress(Math.min(100, Math.round((done / total) * 100)));
-        } else if (event.event === "Finished") {
-          setProgress(100);
-        }
-      });
-      setPhase("ready");
-    } catch (e) {
-      setError(String(e));
-      setPhase("error");
-    }
+    setPhase("ready");
   }, [setPhase]);
 
-  /** 安装已下载好的更新并重启（秒装，复用 download() 的字节）。 */
+  /**
+   * 安装更新并重启。
+   *
+   * v1 与 v2 的差别：v2 是 u.install() 复用已下载字节；v1 是全局 installUpdate()，
+   * 它会在这一刻**现下载再安装** —— 所以这一步不再是「秒装」，可能要等一会儿。
+   */
   const installAndRelaunch = useCallback(async () => {
-    const u = updateRef.current;
-    if (!u || phaseRef.current !== "ready") return;
+    if (!updateRef.current) return;
+    if (phaseRef.current !== "ready" && phaseRef.current !== "error") return;
     setPhase("installing");
     setError(null);
+    let unlisten: (() => void) | undefined;
     try {
-      // install() 会拉起安装器，安装器为了替换 exe 必须先杀掉本进程 —— 此时还没落盘的
-      // 设置改动就永久丢了（用户观感就是"更新之后设置被重置"）。先同步刷一次。
+      // 安装器为了替换可执行文件必须先杀掉本进程 —— 此时还没落盘的设置改动
+      // 就永久丢了（用户观感就是"更新之后设置被重置"）。先同步刷一次。
       // 刷盘失败不该挡住更新：settings 是次要数据，装不上新版本才是大事。
       await flushSettingsToDisk().catch(() => {});
-      await u.install();
+      try {
+        // v1 只有 PENDING / ERROR / DONE / UPTODATE 四个粗粒度状态，没有字节进度，
+        // 这里用它把 UI 的进度条推到 100%，并捕获安装期错误。
+        unlisten = await onUpdaterEvent(({ status, error }) => {
+          if (status === "PENDING") setProgress(0);
+          else if (status === "DONE") setProgress(100);
+          else if (status === "ERROR") setError(error ?? "更新失败");
+        });
+      } catch {
+        // 订阅失败不阻断安装：进度条只是锦上添花。
+      }
+      await installUpdate();
+      unlisten?.();
       await relaunch();
     } catch (e) {
       // 安装失败回退到 ready，允许用户重试或走镜像手动下载。
+      unlisten?.();
       setError(String(e));
       setPhase("ready");
     }

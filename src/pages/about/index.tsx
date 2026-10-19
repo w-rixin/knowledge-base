@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Card, Typography, Descriptions, Spin, message, Modal, Button, Tooltip, Tag, Image } from "antd";
 import { SyncOutlined, SettingOutlined } from "@ant-design/icons";
 import { FolderOpen, ExternalLink } from "lucide-react";
-import { open } from "@/lib/tauriShell";
+import { open, revealItemInDir } from "@/lib/tauriShell";
 import { appLogDir } from "@tauri-apps/api/path";
 import type { SystemInfo } from "@/types";
 import { systemApi } from "@/lib/api";

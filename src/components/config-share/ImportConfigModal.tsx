@@ -100,7 +100,9 @@ export function ImportConfigModal({
     // 退路：如果 plugin 调用异常（例如开发服务器尚未注入 IPC），再尝试浏览器 API。
     let t = "";
     try {
-      t = await readClipboardText();
+      // v1 的 readText() 返回 Promise<string | null>（剪贴板为空时为 null）；
+      // v2 是 Promise<string>。这里补一个 ?? "" 抹平差异。
+      t = (await readClipboardText()) ?? "";
     } catch {
       try {
         t = await navigator.clipboard.readText();

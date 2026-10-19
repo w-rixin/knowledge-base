@@ -1,6 +1,6 @@
 import { Tooltip } from "antd";
 import { ArrowUpCircle, Download, RefreshCw } from "lucide-react";
-import type { Update } from "@tauri-apps/api/updater";
+import type { Update } from "@/lib/tauriUpdater";
 import type { UpdatePhase } from "@/hooks/useUpdateChecker";
 
 interface Props {
@@ -32,9 +32,12 @@ export function UpdateBadge({ update, phase, progress, onClick }: Props) {
       ? "rgba(22, 119, 255, 0.12)"
       : "rgba(250, 173, 20, 0.12)";
 
-  const label = ready ? "重启以更新" : downloading ? `下载中 ${progress}%` : "有可用更新";
+  // ⚠️ 文案按 Tauri 1.x 调整：v1 无法预下载，ready 的含义是「可以安装了」，
+  //    点下去会先下载再安装，不是「秒装」。downloading 分支在 v1 下不会走到
+  //    （保留是为了回切 v2 时不用再改）。
+  const label = ready ? "安装更新" : downloading ? `下载中 ${progress}%` : "有可用更新";
   const tip = ready
-    ? `新版本 v${update.version} 已下载完成，点击重启秒装`
+    ? `新版本 v${update.version} 已就绪，点击安装并重启（v1 下会先下载再安装）`
     : downloading
       ? `正在后台下载 v${update.version}（${progress}%）`
       : `发现新版本 v${update.version}，点击查看`;

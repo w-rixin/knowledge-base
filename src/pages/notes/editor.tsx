@@ -40,8 +40,8 @@ import {
 import { VaultModal } from "@/components/vault/VaultModal";
 import { open as openDialog, save } from "@tauri-apps/api/dialog";
 import { convertFileSrc } from "@tauri-apps/api/tauri";
-import { open } from "@/lib/tauriShell";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open, revealItemInDir } from "@/lib/tauriShell";
+import { getCurrentWindow } from "@/lib/tauriWindow";
 import { listen } from "@tauri-apps/api/event";
 import { relativeTime, stripHtml } from "@/lib/utils";
 import { buildTagTreeSelectData } from "@/lib/tagTree";
