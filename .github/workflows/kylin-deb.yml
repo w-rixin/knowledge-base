@@ -1,0 +1,163 @@
+# =============================================================================
+# 麒麟 / 飞腾 / 鲲鹏 aarch64 —— 只出 deb（Tauri 1.x）
+# =============================================================================
+#
+# 为什么单独开一个工作流，而不是直接用 release.yml：
+#   release.yml 是全平台矩阵（Windows + macOS×2 + Linux×2）。首次迁移到
+#   Tauri 1.x 的构建大概率还要踩几个坑，每次重试都跑 5 个平台既慢又互相干扰
+#   （尤其 Windows 的 NSIS 签名、macOS 的 cross target 与目标无关）。
+#   目标机只要 aarch64 deb，就单独构建一个快速迭代通道。
+#
+# 触发：推送 kylin-deb-* 标签，或在 Actions 页面手动 Run workflow
+#   git tag kylin-deb-20261019-1
+#   git push origin kylin-deb-20261019-1
+#
+# 🔴 为什么必须用 ubuntu-22.04-arm（不能用 24.04-arm）：
+#    Tauri 1.x 依赖 libwebkit2gtk-**4.0**-dev；Ubuntu 24.04 (noble) 已移除该
+#    开发包（只剩 4.0 运行时库）。jammy (22.04) 同时提供 4.0/4.1 两套 dev 包，
+#    官方支持到 2027-04。且目标机麒麟 V10 GFB 只有 4.0 运行时，
+#    编译侧必须对齐同一 ABI，否则链出 4.1 依赖照样装不上。
+# =============================================================================
+
+name: Kylin Deb (aarch64)
+
+on:
+  push:
+    tags:
+      - 'kylin-deb-*'
+  workflow_dispatch:
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Linux system dependencies (webkit2gtk-4.0 for Tauri 1.x)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.0-dev \
+            libjavascriptcoregtk-4.0-dev \
+            libsoup2.4-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential \
+            file \
+            patchelf
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      # ─── 为什么临时关掉 updater ─────────────────────────────────────────
+      # tauri.conf.json 里 tauri.updater.active = true。Tauri 1.x 在 updater
+      # 开启时会尝试给更新包签名，需要 TAURI_SIGNING_PRIVATE_KEY；
+      # 本仓库**没有配置该 secret**，会让 bundle 阶段直接失败。
+      #
+      # 这里构建的是"能装上、能跑"的目标产物，故先关掉 updater。
+      # 代价：这个 deb 装出来的应用不具备自动更新能力。
+      #
+      # 若要恢复自动更新，两条路之一：
+      #   1) 在仓库 Secrets 配上与 tauri.conf.json 里 updater.pubkey 匹配的
+      #      TAURI_SIGNING_PRIVATE_KEY / _PASSWORD，然后删掉本步骤；
+      #   2) 或把 updater.pubkey 换成自己生成的公钥再配私钥。
+      # 二者必须配套，否则应用会拒绝安装来源不明的更新。
+      - name: Temporarily disable updater (no signing key configured)
+        run: |
+          jq '.tauri.updater.active = false' src-tauri/tauri.conf.json > /tmp/tauri.conf.json
+          mv /tmp/tauri.conf.json src-tauri/tauri.conf.json
+          echo "已把 .tauri.updater.active 置为 false："
+          jq '.tauri.updater' src-tauri/tauri.conf.json
+
+      # kb-mcp sidecar：必须在 tauri build 之前生成。
+      # tauri.conf.json 的 bundle.externalBin 写的是 "binaries/kb-mcp"，
+      # Tauri 会按当前 target triple 展开成 binaries/kb-mcp-aarch64-unknown-linux-gnu，
+      # 找不到就报 "path matching binaries/kb-mcp-aarch64-unknown-linux-gnu not found."。
+      # 本机 runner 就是 aarch64，故不需要 --target（走 host triple）。
+      - name: Build kb-mcp sidecar
+        run: pnpm build:mcp
+
+      - name: Build deb (Tauri 1.x)
+        env:
+          # tauri build 的 beforeBuildCommand 会跑 vite build。自 v1.50.0 引入
+          # Excalidraw 后前端涨到 9600+ 模块，terser 压缩阶段堆峰值会越过 Node
+          # 默认的 ~2GB 上限（macOS runner 上实测 collapse 到 "FATAL ERROR:
+          # Reached heap limit"，exit 134）。显式放宽覆盖全平台。
+          NODE_OPTIONS: '--max-old-space-size=8192'
+        run: |
+          set +e
+          pnpm tauri build --bundles deb > /tmp/build.log 2>&1
+          STATUS=$?
+          set -e
+
+          # 剥离 ANSI 转义序列：环境里若有 CARGO_TERM_COLOR=always，
+          # 日志行首会是 \033[31m 之类，`grep "^error"` 永远匹配不到，
+          # 会误报成「失败但 0 错误」（本项目踩过，误导了两轮排查）。
+          sed -i 's/\x1b\[[0-9;]*[a-zA-Z]//g' /tmp/build.log
+
+          echo "===== tauri build 退出码: ${STATUS} ====="
+          echo "===== error 行数: $(grep -c '^error' /tmp/build.log || true) ====="
+          echo ""
+          echo "===== 错误详情（每条带 12 行上下文）====="
+          grep -E -A12 '^error(\[[A-Z0-9]+\])?(:|\[)' /tmp/build.log | head -240 || true
+          echo ""
+          echo "===== 最后 80 行（看失败发生在哪一步）====="
+          tail -80 /tmp/build.log
+          exit ${STATUS}
+
+      - name: Locate deb
+        id: deb
+        run: |
+          set -euo pipefail
+          ls -la src-tauri/target/release/bundle/deb/ || true
+          DEB=$(find src-tauri/target -name '*.deb' -type f | head -1)
+          if [ -z "${DEB}" ]; then
+            echo "❌ 未找到任何 .deb 产物"
+            echo "===== bundle 目录树 ====="
+            find src-tauri/target -maxdepth 4 -type d -name 'bundle*' -exec ls -la {} \; || true
+            exit 1
+          fi
+          echo "path=${DEB}" >> "$GITHUB_OUTPUT"
+          echo "✅ 产物: ${DEB}"
+          ls -lh "${DEB}"
+          file "${DEB}" || true
+
+      - name: Upload deb artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kylin-aarch64-deb
+          path: src-tauri/target/release/bundle/deb/*.deb
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kylin-deb-build-log
+          path: /tmp/build.log
+          retention-days: 7
+          if-no-files-found: ignore
