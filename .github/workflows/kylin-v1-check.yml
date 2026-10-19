@@ -154,6 +154,34 @@ jobs:
           echo ""
           echo "===== 出错文件清单（按文件聚合）====="
           grep -oE '^\s+--> [^:]+' /tmp/check.log | sed 's/.*--> //' | sort | uniq -c | sort -rn | head -30 || true
+
+          if [ ${STATUS} -ne 0 ]; then
+            # 免认证读日志的唯一通道：把失败摘要写成 check-run 注解
+            # （与 kylin-deb.yml 完全同一机制）。
+            # 背景：Actions 日志下载、artifact 下载都要认证，本机没有可用 token；
+            # 免认证能读的只有 run/job/step 状态、artifacts 列表、check-run 注解。
+            # annotate() 负责把多行文本编码成单行 workflow command：
+            #   % → %25 先行转义，换行 → %0A；否则只有第一行会成为注解、
+            #   其余沦为普通输出（kylin-deb.yml run 4 实测确认）。
+            # 除了 error 行，还带：工具链版本、日志前 30 行（看死在哪个阶段——
+            # 依赖解析 / build.rs / 编译）、日志尾 60 行（看卡在哪个 crate）。
+            annotate() {
+              sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}'
+            }
+            MSG=$( {
+              echo "[cargo-check] cargo check --all-targets 失败，退出码 ${STATUS}"
+              echo "----- 工具链版本 -----"
+              cargo --version || true
+              rustc --version || true
+              echo "----- 日志前 30 行（依赖解析 / 环境阶段）-----"
+              head -30 /tmp/check.log
+              echo "----- error 行（每条带 10 行上下文）-----"
+              grep -E -A10 '^error(\[[A-Z0-9]+\])?(:|\[)' /tmp/check.log | head -100 || true
+              echo "----- 日志最后 60 行（看卡在哪个 crate/目标）-----"
+              tail -60 /tmp/check.log
+            } | annotate )
+            echo "::error::${MSG}"
+          fi
           exit ${STATUS}
 
       - name: Upload full check log
