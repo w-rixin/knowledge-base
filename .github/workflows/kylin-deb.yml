@@ -74,7 +74,8 @@ jobs:
       # ─── 为什么临时关掉 updater ─────────────────────────────────────────
       # tauri.conf.json 里 tauri.updater.active = true。Tauri 1.x 在 updater
       # 开启时会尝试给更新包签名，需要 TAURI_SIGNING_PRIVATE_KEY；
-      # 本仓库**没有配置该 secret**，会让 bundle 阶段直接失败。
+      # 本仓库**没有配置该 secret**，会让 bundle 阶段直接失败
+      # （tauri-cli build.rs: "A public key has been found, but no private key"）。
       #
       # 这里构建的是"能装上、能跑"的目标产物，故先关掉 updater。
       # 代价：这个 deb 装出来的应用不具备自动更新能力。
@@ -84,12 +85,33 @@ jobs:
       #      TAURI_SIGNING_PRIVATE_KEY / _PASSWORD，然后删掉本步骤；
       #   2) 或把 updater.pubkey 换成自己生成的公钥再配私钥。
       # 二者必须配套，否则应用会拒绝安装来源不明的更新。
+      #
+      # 🔴 只改 conf 不够，必须同步摘掉 Cargo.toml 里 tauri 的 "updater" feature：
+      #    tauri-build 的 allowlist 校验（tauri-build/src/allowlist.rs::check，
+      #    由 build() 在 line 432 调用）要求 Cargo features 与 tauri.conf.json
+      #    **精确一一对应**。tauri-utils 的 TauriConfig::features() 只在
+      #    `updater.active == true` 时才产出 "updater"：
+      #        if self.updater.active { features.push("updater"); }
+      #    于是 conf 关掉、Cargo.toml 还开着 → features_diff 报
+      #        The `tauri` dependency features on the `Cargo.toml` file does not
+      #        match the allowlist defined under `tauri.conf.json`.
+      #        ... remove the `updater` feature
+      #    build() 收到 Err 后直接 std::process::exit(1) → cargo build 失败。
+      #    （kylin-v1-check.yml 不碰 conf，所以从来撞不到这条。）
       - name: Temporarily disable updater (no signing key configured)
         run: |
           jq '.tauri.updater.active = false' src-tauri/tauri.conf.json > /tmp/tauri.conf.json
           mv /tmp/tauri.conf.json src-tauri/tauri.conf.json
-          echo "已把 .tauri.updater.active 置为 false："
-          jq '.tauri.updater' src-tauri/tauri.conf.json
+          # 同步摘 feature。行格式已核实唯一（Cargo.toml:102 `  "updater",`），
+          # 锚定行首行尾防误伤；Cargo.lock 不记录 feature，故无需重新生成锁。
+          sed -i '/^  "updater",$/d' src-tauri/Cargo.toml
+          echo "updater.active = $(jq '.tauri.updater.active' src-tauri/tauri.conf.json)"
+          if grep -n '^  "updater",$' src-tauri/Cargo.toml; then
+            echo "::error::Cargo.toml 的 updater feature 未摘除，build.rs 的 allowlist 校验必失败"
+            exit 1
+          else
+            echo "Cargo.toml 的 updater feature 已摘除"
+          fi
 
       # kb-mcp sidecar：必须在 tauri build 之前生成。
       # tauri.conf.json 的 bundle.externalBin 写的是 "binaries/kb-mcp"，
@@ -171,6 +193,47 @@ jobs:
             ls -la src-tauri/binaries/ 2>/dev/null || echo "(sidecar 未生成)"
           fi
           exit ${STATUS}
+
+      # ─── 失败时把日志推到独立分支，供免认证读取 ───────────────────────
+      # 背景：Actions 日志与 artifact 下载都要求认证，而本机没有可用 token
+      # （用户给的 PAT 已删除）。免认证能读到的只有：run 状态、job 状态、
+      # 每一步的 conclusion、artifacts 列表。job 的 outputs 字段不返回。
+      #
+      # 所以让 CI 自己把日志写进仓库的 ci-debug-logs 分支：
+      #   - 公开仓库的 contents API 免认证可读，立刻能拿到日志全文；
+      #   - 推的是独立分支，不会污染 tauri-v1，也不会触发任何工作流
+      #     （kylin-v1-check.yml 只监听 tauri-v1 分支且带 paths 过滤，
+      #      kylin-deb.yml 只监听 tag）。
+      # 定位完成后删掉这个分支即可。
+      - name: 失败时推送日志到 ci-debug-logs 分支
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 日志文件名必须和上面两步的写入路径一致：
+          #   Build step 2/3 → /tmp/cargo.log
+          #   Build step 3/3 → /tmp/build.log
+          for f in /tmp/cargo.log /tmp/build.log; do
+            [ -s "$f" ] && sed -i 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$f"
+          done
+          mkdir -p .ci-logs
+          TS=$(date +%Y%m%d-%H%M%S)
+          for f in /tmp/cargo.log /tmp/build.log; do
+            if [ -s "$f" ]; then
+              cp "$f" ".ci-logs/${TS}-$(basename $f)"
+            fi
+          done
+          if [ -z "$(ls -A .ci-logs 2>/dev/null)" ]; then
+            echo "没有可推送的日志（两步都未生成 /tmp/cargo.log 或 /tmp/build.log）"
+            exit 0
+          fi
+          git config user.name "ci-debug"
+          git config user.email "ci-debug@users.noreply.github.com"
+          git checkout -B ci-debug-logs
+          git add -f .ci-logs
+          git commit -m "ci: ${TS} 构建失败日志 (run ${{ github.run_id }})" || echo "无新内容可提交"
+          git push -f origin ci-debug-logs
+          echo "已推送到 ci-debug-logs 分支"
 
       - name: Locate deb
         id: deb

@@ -122,17 +122,18 @@ jobs:
         #      改：显式 CARGO_TERM_COLOR=never + sed 兜底剥离 ANSI。
         env:
           CARGO_TERM_COLOR: never
-          # tauri 的 tauri-build / 宏在编译期需要 TAURI_ENV_TARGET_TRIPLE。
-          # 正常走 `tauri build` 时由 CLI 注入；这里直接调 cargo check，
-          # 缺它会导致宏展开失败，进而产生大量**连带**的 "cannot find xxx in tauri"
-          # 假错误（api 模块没生成）。必须显式补上。
-          TAURI_ENV_TARGET_TRIPLE: aarch64-unknown-linux-gnu
           # 本 job 只做 cargo check（不打包），无需 sidecar 二进制。
           # 但 build.rs 会校验 bundle.externalBin 指向的文件是否存在，缺失即报
           #   path matching binaries/kb-mcp-aarch64-unknown-linux-gnu not found.
           # 用 TAURI_CONFIG 局部覆盖成空数组即可跳过该校验（JSON 浅合并，
           # 不影响其余配置）。真正打包时由 release.yml 先 pnpm build:mcp 生成。
           TAURI_CONFIG: '{"tauri":{"bundle":{"externalBin":[]}}}'
+          # 曾经这里还设过 TAURI_ENV_TARGET_TRIPLE=aarch64-unknown-linux-gnu，
+          # 并附注"tauri 宏编译期需要它"——那个归因是错的。真实情况：
+          # 读它的是项目自己的 src/commands/mcp.rs（env! 拼 sidecar 文件名），
+          # 且 tauri CLI 注入的名字是 TAURI_TARGET_TRIPLE（另一个变量）。
+          # 现已改为 build.rs 用 cargo:rustc-env 转发 TARGET → KB_TARGET_TRIPLE，
+          # 全路径（cargo check / cargo build / tauri build）无需任何环境变量。
         run: |
           set +e
           cargo check --all-targets > /tmp/check.log 2>&1

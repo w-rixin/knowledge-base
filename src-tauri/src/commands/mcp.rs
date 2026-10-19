@@ -21,9 +21,15 @@ use serde_json::Value as JsonValue;
 use crate::models::{McpServer, McpServerInput};
 use crate::state::AppState;
 
-/// 主应用编译时被 tauri-build 注入的 target triple，
-/// 用来构造 sidecar binary 名字（与 scripts/build-mcp.mjs 的命名一致）
-const TARGET_TRIPLE: &str = env!("TAURI_ENV_TARGET_TRIPLE");
+/// 主应用编译时的 target triple，由本 crate 的 build.rs 通过
+/// `cargo:rustc-env=KB_TARGET_TRIPLE` 转发（cargo 只保证 build script 能读到
+/// TARGET，crate 源码里 env!("TARGET") 无文档保证，故绕一圈）。
+/// 用来构造 sidecar binary 名字（与 scripts/build-mcp.mjs 的命名一致）。
+///
+/// 🔴 勿改回 env!("TAURI_ENV_TARGET_TRIPLE")：那个名字没有任何工具链组件会
+/// 注入（tauri CLI 注入的是 TAURI_TARGET_TRIPLE），当年靠各流水线手工设环境
+/// 变量兜着，release.yml 漏设直接编译失败。详见 build.rs 里的说明。
+const TARGET_TRIPLE: &str = env!("KB_TARGET_TRIPLE");
 
 /// app_config 里持久化"AI 是否允许写"的 key。默认值缺失视为 true，
 /// 兼容老版本——升级前 in-memory MCP 永远 writable，不能升级后突然把用户的 AI 锁死。

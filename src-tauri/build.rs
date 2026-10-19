@@ -16,5 +16,22 @@ fn main() {
         println!("cargo:rerun-if-changed=mac/ocr_vision.m");
     }
 
+    // 把 cargo 给 build script 的 TARGET 转发成编译期常量 KB_TARGET_TRIPLE，
+    // 供 src/commands/mcp.rs 拼 kb-mcp sidecar 的文件名（binaries/kb-mcp-<triple>）。
+    //
+    // 为什么必须绕 build.rs 这一圈（历史教训，勿改回 env!("TAURI_ENV_TARGET_TRIPLE")）：
+    //   - Cargo 文档只保证 build script 能读到 TARGET，**不保证** crate 源码里
+    //     env!("TARGET") 可用；
+    //   - tauri CLI 注入给 cargo 子进程的是 TAURI_TARGET_TRIPLE（另一个名字），
+    //     而直接 `cargo build` / `cargo check` 时谁都不注入；
+    //   - 原代码写的是 env!("TAURI_ENV_TARGET_TRIPLE") —— 一个没有任何工具链
+    //     组件会设置的名字，导致每条流水线都得手动补环境变量：check 工作流补了、
+    //     release.yml 没补 → 发布管线直接编译失败。
+    // cargo:rustc-env 是文档保证的机制，cargo check / cargo build / tauri build
+    // 全路径统一生效，无需任何环境变量注入。
+    let target = std::env::var("TARGET")
+        .expect("build.rs 只在 cargo 下运行，TARGET 必然由 cargo 注入");
+    println!("cargo:rustc-env=KB_TARGET_TRIPLE={target}");
+
     tauri_build::build()
 }
