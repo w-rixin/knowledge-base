@@ -199,6 +199,24 @@ jobs:
       - name: Build step 3/3 — Tauri 打包 deb
         env:
           NODE_OPTIONS: '--max-old-space-size=8192'
+          # 🔴 麒麟 V10 装不上 deb 的根因与修法（2026-10-19 目标机实测报错实锤）：
+          #    「knowledge-base依赖关系不满足libayatana-appindicator3-1」
+          # 机制（tauri-cli 1.6.6 源码实锤，src/interface/rust.rs:1092-1099）：
+          #    有系统托盘配置时，tauri-cli 自动往 deb 的 Depends 推包名，
+          #    默认推 libayatana-appindicator3-1：
+          #      let tray = std::env::var("TAURI_TRAY").unwrap_or("ayatana");
+          #      if tray == "ayatana" { depends_deb.push("libayatana-appindicator3-1") }
+          #      else                   { depends_deb.push("libappindicator3-1") }
+          #    麒麟 V10 是 focal(20.04) 底，仓库只有 libappindicator3-1；
+          #    libayatana-appindicator3-1 要 Ubuntu 21.04+/Debian 11 才有。
+          # 🔴 这只是**元数据层**的包名，不影响二进制本身：
+          #    libappindicator-sys 0.7.3 是运行时 dlopen（Library::new，
+          #    src/lib.rs:13-55）：先试 libayatana-appindicator3.so.1，
+          #    失败回退 libappindicator3.so.1。所以麒麟装 libappindicator3-1
+          #    后，托盘经回退路径正常工作，无需任何符号链接 hack。
+          #    设成 appindicator 只是让 Depends 写上麒麟认识的包名，
+          #    dpkg -i 一把过；运行时若目标机有 ayatana 仍优先用它。
+          TAURI_TRAY: appindicator
         run: |
           set +e
           # --verbose：打包器的报错（资源缺失 / dpkg 调用 / 图标）比
@@ -263,6 +281,26 @@ jobs:
               git -C src-tauri diff -- Cargo.toml | head -30 || true
             } | annotate )
             echo "::error::${MSG}"
+          fi
+
+          if [ ${STATUS} -eq 0 ]; then
+            # 成功时把 deb 的控制字段写成 ::notice:: 注解——免认证可读
+            # （check-runs annotations API 返回全部 level），不必下载 51 MB
+            # 就能确认 Depends 已经是麒麟 V10 认识的包名。
+            # 重点核对 Depends 里是 libappindicator3-1 而不是
+            # libayatana-appindicator3-1（TAURI_TRAY 是否生效的直接证据）。
+            annotate() {
+              sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}'
+            }
+            DEB=$(ls src-tauri/target/release/bundle/deb/*.deb 2>/dev/null | head -1)
+            if [ -n "$DEB" ]; then
+              MSG=$( {
+                echo "[deb-bundle] 打包成功，deb 控制字段："
+                dpkg-deb -f "$DEB" Package Version Architecture Depends Installed-Size
+                echo "文件: $(basename "$DEB") ($(stat -c %s "$DEB") bytes)"
+              } | annotate )
+              echo "::notice::${MSG}"
+            fi
           fi
           exit ${STATUS}
 
