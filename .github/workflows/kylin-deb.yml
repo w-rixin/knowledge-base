@@ -264,11 +264,15 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-          BIN=target/release/knowledge-base
-          if [ ! -x "${BIN}" ]; then
-            echo "::error::[abi] 未找到可执行文件 ${BIN}"
+          # 🔴 Cargo 编出的产物是 knowledge_base（下划线）；tauri 打包后才
+          #    改名成 knowledge-base（连字符）放进 deb。所以这里查下划线那个。
+          BIN=$(find target/release -maxdepth 1 -type f \( -name 'knowledge_base' -o -name 'knowledge-base' \) | head -1)
+          if [ -z "${BIN}" ]; then
+            echo "::error::[abi] 未找到可执行文件（target/release/knowledge_base 与 knowledge-base 都不存在）"
+            ls -la target/release 2>/dev/null | head -30 || true
             exit 1
           fi
+          echo "===== 待测二进制: ${BIN} ====="
 
           echo "===== DT_NEEDED ====="
           objdump -p "${BIN}" | awk '$1=="NEEDED"{print "  "$2}'
