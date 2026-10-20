@@ -37,9 +37,58 @@ on:
 
 jobs:
   build-deb:
+    # 🔴 为什么是「22.04 的机器 + 20.04 的容器」（2026-10-20 目标机实锤）：
+    #    run 9 的 deb 装到麒麟 V10 上一启动就崩：
+    #        /usr/bin/knowledge-base: error while loading shared libraries:
+    #        libssl.so.3: cannot open shared object file
+    #    本地解析该二进制（ar→data.tar→ELF 动态段）实锤它需要：
+    #        libssl.so.3 + libcrypto.so.3（OpenSSL 3.0）
+    #        且引用 GLIBC_2.32 / 2.33 / 2.34 符号
+    #    而麒麟 V10 GFB 是 focal 底：glibc 2.31 + OpenSSL 1.1.1，两样都没有。
+    #    更隐蔽的是 tauri-bundler 的 deb Depends 只硬编码
+    #    libwebkit2gtk-4.0-37 / libgtk-3-0 这类，**不含 libssl3**，
+    #    所以表现为"装得上、跑不起来"，apt -f install 也查不出问题。
+    #    修法：整个 job 进 ubuntu:20.04 容器（arm64 原生，无 qemu），
+    #    产物天然对齐 glibc 2.31 + libssl.so.1.1，与目标机同代。
+    #    20.04 的 GitHub 托管 runner 已退役，故借 22.04-arm 的机器跑 20.04 容器。
+    #    容器内默认 root，下面所有 apt 均不带 sudo。
     runs-on: ubuntu-22.04-arm
+    container:
+      image: ubuntu:20.04
+      options: --user root
     timeout-minutes: 90
     steps:
+      # 🔴 必须第一步：裸 ubuntu:20.04 镜像里没有 git，而 actions/checkout
+      #    就要用它。JS 类 action 所需的 node 由 Actions 注入
+      #    （挂在 /__e/node20），只要求镜像 glibc ≥ 2.28，focal 的 2.31 满足。
+      #    xz-utils 必须装：actions/setup-node 下发的 Node 是 .tar.xz，
+      #    裸镜像的 GNU tar 没有 xz 支持会解压失败。
+      - name: Install build toolchain (focal base)
+        shell: bash
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            git curl ca-certificates jq file patchelf zstd python3 openssl xz-utils \
+            libwebkit2gtk-4.0-dev \
+            libjavascriptcoregtk-4.0-dev \
+            libsoup2.4-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev
+          # libappindicator3-dev 与 libayatana-appindicator3-dev 在 22.04 上
+          # 互相 Conflicts（run 7 实锤），只装前者。编译期其实两者都不需要
+          # （libappindicator-sys 0.7.3 纯 dlopen），dev 包只为
+          # TAURI_TRAY=appindicator 时 tauri-cli 打包期的 pkg-config 探测
+          # 提供 appindicator3-0.1.pc。focal 仓库同样只有 libappindicator3-dev，
+          # 与麒麟 V10 的包名一致。
+          echo "===== 基线版本（必须是 glibc 2.31 / OpenSSL 1.1.1）====="
+          ldd --version | head -1
+          openssl version
+          ls -l /usr/lib/aarch64-linux-gnu/libssl.so* /usr/lib/aarch64-linux-gnu/libcrypto.so* 2>/dev/null || true
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -52,30 +101,6 @@ jobs:
         uses: pnpm/action-setup@v4
         with:
           version: 9
-
-      - name: Install Linux system dependencies (webkit2gtk-4.0 for Tauri 1.x)
-        run: |
-          sudo apt-get update
-          # 🔴 libappindicator3-dev 与 libayatana-appindicator3-dev 在 Ubuntu
-          #    22.04 上互相 Conflicts，不能共存（run 7 实锤：
-          #    "libayatana-appindicator3-dev : Conflicts: libappindicator3-dev"）。
-          #    而且编译期根本不需要任何 appindicator dev 包：
-          #    tauri-runtime-wry → tao → libappindicator → libappindicator-sys
-          #    是纯 dlopen（无 build.rs、无 pkg-config）。dev 包只为
-          #    TAURI_TRAY=appindicator 时 tauri-cli 打包期的探测提供
-          #    appindicator3-0.1.pc（见下面 TAURI_TRAY 注释），所以只装
-          #    libappindicator3-dev，不装 ayatana 的。
-          sudo apt-get install -y \
-            libwebkit2gtk-4.0-dev \
-            libjavascriptcoregtk-4.0-dev \
-            libsoup2.4-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            libxdo-dev \
-            libssl-dev \
-            build-essential \
-            file \
-            patchelf
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -91,6 +116,27 @@ jobs:
 
       - name: Install frontend dependencies
         run: pnpm install
+
+      # 🔴 预编译 CLI 的 glibc 兼容性早探（1 分钟内出结论，别等 12 分钟才炸）：
+      #    @tauri-apps/cli 1.6.x 的 arm64 产物是**预编译二进制**
+      #    （@tauri-apps/cli-linux-arm64-gnu），它自己也要动态加载 glibc。
+      #    若它是在 22.04+ 上编的，在 focal 容器里会报
+      #        ".../cli-linux-arm64-gnu: /lib/aarch64-linux-gnu/libc.so.6:
+      #         version `GLIBC_2.34' not found"
+      #    这一步就是把这个失败提前暴露并给出明确修法，而不是让它伪装成
+      #    "前端构建失败"。
+      - name: Probe prebuilt tauri CLI on focal
+        shell: bash
+        run: |
+          set +e
+          pnpm tauri --version 2>&1
+          RC=$?
+          set -e
+          if [ ${RC} -ne 0 ]; then
+            echo "::error::[cli] @tauri-apps/cli 的预编译 arm64 二进制在 focal(glibc 2.31) 上跑不起来。"
+            echo "::error::[cli] 修法：改为在容器内 cargo install tauri-cli --version ^1.6 --locked，并用 cargo tauri 代替 pnpm tauri。"
+            exit 1
+          fi
 
       # ─── 为什么临时关掉 updater ─────────────────────────────────────────
       # tauri.conf.json 里 tauri.updater.active = true。Tauri 1.x 在 updater
@@ -204,6 +250,64 @@ jobs:
             echo "::error::${MSG}"
           fi
           exit ${STATUS}
+
+      # 🔴 打包前的 ABI 硬闸（run 9 的教训：脱靶的二进制绝不该被打进 deb）
+      #    run 9 的 deb 在麒麟上启动即崩（libssl.so.3 缺失），而
+      #    dpkg -i / apt -f install 全绿——因为 Depends 里根本没声明 OpenSSL。
+      #    这里在 focal 容器内（库与目标机同代）做三项校验，任一不过即失败：
+      #      a) DT_NEEDED 不得出现 libssl.so.3 / libcrypto.so.3
+      #      b) 引用的最高 GLIBC 符号版本 ≤ GLIBC_2.31
+      #      c) ldd 不得有 "not found"
+      #    这样"能不能在麒麟上加载"在 CI 里就有确定性答案。
+      - name: Verify ABI baseline (glibc 2.31 / OpenSSL 1.1.1)
+        working-directory: src-tauri
+        shell: bash
+        run: |
+          set -uo pipefail
+          BIN=target/release/knowledge-base
+          if [ ! -x "${BIN}" ]; then
+            echo "::error::[abi] 未找到可执行文件 ${BIN}"
+            exit 1
+          fi
+
+          echo "===== DT_NEEDED ====="
+          objdump -p "${BIN}" | awk '$1=="NEEDED"{print "  "$2}'
+
+          if objdump -p "${BIN}" | grep -qE 'NEEDED.*lib(ssl|crypto)\.so\.3'; then
+            echo "::error::[abi] 二进制仍链接 OpenSSL 3.x（libssl.so.3/libcrypto.so.3）；麒麟 V10 只有 1.1.1"
+            exit 1
+          fi
+          if objdump -p "${BIN}" | grep -q 'NEEDED.*libssl\.so\.1\.1'; then
+            echo "✅ 链接 libssl.so.1.1（OpenSSL 1.1.1，与麒麟 V10 一致）"
+          else
+            echo "::warning::[abi] 未见 libssl.so.1.1 —— 若已改用 rustls/静态链接属正常，但需目标机实测"
+          fi
+
+          MAXG=$(objdump -T "${BIN}" 2>/dev/null | grep -o 'GLIBC_2\.[0-9]\+' | sort -V | tail -1)
+          MAXG=${MAXG:-GLIBC_2.17}
+          echo "===== 最高 GLIBC 符号版本: ${MAXG} ====="
+          if [ "$(printf 'GLIBC_2.31\n%s\n' "${MAXG}" | sort -V | tail -1)" != "GLIBC_2.31" ]; then
+            echo "::error::[abi] 二进制要求 ${MAXG}，超出麒麟 V10 的 GLIBC_2.31——编译基线不对"
+            exit 1
+          fi
+
+          echo "===== ldd（focal 运行时库解析情况）====="
+          MISSING=$(ldd "${BIN}" | grep 'not found' || true)
+          if [ -n "${MISSING}" ]; then
+            echo "${MISSING}"
+            echo "::error::[abi] 存在无法解析的运行时库（见上），目标机同样会失败"
+            exit 1
+          fi
+          echo "✅ ABI 基线通过：glibc≤2.31、无 OpenSSL 3.x、ldd 全解析"
+
+          MSG=$( {
+            echo "[abi] ABI 基线通过（focal / glibc≤2.31）"
+            echo "最高 GLIBC: ${MAXG}"
+            echo -n "DT_NEEDED: "
+            objdump -p "${BIN}" | awk '$1=="NEEDED"{printf "%s ", $2}'
+            echo
+          } | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}' )
+          echo "::notice::${MSG}"
 
       - name: Build step 3/3 — Tauri 打包 deb
         env:
