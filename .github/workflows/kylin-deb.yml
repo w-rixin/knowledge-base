@@ -510,20 +510,24 @@ jobs:
 
       - name: Locate deb
         id: deb
+        shell: bash
         run: |
-          set -euo pipefail
-          ls -la src-tauri/target/release/bundle/deb/ || true
-          DEB=$(find src-tauri/target -name '*.deb' -type f | head -1)
-          if [ -z "${DEB}" ]; then
+          # 🔴 不能用 `find ... -type f | head -1` + pipefail：find 遍历
+          #    target/ 海量目录时可能返回非零（exit 2），pipefail 把它透传成
+          #    脚本退出码，导致 job 红（run 11 踩过——deb 其实已打好）。
+          #    改用 bash 数组 + nullglob，与 step 3/3 里已验证可用的
+          #    `ls .../*.deb` 同款通配符逻辑。
+          shopt -s nullglob
+          DEB=(src-tauri/target/release/bundle/deb/*.deb)
+          if [ ${#DEB[@]} -eq 0 ]; then
             echo "❌ 未找到任何 .deb 产物"
-            echo "===== bundle 目录树 ====="
-            find src-tauri/target -maxdepth 4 -type d -name 'bundle*' -exec ls -la {} \; || true
+            find src-tauri/target -maxdepth 4 -type d -name 'bundle*' 2>/dev/null || true
             exit 1
           fi
-          echo "path=${DEB}" >> "$GITHUB_OUTPUT"
-          echo "✅ 产物: ${DEB}"
-          ls -lh "${DEB}"
-          file "${DEB}" || true
+          echo "path=${DEB[0]}" >> "$GITHUB_OUTPUT"
+          echo "✅ 产物: ${DEB[0]}"
+          ls -lh "${DEB[0]}"
+          file "${DEB[0]}" || true
 
       - name: Upload deb artifact
         if: always()
