@@ -24,6 +24,8 @@ on:
       - 'src/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'scripts/**'
       - '.github/workflows/kylin-v1-check.yml'
 
 jobs:
