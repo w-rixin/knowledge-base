@@ -10,6 +10,8 @@ lerna-debug.log*
 node_modules
 # 隔离用的旧依赖目录（mv node_modules node_modules_xxx 后暂存的副本）
 node_modules_*/
+# 同样为临时副本（点号变体，如 node_modules.bak.20261021）
+node_modules.*/
 dist
 dist-ssr
 *.local

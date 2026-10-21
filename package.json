@@ -15,7 +15,8 @@
     "build:mcp": "node scripts/build-mcp.mjs",
     "build:mcp:debug": "node scripts/build-mcp.mjs --debug",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "postinstall": "node scripts/apply-es2018-patches.mjs"
   },
   "dependencies": {
     "@ant-design/icons": "^6.1.0",
@@ -95,5 +96,10 @@
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
     "vitest": "^4.1.10"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }
