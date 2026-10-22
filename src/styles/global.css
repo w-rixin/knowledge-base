@@ -2992,3 +2992,44 @@ body,
 .sidebar-folder-tree.kb-tree-guides .ant-tree-indent:not(:empty) ~ .ant-tree-switcher-noop::before {
   width: 14px;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   自动性能模式 —— 软件渲染下剥离昂贵的 backdrop-filter 毛玻璃
+   ───────────────────────────────────────────────────────────────────────────
+   由 src/lib/perfMode.ts 探测软件渲染后给 <html> 打 data-perf="on" 触发；
+   有 GPU 的机器为 data-perf="off"，下面规则全部不命中，毛玻璃观感原样保留。
+
+   为什么值得：light-glass 主题给每个 .ant-card / 侧栏 / 顶栏上 20px 高斯模糊、
+   SidePanel 内联 10px——有 GPU 时近乎免费，llvmpipe 软件光栅化下却是逐帧全区域
+   着色器开销，滚动卡片列表 / 拖动浮层时的主要卡顿源。
+
+   特异性说明：主题规则形如 `[data-theme="light-glass"] .ant-card`（0,2,0）+!important，
+   这里用 `[data-perf="on"][data-perf="on"]`（叠加两个属性选择器）把总特异性顶到
+   (0,3,0) 稳赢，且不依赖加载顺序。SidePanel 的模糊是 React 内联 backdropFilter
+   （非 !important），样式表的 !important 声明可压过它。仅置 backdrop-filter，
+   不动各容器已由主题设好的 background，观感从"磨砂"变"半透明纯色"，可读性不变。
+   ═══════════════════════════════════════════════════════════════════════════ */
+[data-perf="on"][data-perf="on"] {
+  /* 兜底：任何仍引用该变量但未在上面逐个列名的元素一起归零 */
+  --kb-glass-blur: 0px;
+}
+
+[data-perf="on"][data-perf="on"] .ant-card,
+[data-perf="on"][data-perf="on"] .ant-layout-sider,
+[data-perf="on"][data-perf="on"] .ant-layout-header,
+[data-perf="on"][data-perf="on"] .side-panel-enter,
+[data-perf="on"][data-perf="on"] .kb-ai-bar-row,
+[data-perf="on"][data-perf="on"] body.has-custom-bg .kb-surface,
+[data-perf="on"][data-perf="on"] body.has-custom-bg .kb-surface-tint,
+[data-perf="on"][data-perf="on"] body.has-custom-bg .kb-surface-clear,
+[data-perf="on"][data-perf="on"] body.has-custom-bg .ant-layout-content .ant-card,
+[data-perf="on"][data-perf="on"] body.has-custom-bg .activity-bar,
+[data-perf="on"][data-perf="on"] body.has-custom-bg .anchor-page-nav {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* 卡片 hover 的上浮位移会强制单卡进入独立合成层，软件渲染下同样添开销，一并关掉 */
+[data-perf="on"][data-perf="on"] .ant-card:hover {
+  transform: none;
+}

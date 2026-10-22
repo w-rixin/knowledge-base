@@ -9,6 +9,7 @@ import { RootErrorBoundary } from "@/components/ui/RootErrorBoundary";
 import { loadThemeFromStore, useAppStore } from "@/store";
 import { loadHomeWidgetPrefs } from "@/store/homeWidgets";
 import "./styles/global.css";
+import { initPerfMode } from "@/lib/perfMode";
 
 // 只有主窗口才需要走"启动锁"门禁；子窗口（quick-add / 紧急提醒 / pop-out 等）
 // 都是从已解锁的会话里派生出来的，不重复拦截。label 取不到时按主窗处理（保守不漏挡）。
@@ -155,6 +156,11 @@ function showFatalDomFallback(e: unknown) {
     'border:none;border-radius:6px;background:#1677ff;color:#fff;cursor:pointer;">重新加载</button>' +
     "</div></div>";
 }
+
+// 自动性能模式：探测软件渲染，命中则给 <html> 打 data-perf="on"，由 CSS 剥离
+// backdrop-filter 毛玻璃（llvmpipe 下每处模糊都是逐帧全区域着色器开销，是滚动/
+// 拖动卡顿的主因）。同步、只读，须在首屏渲染前跑完，避免先渲染模糊再摘掉的闪烁。
+initPerfMode();
 
 loadThemeFromStore()
   .then(async () => {
