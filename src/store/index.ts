@@ -77,8 +77,34 @@ export type ActiveView =
 
 /** SidePanel 宽度范围（px），避免用户拖到极端值 */
 export const SIDE_PANEL_MIN_WIDTH = 200;
-export const SIDE_PANEL_MAX_WIDTH = 480;
-export const SIDE_PANEL_DEFAULT_WIDTH = 240;
+/**
+ * 硬上限：3440 带鱼屏上 720px 约占 21%，再宽就该轮到内容区难受了。
+ * 旧值 480 在带鱼屏上导航面板只占 14%，用户实测"有点窄"（2026-10-22 反馈）。
+ */
+export const SIDE_PANEL_MAX_WIDTH = 720;
+/**
+ * 兼容迁移用：旧版硬上限。hydrate 时发现持久化宽度顶到旧上限，说明用户当时
+ * 「想更宽但被拦住」→ 直接放到新上限，不用用户手动再拖一次。
+ */
+export const SIDE_PANEL_LEGACY_MAX_WIDTH = 480;
+export const SIDE_PANEL_DEFAULT_WIDTH = 360;
+
+/**
+ * SidePanel 实际可用最大宽度：随窗口宽度自适应，封顶 SIDE_PANEL_MAX_WIDTH。
+ * 固定上限在小窗（默认 1524）上会吃掉小半个内容区，故按窗口宽 32% 收敛：
+ * - 3440 带鱼屏 → 720（顶到硬上限）
+ * - 1920 → 614；1524 → 487（与旧硬上限 480 基本持平，小窗体验不变）
+ * - 1180（自动收起阈值）→ 377
+ */
+export function sidePanelMaxWidth(winWidth?: number): number {
+  const w =
+    winWidth ??
+    (typeof window !== "undefined" ? window.innerWidth : 1524);
+  return Math.min(
+    SIDE_PANEL_MAX_WIDTH,
+    Math.max(SIDE_PANEL_MIN_WIDTH, Math.floor(w * 0.32)),
+  );
+}
 
 /** 最近搜索历史保留条数 */
 const RECENT_SEARCHES_MAX = 10;
@@ -1218,7 +1244,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set({
       sidePanelWidth: Math.max(
         SIDE_PANEL_MIN_WIDTH,
-        Math.min(SIDE_PANEL_MAX_WIDTH, Math.round(width)),
+        Math.min(sidePanelMaxWidth(), Math.round(width)),
       ),
     }),
   setSidePanelVisible: (visible) => set({ sidePanelVisible: visible }),
@@ -1785,7 +1811,11 @@ export async function loadThemeFromStore() {
     // 恢复 SidePanel 宽度与可见性（Activity Bar 模式偏好）
     const spw = await store.get<number>("sidePanelWidth");
     if (typeof spw === "number" && Number.isFinite(spw)) {
-      useAppStore.getState().setSidePanelWidth(spw);
+      // 顶到旧上限（480）= 用户当时想更宽被拦住 → 迁移到新上限；
+      // 其余值（含未拖拽过的默认 240→新默认 360 由 store 初值负责）原样恢复。
+      const migrated =
+        spw >= SIDE_PANEL_LEGACY_MAX_WIDTH ? sidePanelMaxWidth() : spw;
+      useAppStore.getState().setSidePanelWidth(migrated);
     }
     const spv = await store.get<boolean>("sidePanelVisible");
     if (typeof spv === "boolean") {

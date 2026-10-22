@@ -12,8 +12,8 @@ import { resolveOpenMdMode } from "@/lib/openMdChoice";
 import { useAppStore } from "@/store";
 import {
   SIDE_PANEL_MIN_WIDTH,
-  SIDE_PANEL_MAX_WIDTH,
   SIDE_PANEL_DEFAULT_WIDTH,
+  sidePanelMaxWidth,
 } from "@/store";
 import { getThemesByCategory } from "@/theme/tokens";
 import type { ThemeMode } from "@/theme/tokens";
@@ -241,7 +241,7 @@ export function AppLayout() {
       function onMove(ev: MouseEvent) {
         const next = Math.max(
           SIDE_PANEL_MIN_WIDTH,
-          Math.min(SIDE_PANEL_MAX_WIDTH, startW + (ev.clientX - startX)),
+          Math.min(sidePanelMaxWidth(), startW + (ev.clientX - startX)),
         );
         pendingWidth = next;
         if (rafId == null) {
