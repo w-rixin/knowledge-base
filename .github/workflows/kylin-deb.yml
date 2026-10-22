@@ -67,17 +67,55 @@ jobs:
         shell: bash
         run: |
           export DEBIAN_FRONTEND=noninteractive
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            build-essential pkg-config \
-            git curl ca-certificates jq file patchelf zstd python3 openssl xz-utils \
-            libwebkit2gtk-4.0-dev \
-            libjavascriptcoregtk-4.0-dev \
-            libsoup2.4-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            libxdo-dev \
-            libssl-dev
+          # 🔴 focal 已 EOL（标准支持 2025-04 终止）：arm64 容器默认源
+          #    （ports.ubuntu.com）对 focal 的供给时好时坏 —— run 13 / run 15
+          #    实锤 apt-get update 间歇失败（同一份 YAML，run 12/14 又能过），
+          #    重跑赌运气不可接受。三重兜底：
+          #    ① 默认源重试 3 次（每次 Acquire::Retries=3，扛瞬时网络抖动）
+          #    ② 换 old-releases.ubuntu.com（EOL 发行的正式归宿）再重试 3 次
+          #    ③ 全败才 exit 1 —— 宁可早失败，不带着坏环境往下跑 20 分钟
+          apt_update_ok=0
+          for attempt in 1 2 3; do
+            if apt-get update -o Acquire::Retries=3; then apt_update_ok=1; break; fi
+            echo "::warning::[apt] apt-get update 第 ${attempt} 次失败，5s 后重试"
+            sleep 5
+          done
+          if [ "${apt_update_ok}" -eq 0 ]; then
+            echo "::warning::[apt] 默认源持续失败，切换 old-releases.ubuntu.com 重试"
+            sed -i -e 's|http://ports.ubuntu.com|http://old-releases.ubuntu.com|g' \
+                   -e 's|http://archive.ubuntu.com|http://old-releases.ubuntu.com|g' \
+                   -e 's|http://security.ubuntu.com|http://old-releases.ubuntu.com|g' \
+                   /etc/apt/sources.list
+            for attempt in 1 2 3; do
+              if apt-get update -o Acquire::Retries=3; then apt_update_ok=1; break; fi
+              echo "::warning::[apt] old-releases 源第 ${attempt} 次失败，5s 后重试"
+              sleep 5
+            done
+          fi
+          if [ "${apt_update_ok}" -eq 0 ]; then
+            echo "::error::[apt] apt-get update 全部策略失败（默认源 3 次 + old-releases 3 次）"
+            exit 1
+          fi
+          # install 也给重试：单个包 fetch 失败不该让整轮构建白跑
+          apt_install_ok=0
+          for attempt in 1 2; do
+            if apt-get install -y --no-install-recommends \
+              build-essential pkg-config \
+              git curl ca-certificates jq file patchelf zstd python3 openssl xz-utils \
+              libwebkit2gtk-4.0-dev \
+              libjavascriptcoregtk-4.0-dev \
+              libsoup2.4-dev \
+              libappindicator3-dev \
+              librsvg2-dev \
+              libxdo-dev \
+              libssl-dev; then apt_install_ok=1; break; fi
+            echo "::warning::[apt] apt-get install 第 ${attempt} 次失败，5s 后重试"
+            sleep 5
+          done
+          if [ "${apt_install_ok}" -eq 0 ]; then
+            echo "::error::[apt] apt-get install 重试后仍失败"
+            exit 1
+          fi
           # libappindicator3-dev 与 libayatana-appindicator3-dev 在 22.04 上
           # 互相 Conflicts（run 7 实锤），只装前者。编译期其实两者都不需要
           # （libappindicator-sys 0.7.3 纯 dlopen），dev 包只为
