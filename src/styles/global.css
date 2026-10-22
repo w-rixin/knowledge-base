@@ -453,6 +453,27 @@ body,
   }
 }
 
+/* 超宽屏（≥3000px，如 3440×1440 带鱼屏）专项放宽（用户实测反馈）：
+   上面两条 :not([data-outline]) / [data-outline] 规则 specificity 都是 (0,3,0)，
+   把 1800/2200 的媒体查询（0,1,0）全程压住，导致带鱼屏上正文列被 1600 上限卡死，
+   两侧各留近 800px 死白，编辑窗被挤到视觉右侧（左侧还有日历面板把内容区推右）。
+   这里用同 specificity + 靠后的顺序取胜，仅影响 ≥3000px 的屏：
+   上限放到 2200，两侧死白从 ~776px 收到 ~476px；窄屏行为完全不变。
+   选 2200 而不是直接铺满：中文正文 ~130 字/行是可读上限，再宽就成"txt 横扫"。
+   注意本规则必须排在 429-437 与 395-418 两条之后（同特异性靠顺序取胜）。 */
+@media (min-width: 3000px) {
+  .editor-body:not([data-outline="on"]) > .editor-content-area,
+  .editor-body[data-outline="on"] > .editor-content-area {
+    max-width: max(
+      var(--editor-reading-width, 820px),
+      min(
+        calc(100% - var(--editor-outline-gutter, 24px) * 2),
+        2200px
+      )
+    );
+  }
+}
+
 /* ───────────────────────────────────────────────────────────
    编辑器版面观感（由 store applyEditorLayout 写 :root data-* 属性驱动）
    目标：摆脱"书写手感像 txt"，靠拢 OneNote / Notion 的"在纸上写"质感。
