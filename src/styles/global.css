@@ -3033,3 +3033,14 @@ body,
 [data-perf="on"][data-perf="on"] .ant-card:hover {
   transform: none;
 }
+
+/* 过渡动画（hover 高亮 / 展开收起 / 列表项淡入 / 平滑滚动）在软件渲染下每帧重绘，
+   是"模糊之外"的次要卡顿源；性能模式下把所有 transition 压成瞬时、关掉平滑滚动，
+   交互即点即应。仅 !important 覆盖 antd 默认 transition（非 !important），好机器
+   不受影响。保留 keyframe 动画（loading 转圈、弹层入场），开销极小且不破坏加载态
+   可读性与入场体验。 */
+[data-perf="on"][data-perf="on"] * {
+  transition-duration: 0.001ms !important;
+  transition-delay: 0ms !important;
+  scroll-behavior: auto !important;
+}
