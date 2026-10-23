@@ -3044,3 +3044,14 @@ body,
   transition-delay: 0ms !important;
   scroll-behavior: auto !important;
 }
+
+/* 编辑器容器隔离：contenteditable 每次按键，浏览器都要对改动区域做 layout+paint，
+   软件渲染（llvmpipe）下 paint 范围越广越慢。给编辑器外层包装容器加
+   contain:layout style paint，把重绘锁定在编辑器子树内、不波及整页（侧栏/顶栏/
+   其他面板），是老 WebKit JSC 上 contenteditable 最稳的一档优化。仅 data-perf=on。
+   注意：故意不加在 .ProseMirror 本体上——避免影响 IME 合成与选区渲染；只加到其
+   外层 .tiptap-wrapper + CodeMirror 根 .cm-editor。 */
+[data-perf="on"][data-perf="on"] .tiptap-wrapper,
+[data-perf="on"][data-perf="on"] .cm-editor {
+  contain: layout style paint;
+}
